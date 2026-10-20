@@ -8,7 +8,7 @@ There is no registry and no Go module. A person installs the attested tarball (s
 
 ## What a release is
 
-- `judgment-pack-devkit-<version>.tgz`: `bin/`, `lib/`, `templates/`, `config/`, `scripts/`, `docs/`,
+- `judgment-pack-devkit-<version>.tgz`: `bin/`, `lib/`, `templates/`, `config/`, `scripts/`, `docs/`, `examples/`,
   `README.md`, `LICENSE` and `NOTICE` of the tagged commit, in one directory named
   `judgment-pack-devkit-<version>/`, where `<version>` is the tag without its `v`. The tarball is
   written with `git archive` and `gzip -n`, so the same commit gives the same bytes.
@@ -183,7 +183,7 @@ The packing is reproducible, so the digests are equal:
 
 ```sh
 git -C devkit archive --format=tar --prefix=judgment-pack-devkit-<version>/ '<tag>^{commit}' \
-  bin lib templates config scripts docs README.md LICENSE NOTICE | gzip -n -9 > rebuilt.tgz
+  bin lib templates config scripts docs examples README.md LICENSE NOTICE | gzip -n -9 > rebuilt.tgz
 sha256sum rebuilt.tgz judgment-pack-devkit-<version>.tgz
 ```
 
