@@ -3,7 +3,7 @@
 set -u
 here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 kit=$(dirname "$here")
-# shellcheck source=../lib/common.sh
+# shellcheck source=lib/common.sh
 . "$kit/lib/common.sh"
 jpdev_load_config
 

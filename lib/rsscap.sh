@@ -5,7 +5,7 @@
 # For programs an address-space cap (ulimit -v) breaks, such as vite and vitest.
 # Exit: the command's own status; 137 when stopped for memory; 124 for time.
 set -u
-[ $# -ge 4 ] && [ "$3" = "--" ] || { echo "usage: rsscap.sh MAX_MB TIMEOUT_S -- command..." >&2; exit 2; }
+if ! { [ $# -ge 4 ] && [ "$3" = "--" ]; }; then echo "usage: rsscap.sh MAX_MB TIMEOUT_S -- command..." >&2; exit 2; fi
 max_mb=$1; tmo=$2; shift 3
 setsid "$@" &
 pid=$!

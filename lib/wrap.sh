@@ -9,11 +9,11 @@
 # JPDEV_NODE_BIN, when set, is put first on PATH; so is <clone>/.venv/bin for python.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=common.sh
+# shellcheck source=lib/common.sh
 . "$here/common.sh"
 jpdev_load_config
 
-[ $# -ge 3 ] && [ "$2" = "--" ] || { echo "usage: wrap.sh TOOLCHAIN -- command..." >&2; exit 2; }
+if ! { [ $# -ge 3 ] && [ "$2" = "--" ]; }; then echo "usage: wrap.sh TOOLCHAIN -- command..." >&2; exit 2; fi
 toolchain=$1; shift 2
 step_timeout=${JPDEV_STEP_TIMEOUT:-}
 

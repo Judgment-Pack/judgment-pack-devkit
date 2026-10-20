@@ -17,7 +17,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -x bin/* lib/*.sh templates/*.sh scripts/*.sh tests/*.sh tests/fixture/*.sh
+        run: shellcheck -x -P ".:SCRIPTDIR" bin/* lib/*.sh templates/*.sh scripts/*.sh tests/*.sh tests/fixture/*.sh
       - name: bash -n
         run: |
           set -eu
