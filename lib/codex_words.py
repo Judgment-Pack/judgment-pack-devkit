@@ -4,7 +4,9 @@
 A word file holds one entry per line: TERM or TERM => the neutral phrasing to use instead.
 Lines that start with # and blank lines are ignored. A TERM matches case-insensitively at the
 start of a word, with any letters after it, and a TERM of several words matches across any run
-of whitespace. A word file that does not exist is skipped (the config may extend the list).
+of whitespace and hyphens (so a term wrapped over two lines, or written with hyphens, is found;
+the line reported is the line the match starts on). Evasion inside a single word (a letter
+replaced or inserted) is out of scope: this is a vocabulary check, not a filter. A word file that does not exist is skipped (the config may extend the list).
 Prints one line per hit and exits 1 when there is any, 0 when the brief is clean, 2 on a
 usage or read error.
 """
@@ -43,14 +45,15 @@ def main(argv):
     except OSError as err:
         print("codex_words.py: %s" % err, file=sys.stderr)
         return 2
+    text = "\n".join(lines)
     hits = 0
     for term, suggestion in entries:
         words = [re.escape(part) for part in term.split()]
-        pattern = re.compile(r"(?<![A-Za-z0-9])" + r"\s+".join(words) + r"[A-Za-z]*", re.IGNORECASE)
-        for number, text in enumerate(lines, 1):
-            for found in pattern.finditer(text):
-                hits += 1
-                print('line %d: "%s": %s' % (number, found.group(0), suggestion))
+        pattern = re.compile(r"(?<![A-Za-z0-9])" + r"[\s-]+".join(words) + r"[A-Za-z]*", re.IGNORECASE)
+        for found in pattern.finditer(text):
+            hits += 1
+            number = text.count("\n", 0, found.start()) + 1
+            print('line %d: "%s": %s' % (number, " ".join(found.group(0).split()), suggestion))
     return 1 if hits else 0
 
 

@@ -457,7 +457,7 @@ codex_publish() {
     printf '  %s\n' "$stray"
   fi
   [ "$push" -eq 1 ] || exit 0
-  cmd_push "$branch" || { local st=$?; echo "jpdev codex run: the push failed; the commit $sha is local" >&2; exit "$st"; }
+  (cmd_push "$branch") || { local st=$?; echo "jpdev codex run: the push failed; the commit $sha is local" >&2; exit "$st"; }
   echo "== jpdev codex run: pushed $branch =="
   [ "$pr" -eq 1 ] || exit 0
   gh pr create --repo "$repo" --base "$base" --head "$branch" --title "$subject" --body-file pr.md || { local st=$?; echo "jpdev codex run: opening the pull request failed; the branch is pushed" >&2; exit "$st"; }

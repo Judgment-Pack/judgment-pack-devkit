@@ -357,6 +357,7 @@ mkdir -p "$work/gitstub"
 cat > "$work/gitstub/git" <<STUB
 #!/usr/bin/env bash
 for a in "\$@"; do
+  if [ "\$a" = check-ref-format ] && [ -n "\${STUB_GIT_FAIL_REF:-}" ]; then exit 1; fi
   if [ "\$a" = push ]; then echo x >> "\$STUB_GIT_ARGS.calls"; printf '%s\\0' "\$@" > "\$STUB_GIT_ARGS"; exit "\${STUB_GIT_EXIT:-0}"; fi
 done
 exec $real_git "\$@"
@@ -510,6 +511,16 @@ while IFS= read -r line; do
   [ -z "${term_failed:-}" ] || true
 done < "$kit/config/codex-words.txt"
 if [ "$n" -ge 20 ]; then ok "check-brief refuses each of the $n terms of config/codex-words.txt"; else bad "the base word list holds at least 20 terms" "$n"; fi
+printf 'Guard against a prompt\ninjection in the page,\nand a prompt-injection in a tool result, and a Prompt  -  Injection.\nA denial-of-service limit and a denial of\nservice limit.\n' > "$work/wrapped-brief.md"
+out=$("$jpdev" codex check-brief "$work/wrapped-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief finds a term wrapped over two lines, reported at its first line" 1 'line 1: "prompt injection"' "$out" "$s"
+expect "check-brief finds a hyphenated term" 1 'line 3: "prompt-injection"' "$out" "$s"
+expect "check-brief finds a term with mixed spaces and hyphens" 1 'line 3: "Prompt - Injection"' "$out" "$s"
+expect "check-brief finds a hyphenated three-word term" 1 'line 4: "denial-of-service"' "$out" "$s"
+expect "check-brief finds a three-word term wrapped over two lines" 1 'line 4: "denial of service"' "$out" "$s"
+printf 'The prompt and the injection of values are separate words.\n' > "$work/apart-brief.md"
+out=$("$jpdev" codex check-brief "$work/apart-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief does not join words that are not adjacent" 0 'no word of the filter list' "$out" "$s"
 printf 'extra-term => say it plainly\n' > "$work/extra-words.txt"
 printf 'Handle the extra-term case.\n' > "$work/extra-brief.md"
 out=$("$jpdev" codex check-brief "$work/extra-brief.md" 2>&1) && s=0 || s=$?
@@ -583,6 +594,15 @@ if [ "$(cx_calls "$STUB_GIT_ARGS.calls")" = 1 ] && [ "$(tr '\0' ' ' < "$STUB_GIT
 if [ "$(cx_calls "$STUB_GH_CALLS")" = 1 ]; then ok "one gh pr create call"; else bad "one gh pr create call"; fi
 if [ "$(tr '\0' ' ' < "$STUB_GH_ARGS")" = "pr create --repo Example/repo --base main --head work --title Add the line --body-file pr.md " ]; then ok "the pull request is made with --repo, --base, the subject and pr.md"; else bad "the pull request is made with --repo, --base, the subject and pr.md" "$(tr '\0' ' ' < "$STUB_GH_ARGS")"; fi
 expect "the pull request body is pr.md" 0 '^Closes #1\.$' "$(cat "$STUB_GH_BODY")" 0
+
+cx_reset
+out=$(STUB_GIT_EXIT=3 STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "a failed push returns git's status and says the commit is local" 3 'the push failed; the commit [0-9a-f]+ is local' "$out" "$s"
+if [ "$(cx_calls "$STUB_GH_CALLS")" = 0 ]; then ok "a failed push opens no pull request"; else bad "a failed push opens no pull request"; fi
+cx_reset
+out=$(STUB_GIT_FAIL_REF=1 STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "a push that dies before git push still says the commit is local" 2 'the push failed; the commit [0-9a-f]+ is local' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 1 ]; then ok "the commit is kept when the push fails"; else bad "the commit is kept when the push fails"; fi
 
 cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-trailer.txt cx_run) && s=0 || s=$?
