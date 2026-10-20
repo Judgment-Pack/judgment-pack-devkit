@@ -18,7 +18,26 @@ are the ones a brief does not repeat.
   suites CI runs. It reads the diff, builds the change once, runs the probes it writes to test
   a claim, and breaks each safeguard the change adds (`jpdev mutants`) to see that a test
   notices. A safeguard whose test passes with the safeguard removed is a finding.
-- **Each commit is signed off, no history is rewritten.** Pushes are never forced.
+- **Each commit is signed off, no history is rewritten.** Pushes are never forced, and go
+  through the `gh` credential helper (`jpdev push`), never a stored credential.
+
+## Who builds and who reviews
+
+- **Codex builds non-boundary issues** from accepted designs and briefs, and Claude reviews
+  them.
+- **Claude builds boundary decisions** (the architecture decision records that set a security
+  boundary), and Codex reviews them when its quota allows.
+- A Codex build runs from a brief with `jpdev codex run`: the model and the effort are always
+  passed, the sandbox is `workspace-write` with network access, stdin is closed, and the prompt
+  names the repository's `AGENTS.md` as the rules. Codex cannot write `.git` in that sandbox, so
+  it does not commit: it writes `msg.txt` and `pr.md` (the brief skeleton from
+  `jpdev codex brief-template` says so), and `jpdev codex run` commits the tracked changes with
+  a sign-off, pushes through the `gh` credential helper and opens the pull request from those two
+  files. `danger-full-access` is chosen explicitly or not at all.
+- A brief describes the documented refusal the code must produce (the input, and the exact
+  refusal), not the attack the refusal answers: the content filter of the Codex service can
+  refuse a brief that names attacks as verbs or nouns. `jpdev codex check-brief` refuses such a
+  brief before the run, and `jpdev codex run` runs the same check first.
 
 ## Reviews
 

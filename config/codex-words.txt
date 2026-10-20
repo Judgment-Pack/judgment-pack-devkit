@@ -1,0 +1,39 @@
+# The kit's base list for `jpdev codex check-brief`: words that name attacks on systems or
+# people, as verbs or nouns, which trip the content filter of the Codex service.
+# One entry per line: TERM or TERM => the neutral phrasing to use instead.
+# A TERM is matched case-insensitively at the start of a word, so "attack" also matches
+# "attacker" and "attacking"; a TERM of several words matches across any run of spaces.
+# Lines starting with # and blank lines are ignored.
+# A person extends the list in the file named by JPDEV_CODEX_WORDS (config/env.example).
+#
+# Describe the documented refusal instead: the input the code receives, and the exact
+# refusal (error, status or message) it must produce.
+
+attack => describe the input the code receives and the refusal it must produce
+exploit => describe the malformed or unexpected input and the documented refusal
+hack => describe the unsupported use and the refusal that documents it
+breach => describe the boundary and the check that must hold at it
+malicious => describe the input as unexpected, unsupported or not allowed
+hostile => describe the input as unexpected, unsupported or not allowed
+adversar => describe the input as unexpected or not allowed, and the refusal
+jailbreak => describe the instruction the model must not follow and the refusal
+prompt injection => describe the untrusted text in the input and the refusal that keeps it from acting as an instruction
+code injection => describe the untrusted text in the input and the refusal
+sql injection => describe the untrusted text in the input and the refusal
+malware => describe the file or input the code must refuse
+ransomware => describe the file or input the code must refuse
+trojan => describe the file or input the code must refuse
+backdoor => describe the access path that must not exist and the check that closes it
+phish => describe the message or link the code must refuse
+spoof => describe the identity claim that the check must reject
+exfiltrat => describe the data that must not leave and the check that stops it
+sabotage => describe the state that must not change and the check that holds it
+poison => describe the input that must be rejected before it is stored
+weaponiz => describe the use the code must refuse
+privilege escalation => describe the permission that must not be granted and the check
+denial of service => describe the limit the code enforces and the refusal past it
+brute force => describe the limit on repeated attempts and the refusal past it
+intrud => describe the access that must be refused
+harass => describe the content the code must refuse
+stalk => describe the content the code must refuse
+doxx => describe the personal data that must not be published
