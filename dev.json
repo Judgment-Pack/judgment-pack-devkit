@@ -1,0 +1,13 @@
+{
+  "$schema": "./templates/dev.schema.json",
+  "version": 1,
+  "checks": [
+    {"name": "diff-check", "run": "git diff --check \"$(git hash-object -t tree /dev/null)\"", "toolchain": "shell"},
+    {"name": "local-paths", "run": "if git grep -nE '(^|[^A-Za-z0-9_])/(home|tmp)/[A-Za-z0-9_.-]+'; then echo 'a machine-local path is in tracked text'; exit 1; fi", "toolchain": "shell"},
+    {"name": "agent-docs", "run": "scripts/sync-agent-docs.sh --check && scripts/sync-agent-docs.sh --check . && head -c \"$(wc -c < templates/AGENTS.md)\" AGENTS.md | cmp - templates/AGENTS.md", "toolchain": "shell", "summary": "^sync-agent-docs:"},
+    {"name": "bash-n", "run": "set -eu; for file in bin/* lib/*.sh templates/*.sh scripts/*.sh scripts/dev/*.sh tests/*.sh tests/fixture/*.sh; do bash -n \"$file\"; done; echo 'bash -n: every script parses'", "toolchain": "shell", "summary": "^bash -n:"},
+    {"name": "json", "run": "python3 -I -c 'import glob, json; files = sorted(glob.glob(\"*.json\") + glob.glob(\"templates/*.json\") + glob.glob(\"examples/*.json\") + glob.glob(\"tests/fixture/*.json\")); [json.load(open(f, encoding=\"utf-8\")) for f in files]; print(\"parsed %d JSON documents\" % len(files))'", "toolchain": "shell", "summary": "^parsed "},
+    {"name": "shellcheck", "run": "shellcheck -x -P \".:SCRIPTDIR\" bin/* lib/*.sh templates/*.sh scripts/*.sh scripts/dev/*.sh tests/*.sh tests/fixture/*.sh && echo 'shellcheck: clean'", "toolchain": "shell", "summary": "^shellcheck:"},
+    {"name": "tests", "run": "tests/run.sh", "toolchain": "shell", "summary": "^[0-9]+ passed, [0-9]+ failed", "timeout": 900}
+  ]
+}

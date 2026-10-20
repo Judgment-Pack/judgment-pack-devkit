@@ -11,19 +11,56 @@ needs, its setup steps and its checks. The kit holds the schema, the public runn
 repository vendors, the agent instructions every repository carries, the CI step list and the
 operating policy.
 
+## Public
+
+This repository is public. It is for the people and agent sessions who work on the Judgment Pack
+repositories, and for anyone who wants the same pattern in their own: a repository lists its checks
+in one manifest, anyone can run them with one vendored script and python3 alone, and a machine that
+installs the kit adds resource caps and a lock around the same steps. Machine settings never live in
+the kit: paths, caps and the list of names a posted record must not carry are read from the
+person's own config file and environment (`config/env.example` documents each), and a tracked file
+holds no path of any machine. See [CONTRIBUTING.md](CONTRIBUTING.md) to help,
+[SECURITY.md](SECURITY.md) to report a vulnerability, and [docs/policy.md](docs/policy.md) for how
+agent work on these repositories is run.
+
 ## Install
+
+From a release, after verifying it (the commands are in [docs/releasing.md](docs/releasing.md)):
+
+```sh
+gh release download vX.Y.Z --repo Judgment-Pack/judgment-pack-devkit --dir release
+sha256sum --check --strict release/checksums.txt
+tar -xzf release/judgment-pack-devkit-X.Y.Z.tgz
+ln -s "$PWD/judgment-pack-devkit-X.Y.Z/bin/jpdev" ~/.local/bin/jpdev
+```
+
+From a clone:
 
 ```sh
 git clone https://github.com/Judgment-Pack/judgment-pack-devkit
 cd judgment-pack-devkit
 ln -s "$PWD/bin/jpdev" ~/.local/bin/jpdev
+```
+
+Then the settings, which are optional:
+
+```sh
 mkdir -p ~/.config/jpdev && cp config/env.example ~/.config/jpdev/env
 jpdev env
 ```
 
+## Releases
+
+Each release is a tarball and its `checksums.txt`, built by
+[`release.yml`](.github/workflows/release.yml) from a signed tag on `main`, attested with a
+build-provenance attestation, and published only after a maintainer approves it.
+`gh attestation verify` checks a file against the workflow and the tag; the exact command, and what
+the workflow does at each step, are in [docs/releasing.md](docs/releasing.md).
+
 Needs bash 5, git, gh (logged in), python3, rsync and, for Go steps, flock. Node versions are
 read from nvm; a python version the manifest names is read from `python3.N` on PATH or from
-pyenv.
+pyenv; a Go version the manifest names is the go on PATH when it matches, else one under
+`JPDEV_GO_SDK_DIR`, and `jpdev` says so when none does.
 
 ## Settings
 
@@ -38,13 +75,14 @@ the same name overrides it. `config/env.example` documents each setting with its
 | `JPDEV_GO_ULIMIT_KB`, `JPDEV_GO_TIMEOUT_S` | 12000000, 3000 | the Go address-space cap and timeout |
 | `JPDEV_PY_ULIMIT_KB` | 4000000 | the python address-space cap |
 | `JPDEV_NVM_DIR` | `$NVM_DIR` or `~/.nvm` | where node versions live |
+| `JPDEV_GO_SDK_DIR` | `~/sdk` | where a Go release the manifest names is looked for, when the go on PATH is another (`sdk/go1.26.5/bin/go`) |
 | `JPDEV_NAME_PATTERNS` | `~/.config/jpdev/name-patterns` | regexes the record gate refuses |
 
 ## Commands
 
 - `jpdev setup DIR [--repo OWNER/NAME] [--branch NAME] [--base origin/main] [--manifest FILE]`:
   clones with `gh repo clone` (or reuses `DIR`), makes the branch from the base, selects the
-  manifest's toolchains (node by nvm version, go, python and its virtual environment), runs the
+  manifest's toolchains (node by nvm version, go by its version when the manifest names one, python and its virtual environment), runs the
   setup steps under the caps and prints one summary block.
 - `jpdev check [--only NAME,...] [--skip NAME,...] [--all] [--manifest FILE]`: runs the checks in
   order, each under its toolchain's cap, and stops at the first failure unless `--all`. The
@@ -66,8 +104,12 @@ the same name overrides it. `config/env.example` documents each setting with its
 | --- | --- |
 | `node` | `lib/rsscap.sh`: the process group's resident memory and a timeout; never `ulimit -v`, which breaks vite and vitest |
 | `go` | `flock` on the machine lock, `ulimit -v`, `GOFLAGS=-mod=mod`, a per-clone `GOCACHE`, `timeout` |
-| `python` | `ulimit -v` and `timeout`; the clone's virtual environment first on PATH |
-| `shell` | none |
+| `python` | `ulimit -v` and `timeout` |
+| `shell` | `timeout` only |
+
+When the manifest declares a virtual environment, its `bin` is first on PATH for every step, whatever
+the step's toolchain (the toolchain still decides the cap), so a node or Go step that runs a python
+script uses the environment's interpreter and packages.
 
 ## What is here
 
@@ -81,5 +123,8 @@ the same name overrides it. `config/env.example` documents each setting with its
   repository adopts the kit. `examples/judgment-pack-agent.dev.json`: a worked manifest.
 - `tests/run.sh`: the kit's own tests (`tests/fixture/` holds a manifest of shell echoes and one
   deliberate failure).
+- `dev.json`, `scripts/dev/check.sh`, `AGENTS.md`, `CLAUDE.md`: the kit on itself, the list of checks
+  CI runs. `CONTRIBUTING.md`, `SECURITY.md`, `docs/releasing.md`: contributing, reporting and
+  releasing.
 
 Apache-2.0; see `LICENSE`.
