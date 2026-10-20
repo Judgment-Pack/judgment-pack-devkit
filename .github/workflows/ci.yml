@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -x -P ".:SCRIPTDIR" bin/* lib/*.sh templates/*.sh scripts/*.sh tests/*.sh tests/fixture/*.sh
+      - name: bash -n
+        run: |
+          set -eu
+          for file in bin/* lib/*.sh templates/*.sh scripts/*.sh tests/*.sh tests/fixture/*.sh; do
+            bash -n "$file"
+          done
+      - name: CLAUDE.md is generated from AGENTS.md
+        run: scripts/sync-agent-docs.sh --check
+      - name: The JSON and YAML documents parse
+        run: |
+          set -eu
+          python3 -c '
+          import glob, json
+          for path in glob.glob("templates/*.json") + glob.glob("examples/*.json") + glob.glob("tests/fixture/*.json"):
+              json.load(open(path, encoding="utf-8"))
+              print("parsed " + path)'
+      - name: No machine-local paths in tracked text
+        run: |
+          set -eu
+          if git grep -nE '(^|[^A-Za-z0-9_])/(home|tmp)/[A-Za-z0-9_.-]+'; then
+            echo 'a machine-local path is in tracked text'; exit 1
+          fi
+      - name: Whitespace
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The kit's tests (jpdev check and check.sh on the fixture, the caps, the record gate)
+        run: tests/run.sh

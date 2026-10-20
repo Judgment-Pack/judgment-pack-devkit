@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# jpdev: the development kit of the Judgment Pack repositories. See README.md.
+set -u
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+kit=$(dirname "$here")
+# shellcheck source=lib/common.sh
+. "$kit/lib/common.sh"
+jpdev_load_config
+
+usage() {
+  cat <<'USAGE'
+usage: jpdev COMMAND [ARGS]
+  setup DIR [--repo OWNER/NAME] [--branch NAME] [--base origin/main] [--manifest FILE]
+                     clone (or reuse) a repository, make the branch, select the toolchains
+                     the manifest names, and run its setup steps under the caps
+  check [--only A,B] [--skip A,B] [--all] [--manifest FILE]
+                     run the manifest's checks in order under the caps; exit status = failures
+  mutants --row TEXT [--row TEXT]...
+                     run the manifest's mutants command on a scratch copy of the clone
+  record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run] [--no-name-check]
+                     reduce local paths, refuse a path, a name pattern, a missing or invalid
+                     name-pattern file, then post the file
+  env                print the effective settings and where each came from
+  --version          print the version
+USAGE
+}
+
+need_value() { [ $# -ge 2 ] || jpdev_die "$1 needs a value"; }
+
+repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null || jpdev_die "not inside a git clone"
+}
+
+cmd_check() {
+  local root manifest="" passthru=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --manifest) need_value "$@"; manifest=$2; shift 2 ;;
+      --only | --skip) need_value "$@"; passthru+=("$1" "$2"); shift 2 ;;
+      --all) passthru+=(--all); shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) jpdev_die "check: unknown argument $1" ;;
+    esac
+  done
+  root=$(repo_root)
+  : "${manifest:=$root/dev.json}"
+  jpdev_prepare_run "$root" "$manifest"
+  local script=$root/scripts/dev/check.sh
+  [ -x "$script" ] || script=$kit/templates/check.sh
+  local logdir
+  logdir=$JPDEV_SCRATCH/logs/$(basename "$root")-$(date +%Y%m%dT%H%M%S)
+  export JPDEV_LOGDIR=$logdir
+  "$script" --manifest "$manifest" "${passthru[@]}"
+  local status=$?
+  jpdev_log "full output of each check: $logdir"
+  exit "$status"
+}
+
+cmd_setup() {
+  local dir="" repo="" branch="" base=origin/main manifest=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --repo) need_value "$@"; repo=$2; shift 2 ;;
+      --branch) need_value "$@"; branch=$2; shift 2 ;;
+      --base) need_value "$@"; base=$2; shift 2 ;;
+      --manifest) need_value "$@"; manifest=$2; shift 2 ;;
+      -h | --help) usage; exit 0 ;;
+      -*) jpdev_die "setup: unknown argument $1" ;;
+      *) [ -z "$dir" ] || jpdev_die "setup: one directory only"; dir=$1; shift ;;
+    esac
+  done
+  [ -n "$dir" ] || jpdev_die "setup: a directory is needed"
+  if [ ! -e "$dir/.git" ]; then
+    [ -n "$repo" ] || jpdev_die "setup: $dir is not a clone; give --repo OWNER/NAME to clone it"
+    gh repo clone "$repo" "$dir" -- -q || jpdev_die "setup: the clone failed"
+  fi
+  local root
+  root=$(cd "$dir" && git rev-parse --show-toplevel) || jpdev_die "setup: $dir is not a git clone"
+  cd "$root" || exit 2
+  [ -n "$repo" ] || repo=$(git remote get-url origin 2>/dev/null | sed -E 's#^(git@github.com:|https://github.com/)##; s#\.git$##')
+  jpdev_git_net fetch -q origin || jpdev_die "setup: git fetch failed"
+  if [ -n "$branch" ]; then
+    if git show-ref --verify -q "refs/heads/$branch"; then
+      git switch -q "$branch" || jpdev_die "setup: cannot switch to $branch"
+    else
+      git switch -q -c "$branch" "$base" || jpdev_die "setup: cannot create $branch from $base"
+    fi
+  fi
+  : "${manifest:=$root/dev.json}"
+  jpdev_prepare_run "$root" "$manifest"
+  local go_v py_v venv pyv py
+  if [ -n "$(jpdev_manifest_get "$manifest" toolchains go)" ]; then
+    go_v=$(go version 2>/dev/null) || jpdev_die "setup: the manifest names go, which is not on PATH"
+  fi
+  venv=$(jpdev_manifest_get "$manifest" toolchains python venv)
+  pyv=$(jpdev_manifest_get "$manifest" toolchains python version)
+  py=python3
+  if [ -n "$pyv" ]; then
+    py=$(jpdev_python_bin "$pyv") || jpdev_die "setup: the manifest names python $pyv, which is not installed (python$pyv on PATH, or a pyenv version)"
+  fi
+  if [ -n "$venv" ]; then
+    if [ ! -d "$root/$venv" ]; then
+      JPDEV_STEP_TIMEOUT=300 "$JPDEV_WRAP" python -- "$py" -m venv "$root/$venv" || jpdev_die "setup: the virtual environment failed"
+    fi
+    py_v=$("$root/$venv/bin/python" --version 2>&1)
+    grep -qxF "/$venv/" "$root/.git/info/exclude" 2>/dev/null || printf '/%s/\n' "$venv" >> "$root/.git/info/exclude"
+  else
+    py_v=$("$py" --version 2>&1)
+  fi
+  local script=$root/scripts/dev/check.sh
+  [ -x "$script" ] || script=$kit/templates/check.sh
+  JPDEV_LOGDIR=$JPDEV_SCRATCH/logs/$(basename "$root")-setup-$(date +%Y%m%dT%H%M%S)
+  export JPDEV_LOGDIR
+  local block status
+  block=$("$script" --manifest "$manifest" --setup --all)
+  status=$?
+  echo "== jpdev setup =="
+  printf '%-8s %s\n' repo "${repo:-unknown}" dir "$dir" \
+    branch "$(git rev-parse --abbrev-ref HEAD) at $(git rev-parse --short HEAD) (base $base)" \
+    node "${JPDEV_NODE_BIN:+$("$JPDEV_NODE_BIN/node" --version)}" \
+    go "${go_v:-not used}" python "$py_v${venv:+ (virtual environment $venv)}"
+  printf '%s\n' "$block"
+  exit "$status"
+}
+
+cmd_mutants() {
+  local rows=() manifest=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --row) need_value "$@"; rows+=("$2"); shift 2 ;;
+      --manifest) need_value "$@"; manifest=$2; shift 2 ;;
+      -h | --help) usage; exit 0 ;;
+      *) jpdev_die "mutants: unknown argument $1" ;;
+    esac
+  done
+  [ ${#rows[@]} -gt 0 ] || jpdev_die "mutants: at least one --row TEXT is needed"
+  local root run cwd tc tmo
+  root=$(repo_root)
+  : "${manifest:=$root/dev.json}"
+  jpdev_prepare_run "$root" "$manifest"
+  run=$(jpdev_manifest_get "$manifest" mutants run)
+  [ -n "$run" ] || jpdev_die "mutants: the manifest has no mutants command"
+  cwd=$(jpdev_manifest_get "$manifest" mutants cwd); : "${cwd:=.}"
+  tc=$(jpdev_manifest_get "$manifest" mutants toolchain)
+  if [ -z "$tc" ]; then if [ -n "${JPDEV_NODE_BIN:-}" ]; then tc=node; else tc=shell; fi; fi
+  tmo=$(jpdev_manifest_get "$manifest" mutants timeout); : "${tmo:=3000}"
+  copy=$JPDEV_SCRATCH/mutants/$(jpdev_clone_key "$root")-$$
+  mkdir -p "$copy"
+  trap 'rm -rf -- "${copy:?}"' EXIT
+  rsync -a --exclude .git --exclude node_modules --exclude .venv "$root/" "$copy/" || jpdev_die "mutants: the scratch copy failed"
+  local found rel
+  while IFS= read -r found; do
+    rel=${found#"$root"/}
+    mkdir -p "$copy/$(dirname "$rel")"
+    ln -s "$found" "$copy/$rel"
+  done < <(find "$root" -name node_modules -type d -not -path '*/node_modules/*' -not -path "$root/.git/*" -prune -print)
+  local args="" row
+  for row in "${rows[@]}"; do args+=$(printf ' --row %q' "$row"); done
+  local out=$copy/.jpdev-mutants.out
+  (cd "$copy/$cwd" && JPDEV_ROOT=$copy JPDEV_STEP_TIMEOUT=$tmo "$JPDEV_WRAP" "$tc" -- bash -c "${run//\{rows\}/$args}") > "$out" 2>&1
+  local status=$?
+  echo "== jpdev mutants (exit $status of the mutants command) =="
+  python3 -I "$kit/lib/mutants_report.py" "${rows[@]}" < "$out"
+  local missed=$?
+  if [ "$missed" -eq 0 ] && [ "$status" -ne 0 ]; then
+    echo "the command failed with no row reported; its last lines:"; tail -n 20 "$out"
+    missed=1
+  fi
+  exit "$missed"
+}
+
+# reduce_paths FILE prints FILE with the scratch and home directories named as <scratch> and <home>.
+reduce_paths() {
+  python3 -I -c '
+import os, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+pairs = [(sys.argv[2], "<scratch>"), (os.path.realpath(sys.argv[2]), "<scratch>"), (sys.argv[3], "<home>"), (os.path.realpath(sys.argv[3]), "<home>")]
+for old, new in sorted(set(pairs), key=lambda p: -len(p[0])):
+    if old.strip("/"):
+        text = text.replace(old, new)
+sys.stdout.write(text)' "$1" "$JPDEV_SCRATCH" "$HOME"
+}
+
+cmd_record() {
+  [ "${1:-}" = post ] || jpdev_die "record: the only subcommand is post"
+  shift
+  local pr="" issue="" file="" repo="" dry=0 name_check=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --pr) need_value "$@"; pr=$2; shift 2 ;;
+      --issue) need_value "$@"; issue=$2; shift 2 ;;
+      --file) need_value "$@"; file=$2; shift 2 ;;
+      --repo) need_value "$@"; repo=$2; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      --no-name-check) name_check=0; shift ;;
+      *) jpdev_die "record: unknown argument $1" ;;
+    esac
+  done
+  [ -f "$file" ] || jpdev_die "record: --file must name a file"
+  { [ -n "$pr" ] && [ -z "$issue" ]; } || { [ -z "$pr" ] && [ -n "$issue" ]; } || jpdev_die "record: give --pr N or --issue N"
+  local status=0
+  tmpd=$(mktemp -d)
+  trap 'rm -rf -- "${tmpd:?}"' EXIT
+  local reduced=$tmpd/reduced
+  reduce_paths "$file" > "$reduced"
+  if grep -nE '(^|[^A-Za-z0-9_<.-])(/(home|tmp|Users|root|mnt)/[A-Za-z0-9_.-]+|~/[A-Za-z0-9_.-]+)' "$reduced" > "$tmpd/paths"; then
+    echo "jpdev record: refused: a local path remains after the scratch and home paths were reduced:" >&2
+    cut -d: -f1 "$tmpd/paths" | sed 's/^/  line /' >&2
+    status=1
+  fi
+  if [ "$name_check" -eq 0 ]; then
+    jpdev_log "--no-name-check: the name check did not run"
+  elif [ ! -f "$JPDEV_NAME_PATTERNS" ]; then
+    echo "jpdev record: refused: no name-pattern file at $JPDEV_NAME_PATTERNS (create it, or pass --no-name-check to post without the name check)" >&2
+    status=1
+  else
+    local patterns=$tmpd/patterns grep_status
+    grep -vE '^[[:space:]]*(#|$)' "$JPDEV_NAME_PATTERNS" > "$patterns"
+    if [ ! -s "$patterns" ]; then
+      jpdev_log "the name-pattern file $JPDEV_NAME_PATTERNS holds no pattern: the name check matched nothing"
+    else
+      grep -Eif "$patterns" /dev/null > /dev/null 2>&1
+      grep_status=$?
+      if [ "$grep_status" -eq 2 ]; then
+        echo "jpdev record: refused: the name-pattern file holds a pattern grep -E cannot compile" >&2
+        status=1
+      else
+        grep -nEif "$patterns" "$reduced" > "$tmpd/names"
+        grep_status=$?
+        if [ "$grep_status" -eq 0 ]; then
+          echo "jpdev record: refused: these lines match a pattern of the name list:" >&2
+          cut -d: -f1 "$tmpd/names" | sed 's/^/  line /' >&2
+          status=1
+        elif [ "$grep_status" -ne 1 ]; then
+          echo "jpdev record: refused: the name check failed (grep exit $grep_status)" >&2
+          status=1
+        fi
+      fi
+    fi
+  fi
+  [ "$status" -eq 0 ] || exit 1
+  local kind=pr number=$pr
+  if [ -n "$issue" ]; then kind=issue; number=$issue; fi
+  if [ "$dry" -eq 1 ]; then
+    echo "jpdev record: dry run: would post $(wc -l < "$reduced") lines on $kind #$number${repo:+ of $repo}"
+    exit 0
+  fi
+  gh "$kind" comment "$number" ${repo:+--repo "$repo"} --body-file "$reduced"
+}
+
+cmd_env() {
+  local v cfg
+  cfg=$(jpdev_config_file)
+  printf 'jpdev %s\nkit      %s\nconfig   %s (%s)\n\n' "$JPDEV_VERSION" "$kit" "$cfg" "$([ -f "$cfg" ] && echo present || echo absent)"
+  for v in "${JPDEV_SETTINGS[@]}"; do printf '%-22s %-48s %s\n' "$v" "${!v}" "${JPDEV_SOURCE[$v]}"; done
+  printf '\n'
+  local tool
+  for tool in git gh python3 rsync flock go shellcheck; do
+    printf '%-10s %s\n' "$tool" "$(command -v "$tool" || echo 'not on PATH')"
+  done
+  printf '%-10s %s\n' python3.12 "$(jpdev_python_bin 3.12 || echo none)"
+  printf '%-10s %s\n' node22 "$(jpdev_node_bin 22 || echo "none under $JPDEV_NVM_DIR")"
+  [ -f "$JPDEV_NAME_PATTERNS" ] || echo "name-pattern file absent: jpdev record post refuses to post without --no-name-check"
+}
+
+case ${1:-} in
+  setup) shift; cmd_setup "$@" ;;
+  check) shift; cmd_check "$@" ;;
+  mutants) shift; cmd_mutants "$@" ;;
+  record) shift; cmd_record "$@" ;;
+  env) shift; cmd_env "$@" ;;
+  --version | version) echo "jpdev $JPDEV_VERSION" ;;
+  -h | --help | help | "") usage; [ -n "${1:-}" ] || exit 2 ;;
+  *) echo "jpdev: unknown command '$1'" >&2; usage >&2; exit 2 ;;
+esac

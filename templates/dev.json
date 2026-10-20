@@ -1,0 +1,24 @@
+{
+  "$schema": "./dev.schema.json",
+  "version": 1,
+  "toolchains": {
+    "node": {"version": "22"},
+    "go": {},
+    "python": {"version": "3.12", "venv": ".venv"}
+  },
+  "setup": [
+    {"name": "npm-ci", "run": "npm ci", "toolchain": "node", "timeout": 900}
+  ],
+  "checks": [
+    {"name": "build", "run": "npm run build", "toolchain": "node", "timeout": 600},
+    {"name": "unit-tests", "run": "npm test", "cwd": "packages/example", "toolchain": "node",
+     "summary": "^\\s*(Test Files|Tests)\\s", "timeout": 1200},
+    {"name": "go-test", "run": "go test -count=1 ./...", "cwd": "go", "toolchain": "go",
+     "summary": "^(FAIL|---)", "timeout": 3000},
+    {"name": "python-tests", "run": "python3 -m unittest discover -s tests", "toolchain": "python",
+     "summary": "^(Ran |OK|FAILED)"},
+    {"name": "diff-check", "run": "git diff --check", "toolchain": "shell"}
+  ],
+  "mutants": {"run": "node scripts/mutation-check.mjs {rows}", "cwd": "packages/example"},
+  "parity": {"run": "scripts/parity.sh \"$OTHER_CHECKOUT\"", "toolchain": "shell", "requires_env": "OTHER_CHECKOUT"}
+}

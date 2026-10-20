@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "dev.json: the development manifest of a Judgment Pack repository",
+  "type": "object",
+  "required": [
+    "version",
+    "checks"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1
+    },
+    "toolchains": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "type": "object",
+          "required": [
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+){0,2}$"
+            }
+          }
+        },
+        "go": {
+          "type": "object",
+          "additionalProperties": false
+        },
+        "python": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "venv": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a virtual environment in the clone, put first on PATH for python steps"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^3\\.[0-9]+$",
+              "description": "the interpreter the virtual environment is made with (python3.N)"
+            }
+          }
+        }
+      }
+    },
+    "setup": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "mutants": {
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "toolchain": {
+          "$ref": "#/$defs/toolchain"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "parity": {
+      "type": "object",
+      "required": [
+        "run"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "run": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "toolchain": {
+          "$ref": "#/$defs/toolchain"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requires_env": {
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "a step whose requires_env is empty is skipped; when CI is set a skip fails the run unless the step is optional"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "toolchain": {
+      "enum": [
+        "node",
+        "go",
+        "python",
+        "shell"
+      ]
+    },
+    "step": {
+      "type": "object",
+      "required": [
+        "name",
+        "run"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "run": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "description": "relative to the repository root; default ."
+        },
+        "toolchain": {
+          "$ref": "#/$defs/toolchain"
+        },
+        "summary": {
+          "type": "string",
+          "description": "a regex; the lines of the output it matches are printed in the summary block"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "seconds; default 1200"
+        },
+        "requires_env": {
+          "type": "string",
+          "description": "the step is skipped, and said to be, when this environment variable is empty"
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "a step whose requires_env is empty is skipped; when CI is set a skip fails the run unless the step is optional"
+        }
+      }
+    }
+  }
+}

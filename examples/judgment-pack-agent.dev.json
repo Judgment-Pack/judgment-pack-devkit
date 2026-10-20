@@ -1,0 +1,35 @@
+{
+  "$schema": "../templates/dev.schema.json",
+  "version": 1,
+  "toolchains": {
+    "node": {"version": "22"},
+    "go": {},
+    "python": {"version": "3.12", "venv": ".venv"}
+  },
+  "setup": [
+    {"name": "npm-ci", "run": "npm ci", "toolchain": "node", "timeout": 900},
+    {"name": "python-deps", "run": "python3 -m pip install --disable-pip-version-check -q -r requirements-dev.txt", "toolchain": "python", "timeout": 600}
+  ],
+  "checks": [
+    {"name": "diff-check", "run": "git diff --check", "toolchain": "shell"},
+    {"name": "python-tests", "run": "python3 -m unittest discover -s tests", "toolchain": "python",
+     "summary": "^(Ran |OK|FAILED)", "timeout": 600},
+    {"name": "mutation-rows", "run": "node packages/harness/scripts/mutation-check.mjs --check", "toolchain": "node",
+     "summary": "rows checked", "timeout": 300},
+    {"name": "build", "run": "npm run build", "toolchain": "node", "timeout": 900},
+    {"name": "unit-tests", "run": "npm test", "cwd": "packages/harness", "toolchain": "node",
+     "summary": "^\\s*(Test Files|Tests)\\s", "timeout": 1200},
+    {"name": "certify-vercel", "run": "npm run certify -- --adapter vercel", "toolchain": "node", "summary": "^certify [a-z]+: (passed|failed)", "timeout": 900},
+    {"name": "certify-codex", "run": "npm run certify -- --adapter codex", "toolchain": "node", "summary": "^certify [a-z]+: (passed|failed)", "timeout": 900},
+    {"name": "certify-deepagents", "run": "npm run certify -- --adapter deepagents", "toolchain": "node", "summary": "^certify [a-z]+: (passed|failed)", "timeout": 900},
+    {"name": "gofmt", "run": "unformatted=$(gofmt -l go); if [ -n \"$unformatted\" ]; then echo 'not gofmt-formatted:'; echo \"$unformatted\"; exit 1; fi", "toolchain": "shell"},
+    {"name": "go-vet", "run": "go vet ./...", "cwd": "go", "toolchain": "go", "timeout": 3000},
+    {"name": "go-generate", "run": "go generate ./contract && git diff --exit-code -- contract", "cwd": "go", "toolchain": "go", "timeout": 3000},
+    {"name": "go-test", "run": "go test -count=1 ./...", "cwd": "go", "toolchain": "go",
+     "summary": "^(ok|FAIL|---) ", "timeout": 3000},
+    {"name": "harness-check", "run": "go run ./cmd/harness-check", "cwd": "go", "toolchain": "go",
+     "summary": "passed", "timeout": 3000}
+  ],
+  "mutants": {"run": "node scripts/mutation-check.mjs {rows}", "cwd": "packages/harness", "toolchain": "node", "timeout": 3000},
+  "parity": {"run": "scripts/parity.sh \"$JPDEV_DESK\"", "toolchain": "shell", "requires_env": "JPDEV_DESK", "optional": true, "summary": "^parity:", "timeout": 600}
+}
