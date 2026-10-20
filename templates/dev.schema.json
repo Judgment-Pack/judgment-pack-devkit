@@ -33,7 +33,14 @@
         },
         "go": {
           "type": "object",
-          "additionalProperties": false
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$",
+              "description": "the Go release the checks are measured on (1.26 or 1.26.5); CI installs it, jpdev selects an installed Go that matches it and says when none does; absent: the go on PATH, and CI reads the version from go.mod"
+            }
+          }
         },
         "python": {
           "type": "object",
@@ -42,7 +49,7 @@
             "venv": {
               "type": "string",
               "minLength": 1,
-              "description": "a virtual environment in the clone, put first on PATH for python steps"
+              "description": "a virtual environment in the clone, put first on PATH for every step"
             },
             "version": {
               "type": "string",

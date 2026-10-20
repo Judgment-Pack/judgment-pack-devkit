@@ -6,7 +6,8 @@
 #   python  ulimit -v and timeout
 #   shell   timeout only
 # JPDEV_STEP_TIMEOUT (seconds) replaces the toolchain's default timeout for this one command.
-# JPDEV_NODE_BIN, when set, is put first on PATH; so is <clone>/$JPDEV_VENV/bin for python.
+# PATH, in order: <clone>/$JPDEV_VENV/bin when the manifest declares a virtual environment, for
+# every toolchain (the toolchain still decides the cap); then JPDEV_GO_BIN and JPDEV_NODE_BIN when set.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -17,9 +18,10 @@ if ! { [ $# -ge 3 ] && [ "$2" = "--" ]; }; then echo "usage: wrap.sh TOOLCHAIN -
 toolchain=$1; shift 2
 step_timeout=${JPDEV_STEP_TIMEOUT:-}
 
+if [ -n "${JPDEV_GO_BIN:-}" ]; then PATH=$JPDEV_GO_BIN:$PATH; fi
 if [ -n "${JPDEV_NODE_BIN:-}" ]; then PATH=$JPDEV_NODE_BIN:$PATH; fi
 clone=${JPDEV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
-if [ "$toolchain" = python ] && [ -n "${JPDEV_VENV:-}" ] && [ -d "$clone/$JPDEV_VENV/bin" ]; then PATH=$clone/$JPDEV_VENV/bin:$PATH; fi
+if [ -n "${JPDEV_VENV:-}" ] && [ -d "$clone/$JPDEV_VENV/bin" ]; then PATH=$clone/$JPDEV_VENV/bin:$PATH; fi
 export PATH
 
 case $toolchain in

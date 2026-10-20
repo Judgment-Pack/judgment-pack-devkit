@@ -8,8 +8,12 @@ machine that has the kit adds the caps and the lock around the same steps.
 
 Start from `templates/dev.json` and keep what the repository runs. The manifest names:
 
-- `toolchains`: `node` (`{"version": "22"}`, resolved from nvm), `go` (`{}`), `python`
-  (`{"version": "3.12", "venv": ".venv"}`; the version and the virtual environment are optional).
+- `toolchains`: `node` (`{"version": "22"}`, resolved from nvm), `go` (`{}`, or
+  `{"version": "1.26.5"}` to name the Go release the checks are measured on: CI installs it,
+  `jpdev` selects an installed Go that matches it and says when none is installed, and the
+  workflow falls back to the `go.mod` version when the manifest names none), `python`
+  (`{"version": "3.12", "venv": ".venv"}`; the version and the virtual environment are optional;
+  a declared virtual environment is first on PATH for every step).
 - `setup`: steps `jpdev setup` and CI run once after a clone (`npm ci`, the python
   requirements).
 - `checks`: the check list, in the order it should run (cheap checks first).
@@ -34,6 +38,10 @@ in the summary block; more than three lines are counted and the last one is show
 mkdir -p scripts/dev
 cp templates/check.sh scripts/dev/check.sh
 ```
+
+Line 2 of the template, `# from judgment-pack-devkit vX.Y.Z (templates/check.sh)`, records the kit
+release the copy came from. A vendored copy keeps that line, so a later reader can tell which release
+it is behind; when you update the copy, copy the whole file again.
 
 `scripts/dev/check.sh [--setup] [--only A,B] [--skip A,B] [--all]` runs the manifest with no
 caps and prints the summary block. `jpdev check` uses the vendored copy when it exists and

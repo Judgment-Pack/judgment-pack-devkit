@@ -88,9 +88,15 @@ cmd_setup() {
   fi
   : "${manifest:=$root/dev.json}"
   jpdev_prepare_run "$root" "$manifest"
-  local go_v py_v venv pyv py
+  local go_v py_v venv pyv py gov
   if [ -n "$(jpdev_manifest_get "$manifest" toolchains go)" ]; then
-    go_v=$(go version 2>/dev/null) || jpdev_die "setup: the manifest names go, which is not on PATH"
+    go_v=$("${JPDEV_GO_BIN:+$JPDEV_GO_BIN/}go" version 2>/dev/null) || jpdev_die "setup: the manifest names go, which is not on PATH"
+    gov=$(jpdev_manifest_get "$manifest" toolchains go version)
+    if [ -n "$gov" ] && [ -n "${JPDEV_GO_BIN:-}" ]; then
+      go_v="$go_v (selected for the manifest's go $gov)"
+    elif [ -n "$gov" ]; then
+      go_v="$go_v (the manifest names go $gov and no matching Go is installed: this one is used)"
+    fi
   fi
   venv=$(jpdev_manifest_get "$manifest" toolchains python venv)
   pyv=$(jpdev_manifest_get "$manifest" toolchains python version)

@@ -3,10 +3,11 @@
 
 Checks a dev.json against its JSON Schema when the jsonschema package is installed (it says
 which check ran), and always makes the checks the schema cannot: step names are unique, a node
-step has a node version to run under, a setup step's name is not a check's. Standard library
-otherwise. Exit 0 when valid, 1 with one line per problem, 2 on an unreadable file.
+step has a node version to run under. The go version is also held to a release number here,
+because the fallback without the jsonschema package has no schema. Standard library otherwise. Exit 0 when valid, 1 with one line per problem, 2 on an unreadable file.
 """
 import json
+import re
 import sys
 
 
@@ -48,6 +49,9 @@ def main():
         steps = [s for k in ("setup", "checks") for s in manifest.get(k, []) if isinstance(s, dict)]
         if isinstance(manifest.get("parity"), dict):
             steps.append(dict(manifest["parity"], name="parity"))
+        go_version = manifest.get("toolchains", {}).get("go", {}).get("version") if isinstance(manifest.get("toolchains"), dict) and isinstance(manifest["toolchains"].get("go"), dict) else None
+        if go_version is not None and not (isinstance(go_version, str) and re.fullmatch(r"[0-9]+\.[0-9]+(\.[0-9]+)?", go_version)):
+            problems.append("toolchains/go/version: %r is not a Go release number such as 1.26 or 1.26.5" % (go_version,))
         seen = set()
         for step in steps:
             name = step.get("name")
