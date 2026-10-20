@@ -7,7 +7,7 @@ JPDEV_VERSION=0.1.0
 
 # Every setting jpdev reads. The environment wins over the config file, the config file over the default.
 JPDEV_SETTINGS=(JPDEV_SCRATCH JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB
-  JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_NAME_PATTERNS)
+  JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS)
 
 jpdev_log() { printf 'jpdev: %s\n' "$*" >&2; }
 jpdev_die() { printf 'jpdev: %s\n' "$*" >&2; exit 2; }
@@ -26,6 +26,7 @@ jpdev_default() {
     JPDEV_GO_TIMEOUT_S) printf 3000 ;;
     JPDEV_PY_ULIMIT_KB) printf 4000000 ;;
     JPDEV_NVM_DIR) printf '%s' "${NVM_DIR:-$HOME/.nvm}" ;;
+    JPDEV_GO_SDK_DIR) printf '%s/sdk' "$HOME" ;;
     JPDEV_NAME_PATTERNS) printf '%s/jpdev/name-patterns' "${XDG_CONFIG_HOME:-$HOME/.config}" ;;
   esac
 }
@@ -71,6 +72,28 @@ jpdev_node_bin() {
   printf '%s/bin' "$best"
 }
 
+# jpdev_go_matches GO VERSION succeeds when the go command GO is release VERSION: 1.26 matches go1.26
+# and go1.26.5, 1.26.5 matches go1.26.5 alone.
+jpdev_go_matches() {
+  local have
+  have=$("$1" version 2>/dev/null | awk '{ print $3 }') || return 1
+  have=${have#go}
+  [ "$have" = "$2" ] || [[ $have == "$2".* ]]
+}
+
+# jpdev_go_bin VERSION prints the bin directory of an installed Go of that release, or fails: the
+# go on PATH when it matches, else the newest match under $JPDEV_GO_SDK_DIR (the layout
+# `go install golang.org/dl/go1.26.5@latest && go1.26.5 download` leaves: sdk/go1.26.5/bin/go).
+jpdev_go_bin() {
+  local found entry best=""
+  if found=$(command -v go) && jpdev_go_matches "$found" "$1"; then dirname "$found"; return 0; fi
+  for entry in "$JPDEV_GO_SDK_DIR"/go"$1" "$JPDEV_GO_SDK_DIR"/go"$1".*; do
+    if [ -x "$entry/bin/go" ] && jpdev_go_matches "$entry/bin/go" "$1"; then best=$(printf '%s\n%s\n' "$best" "$entry" | sort -V | tail -n 1); fi
+  done
+  [ -n "$best" ] || return 1
+  printf '%s/bin' "$best"
+}
+
 # jpdev_python_bin MAJOR.MINOR prints the path of a working python of that version: python3.N on
 # PATH when it runs (a pyenv shim for a version that is not selected does not), else the newest
 # one under $PYENV_ROOT/versions (default ~/.pyenv/versions).
@@ -111,9 +134,11 @@ print(v if isinstance(v, (str, int, float)) else json.dumps(v))' "$@"
 jpdev_git_net() { git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "$@"; }
 
 # jpdev_prepare_run ROOT MANIFEST validates the manifest and exports what lib/wrap.sh and
-# templates/check.sh read: JPDEV_ROOT, JPDEV_WRAP and JPDEV_NODE_BIN.
+# templates/check.sh read: JPDEV_ROOT, JPDEV_WRAP, JPDEV_NODE_BIN and JPDEV_GO_BIN. When the manifest's
+# go toolchain names a version, JPDEV_GO_BIN is the bin directory of an installed Go of that release;
+# when none is installed it is unset, jpdev says so, and the steps run with the go on PATH.
 jpdev_prepare_run() {
-  local root=$1 manifest=$2 kit nodev
+  local root=$1 manifest=$2 kit nodev gov have
   kit=$(jpdev_kit_dir)
   [ -f "$manifest" ] || jpdev_die "no manifest at $manifest"
   command -v python3 >/dev/null || jpdev_die "python3 is needed to read the manifest"
@@ -121,6 +146,17 @@ jpdev_prepare_run() {
   export JPDEV_ROOT=$root JPDEV_WRAP=$kit/lib/wrap.sh
   JPDEV_VENV=$(jpdev_manifest_get "$manifest" toolchains python venv)
   export JPDEV_VENV
+  unset JPDEV_GO_BIN
+  gov=$(jpdev_manifest_get "$manifest" toolchains go version)
+  if [ -n "$gov" ]; then
+    if JPDEV_GO_BIN=$(jpdev_go_bin "$gov"); then
+      export JPDEV_GO_BIN
+    else
+      unset JPDEV_GO_BIN
+      have=$(go version 2>/dev/null | awk '{ print $3 }')
+      jpdev_log "the manifest names go $gov and no matching Go is installed (the go on PATH is ${have:-absent}, and none is under $JPDEV_GO_SDK_DIR); the go steps run with the go on PATH"
+    fi
+  fi
   nodev=$(jpdev_manifest_get "$manifest" toolchains node version)
   if [ -n "$nodev" ]; then
     JPDEV_NODE_BIN=$(jpdev_node_bin "$nodev") || jpdev_die "node $nodev is not installed under $JPDEV_NVM_DIR (nvm install $nodev)"

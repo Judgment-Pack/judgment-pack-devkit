@@ -1,0 +1,3 @@
+# The scripts run under bash and python3: a checkout never converts their line endings.
+* text=auto eol=lf
+*.tgz binary

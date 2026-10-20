@@ -7,7 +7,9 @@ work=$(mktemp -d)
 trap 'rm -rf -- "${work:?}"' EXIT
 export JPDEV_SCRATCH=$work/scratch XDG_CONFIG_HOME=$work/config HOME=$work/home
 mkdir -p "$HOME" "$XDG_CONFIG_HOME"
-unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_NAME_PATTERNS JPDEV_FIXTURE_UNSET
+unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS JPDEV_FIXTURE_UNSET
+# What jpdev check exports to its steps: a run of these tests under it must not inherit it.
+unset JPDEV_ROOT JPDEV_WRAP JPDEV_NODE_BIN JPDEV_GO_BIN JPDEV_LOGDIR JPDEV_STEP_TIMEOUT
 jpdev=$kit/bin/jpdev
 fixture=$kit/tests/fixture/dev.json
 pass=0 fail=0
@@ -128,6 +130,102 @@ cat > "$vclone/dev.json" <<'JSON'
 JSON
 out=$(cd "$vclone" && "$jpdev" check 2>/dev/null) && s=0 || s=$?
 expect "the python step runs in the virtual environment the manifest names" 0 'from-the-venv' "$out" "$s"
+
+# the virtual environment is first on PATH for every step, whatever its toolchain
+pyclone=$work/pyclone
+git init -q -b main "$pyclone"
+python3 -m venv --without-pip "$pyclone/pyvenv"
+purelib=$("$pyclone/pyvenv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+printf 'WHERE = "in-the-venv"\n' > "$purelib/jpdev_venv_marker.py"
+mkdir -p "$work/nvm/versions/node/v99.0.0/bin"
+printf '#!/bin/sh\necho v99.0.0\n' > "$work/nvm/versions/node/v99.0.0/bin/node"
+chmod +x "$work/nvm/versions/node/v99.0.0/bin/node"
+cat > "$pyclone/dev.json" <<'JSON'
+{"version": 1,
+ "toolchains": {"node": {"version": "99"}, "go": {}, "python": {"venv": "pyvenv"}},
+ "checks": [
+  {"name": "node-step", "run": "python3 -c 'import jpdev_venv_marker as m; print(\"node:\", m.WHERE)'", "toolchain": "node", "summary": "^node:"},
+  {"name": "go-step", "run": "python3 -c 'import jpdev_venv_marker as m; print(\"go:\", m.WHERE)'", "toolchain": "go", "summary": "^go:"},
+  {"name": "shell-step", "run": "python3 -c 'import jpdev_venv_marker as m; print(\"shell:\", m.WHERE)'", "toolchain": "shell", "summary": "^shell:"},
+  {"name": "python-step", "run": "python3 -c 'import jpdev_venv_marker as m; print(\"python:\", m.WHERE)'", "toolchain": "python", "summary": "^python:"}]}
+JSON
+out=$(cd "$pyclone" && JPDEV_NVM_DIR=$work/nvm "$jpdev" check --all 2>/dev/null) && s=0 || s=$?
+expect "a node step imports a module installed in the manifest's virtual environment" 0 'node: in-the-venv' "$out" "$s"
+expect "a go step imports a module installed in the manifest's virtual environment" 0 'go: in-the-venv' "$out" "$s"
+expect "a shell step imports a module installed in the manifest's virtual environment" 0 'shell: in-the-venv' "$out" "$s"
+expect "a python step imports a module installed in the manifest's virtual environment" 0 'python: in-the-venv' "$out" "$s"
+expect "the four steps pass" 0 '== 4 passed, 0 failed' "$out" "$s"
+# with no virtual environment declared, no step finds the module
+sed 's/, "python": {"venv": "pyvenv"}//' "$pyclone/dev.json" | sed 's/"toolchain": "python"/"toolchain": "shell"/' > "$pyclone/novenv.json"
+out=$(cd "$pyclone" && JPDEV_NVM_DIR=$work/nvm "$jpdev" check --all --manifest "$pyclone/novenv.json" 2>/dev/null) && s=0 || s=$?
+expect "with no virtual environment declared the module is not found, in any step" 4 '== 0 passed, 4 failed' "$out" "$s"
+
+# --- the Go release the manifest names (toolchains.go.version)
+# The stubs are releases no real Go has, so a match on the go installed here cannot pass for them.
+mkdir -p "$work/sdk/go1.77.5/bin" "$work/sdk/go1.76.9/bin"
+for rel in 1.77.5 1.76.9; do
+  cat > "$work/sdk/go$rel/bin/go" <<'STUB'
+#!/bin/sh
+[ "$1" = version ] && echo "go version goRELEASE linux/amd64"
+exit 0
+STUB
+  sed -i "s/RELEASE/$rel/" "$work/sdk/go$rel/bin/go"
+  chmod +x "$work/sdk/go$rel/bin/go"
+done
+goclone=$work/goclone
+mkdir -p "$goclone"
+git init -q -b main "$goclone"
+for want in 1.77.5 1.77 1.76; do
+  cat > "$goclone/dev.json" <<JSON
+{"version": 1, "toolchains": {"go": {"version": "$want"}}, "checks": [{"name": "which-go", "run": "go version", "toolchain": "go", "summary": "^go version"}]}
+JSON
+  out=$(cd "$goclone" && JPDEV_GO_SDK_DIR=$work/sdk "$jpdev" check 2>&1) && s=0 || s=$?
+  case $want in 1.76) rel=1.76.9 ;; *) rel=1.77.5 ;; esac
+  expect "jpdev check selects an installed Go that matches go.version $want" 0 "go version go$rel linux/amd64" "$out" "$s"
+done
+cat > "$goclone/dev.json" <<'JSON'
+{"version": 1, "toolchains": {"go": {"version": "1.7"}}, "checks": [{"name": "which-go", "run": "go version", "toolchain": "go", "summary": "^go version"}]}
+JSON
+# a go on PATH is one candidate too: 1.7 is not a prefix of 1.77 to it either
+mkdir -p "$work/pathgo"
+cp "$work/sdk/go1.77.5/bin/go" "$work/pathgo/go"
+out=$(cd "$goclone" && PATH=$work/pathgo:$PATH JPDEV_GO_SDK_DIR=$work/none "$jpdev" check 2>&1) && s=0 || s=$?
+expect "go.version 1.7 does not match a go1.77.5 on PATH" 0 'the manifest names go 1\.7 and no matching Go is installed' "$out" "$s"
+sed -i 's/"1\.7"/"1.77"/' "$goclone/dev.json"
+out=$(cd "$goclone" && PATH=$work/pathgo:$PATH JPDEV_GO_SDK_DIR=$work/none "$jpdev" check 2>&1) && s=0 || s=$?
+expect "go.version 1.77 matches a go1.77.5 on PATH" 0 'go version go1\.77\.5 linux/amd64' "$out" "$s"
+absent "go.version 1.77 on PATH needs no warning" 'no matching Go is installed' "$out"
+sed -i 's/"1\.77"/"1.7"/' "$goclone/dev.json"
+out=$(cd "$goclone" && JPDEV_GO_SDK_DIR=$work/sdk "$jpdev" check 2>&1) && s=0 || s=$?
+expect "go.version 1.7 does not match go1.76 or go1.77" 0 'the manifest names go 1\.7 and no matching Go is installed' "$out" "$s"
+absent "go.version 1.7 selects no stub" 'go version go1\.7[67]\.' "$out"
+cat > "$goclone/dev.json" <<'JSON'
+{"version": 1, "toolchains": {"go": {"version": "1.99.0"}}, "checks": [{"name": "which-go", "run": "go version", "toolchain": "go", "summary": "^go version"}]}
+JSON
+out=$(cd "$goclone" && JPDEV_GO_SDK_DIR=$work/sdk "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check says so when no installed Go matches go.version, and runs the go on PATH" 0 'the manifest names go 1\.99\.0 and no matching Go is installed' "$out" "$s"
+expect "the go steps still run when no Go matches" 0 'PASS +which-go' "$out" "$s"
+absent "no stub Go is used when none matches" 'go version go1\.7[67]\.' "$out"
+git -C "$goclone" add dev.json
+git -C "$goclone" -c user.name=test -c user.email=test@example.com commit -q -m go
+git init -q --bare -b main "$work/goorigin.git"
+git -C "$goclone" remote add origin "$work/goorigin.git"
+git -C "$goclone" push -q origin main
+out=$(JPDEV_GO_SDK_DIR=$work/sdk "$jpdev" setup "$goclone" 2>&1) && s=0 || s=$?
+expect "setup says no matching Go is installed" 0 'go +go version .*\(the manifest names go 1\.99\.0 and no matching Go is installed: this one is used\)' "$out" "$s"
+sed -i 's/1\.99\.0/1.77.5/' "$goclone/dev.json"
+out=$(JPDEV_GO_SDK_DIR=$work/sdk "$jpdev" setup "$goclone" 2>&1) && s=0 || s=$?
+expect "setup says which Go it selected" 0 "go +go version go1\.77\.5 linux/amd64 \\(selected for the manifest's go 1\.77\.5\\)" "$out" "$s"
+printf '{"version": 1, "toolchains": {"go": {"version": "latest"}}, "checks": [{"name": "a", "run": "true"}]}\n' > "$work/badgo.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/badgo.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses a Go version that is not a release number" 1 "dev.json:" "$out" "$s"
+
+# --- the runner template records the kit version it came from
+line2=$(sed -n 2p "$kit/templates/check.sh")
+want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (templates/check.sh)"
+if [ "$line2" = "$want" ]; then ok "templates/check.sh line 2 names the kit version jpdev --version prints"; else bad "templates/check.sh line 2 names the kit version jpdev --version prints" "line 2: $line2
+wanted: $want"; fi
+if cmp -s "$kit/templates/check.sh" "$kit/scripts/dev/check.sh"; then ok "scripts/dev/check.sh is the template, line 2 included"; else bad "scripts/dev/check.sh is the template, line 2 included"; fi
 
 # --- the lock
 lock=$work/test.lock
