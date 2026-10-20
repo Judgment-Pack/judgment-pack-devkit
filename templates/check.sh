@@ -2,7 +2,8 @@
 # scripts/dev/check.sh [--setup] [--only a,b] [--skip a,b] [--all] [--manifest FILE]
 # Runs the checks of dev.json in order and prints one summary block; exit status = failures.
 # Stops at the first failure unless --all. --setup runs the manifest's setup steps instead.
-# Standard library python3 only. jpdev sets JPDEV_WRAP to add its caps around each step.
+# A step whose requires_env variable is empty is skipped, and said to be; when CI is set that is a
+# failure unless the step is marked optional: true. Standard library python3 only. jpdev sets JPDEV_WRAP to add its caps around each step.
 root=${JPDEV_ROOT:-$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)} || exit 2
 exec python3 -I - "$root" "$@" <<'PY'
 import json, os, re, signal, subprocess, sys, time
@@ -16,12 +17,18 @@ while args:
     else: sys.exit('check.sh: unknown argument ' + a)
 m = json.load(open(opt['manifest'], encoding='utf-8'))
 steps = m.get('setup', []) if opt['setup'] else m['checks'] + ([dict(name='parity', **m['parity'])] if 'parity' in m else [])
+unknown = (opt['only'] | opt['skip']) - set(s['name'] for s in steps)
+if unknown: print('check.sh: no step named ' + ', '.join(sorted(unknown)), file=sys.stderr); sys.exit(2)
 wrap, logdir, rows, failed = os.environ.get('JPDEV_WRAP'), os.environ.get('JPDEV_LOGDIR'), [], 0
 for c in steps:
     n = c['name']
     if (opt['only'] and n not in opt['only']) or n in opt['skip']: continue
     if failed and not opt['all']: rows.append((n, 'NOT RUN', '', [])); continue
-    if c.get('requires_env') and not os.environ.get(c['requires_env']): rows.append((n, 'SKIP', 'needs ' + c['requires_env'], [])); continue
+    if c.get('requires_env') and not os.environ.get(c['requires_env']):
+        # A skip is a failure under CI (CI is set) unless the step says optional: true.
+        if os.environ.get('CI') and not c.get('optional'): failed += 1; rows.append((n, 'FAIL', 'needs %s, which CI must set (or mark the step optional)' % c['requires_env'], []))
+        else: rows.append((n, 'SKIP', 'needs ' + c['requires_env'], []))
+        continue
     cmd = ['bash', '-c', c['run']]
     if wrap: cmd = [wrap, c.get('toolchain', 'shell'), '--'] + cmd
     tmo = c.get('timeout', 1200)

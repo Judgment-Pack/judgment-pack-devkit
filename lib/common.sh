@@ -119,6 +119,8 @@ jpdev_prepare_run() {
   command -v python3 >/dev/null || jpdev_die "python3 is needed to read the manifest"
   python3 "$kit/lib/validate_manifest.py" "$manifest" "$kit/templates/dev.schema.json" || jpdev_die "the manifest is not valid"
   export JPDEV_ROOT=$root JPDEV_WRAP=$kit/lib/wrap.sh
+  JPDEV_VENV=$(jpdev_manifest_get "$manifest" toolchains python venv)
+  export JPDEV_VENV
   nodev=$(jpdev_manifest_get "$manifest" toolchains node version)
   if [ -n "$nodev" ]; then
     JPDEV_NODE_BIN=$(jpdev_node_bin "$nodev") || jpdev_die "node $nodev is not installed under $JPDEV_NVM_DIR (nvm install $nodev)"

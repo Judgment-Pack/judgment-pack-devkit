@@ -17,8 +17,9 @@ usage: jpdev COMMAND [ARGS]
                      run the manifest's checks in order under the caps; exit status = failures
   mutants --row TEXT [--row TEXT]...
                      run the manifest's mutants command on a scratch copy of the clone
-  record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run]
-                     reduce local paths, refuse a path or a name pattern, post the file
+  record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run] [--no-name-check]
+                     reduce local paths, refuse a path, a name pattern, a missing or invalid
+                     name-pattern file, then post the file
   env                print the effective settings and where each came from
   --version          print the version
 USAGE
@@ -183,7 +184,7 @@ sys.stdout.write(text)' "$1" "$JPDEV_SCRATCH" "$HOME"
 cmd_record() {
   [ "${1:-}" = post ] || jpdev_die "record: the only subcommand is post"
   shift
-  local pr="" issue="" file="" repo="" dry=0
+  local pr="" issue="" file="" repo="" dry=0 name_check=1
   while [ $# -gt 0 ]; do
     case $1 in
       --pr) need_value "$@"; pr=$2; shift 2 ;;
@@ -191,6 +192,7 @@ cmd_record() {
       --file) need_value "$@"; file=$2; shift 2 ;;
       --repo) need_value "$@"; repo=$2; shift 2 ;;
       --dry-run) dry=1; shift ;;
+      --no-name-check) name_check=0; shift ;;
       *) jpdev_die "record: unknown argument $1" ;;
     esac
   done
@@ -206,16 +208,35 @@ cmd_record() {
     cut -d: -f1 "$tmpd/paths" | sed 's/^/  line /' >&2
     status=1
   fi
-  if [ -f "$JPDEV_NAME_PATTERNS" ]; then
-    local patterns=$tmpd/patterns
-    grep -vE '^[[:space:]]*(#|$)' "$JPDEV_NAME_PATTERNS" > "$patterns"
-    if [ -s "$patterns" ] && grep -nEif "$patterns" "$reduced" > "$tmpd/names"; then
-      echo "jpdev record: refused: these lines match a pattern of the name list:" >&2
-      cut -d: -f1 "$tmpd/names" | sed 's/^/  line /' >&2
-      status=1
-    fi
+  if [ "$name_check" -eq 0 ]; then
+    jpdev_log "--no-name-check: the name check did not run"
+  elif [ ! -f "$JPDEV_NAME_PATTERNS" ]; then
+    echo "jpdev record: refused: no name-pattern file at $JPDEV_NAME_PATTERNS (create it, or pass --no-name-check to post without the name check)" >&2
+    status=1
   else
-    jpdev_log "no name-pattern file at $JPDEV_NAME_PATTERNS: the name check did not run"
+    local patterns=$tmpd/patterns grep_status
+    grep -vE '^[[:space:]]*(#|$)' "$JPDEV_NAME_PATTERNS" > "$patterns"
+    if [ ! -s "$patterns" ]; then
+      jpdev_log "the name-pattern file $JPDEV_NAME_PATTERNS holds no pattern: the name check matched nothing"
+    else
+      grep -Eif "$patterns" /dev/null > /dev/null 2>&1
+      grep_status=$?
+      if [ "$grep_status" -eq 2 ]; then
+        echo "jpdev record: refused: the name-pattern file holds a pattern grep -E cannot compile" >&2
+        status=1
+      else
+        grep -nEif "$patterns" "$reduced" > "$tmpd/names"
+        grep_status=$?
+        if [ "$grep_status" -eq 0 ]; then
+          echo "jpdev record: refused: these lines match a pattern of the name list:" >&2
+          cut -d: -f1 "$tmpd/names" | sed 's/^/  line /' >&2
+          status=1
+        elif [ "$grep_status" -ne 1 ]; then
+          echo "jpdev record: refused: the name check failed (grep exit $grep_status)" >&2
+          status=1
+        fi
+      fi
+    fi
   fi
   [ "$status" -eq 0 ] || exit 1
   local kind=pr number=$pr
@@ -239,7 +260,7 @@ cmd_env() {
   done
   printf '%-10s %s\n' python3.12 "$(jpdev_python_bin 3.12 || echo none)"
   printf '%-10s %s\n' node22 "$(jpdev_node_bin 22 || echo "none under $JPDEV_NVM_DIR")"
-  [ -f "$JPDEV_NAME_PATTERNS" ] || echo "name-pattern file absent: the record gate runs its path check only"
+  [ -f "$JPDEV_NAME_PATTERNS" ] || echo "name-pattern file absent: jpdev record post refuses to post without --no-name-check"
 }
 
 case ${1:-} in

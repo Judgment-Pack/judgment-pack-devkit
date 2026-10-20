@@ -16,13 +16,15 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
 - `mutants`: the command `jpdev mutants` runs; `{rows}` becomes one `--row 'TEXT'` per row.
 - `parity`: an optional last check that compares the repository against another one; it names
   the environment variable it needs in `requires_env`, and is skipped, and said to be skipped,
-  where the variable is empty.
+  where the variable is empty. Under CI (`CI` set) such a skip is a failure, so a green run
+  never hides a check that did not run: either the CI workflow sets the variable (see the
+  commented checkout step in `templates/ci-check.yml`) or the step says `"optional": true`.
 
 A step has a `name` (letters, digits, `.`, `_`, `-`), a `run` (a bash command line), a `cwd`
 (relative to the repository root, default `.`), a `toolchain` (`node`, `go`, `python` or
 `shell`, default `shell`), a `summary` (a regex: the lines of the output it matches are printed
 in the summary block; more than three lines are counted and the last one is shown), a
-`timeout` in seconds (default 1200) and optionally `requires_env`.
+`timeout` in seconds (default 1200, enforced for every toolchain by both runners) and optionally `requires_env` and `optional`.
 
 `jpdev check` validates the file against `templates/dev.schema.json` before it runs anything.
 
@@ -69,7 +71,8 @@ jpdev check --all
 node on PATH (the kit puts the manifest's node first on PATH for every step; the server starts
 with `--disable-wasm-trap-handler`, which is what lets it run under the Go address-space cap).
 Its last check, `parity`, compares the package with a checkout of the Desk and is skipped
-unless `JPDEV_DESK` names one.
+unless `JPDEV_DESK` names one; it is marked `optional` because that repository's CI does not
+check the Desk out.
 
 To run it against a clone of that repository:
 

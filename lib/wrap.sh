@@ -4,9 +4,9 @@
 #   node    the resident-memory cap (lib/rsscap.sh); never ulimit -v, which breaks vite and vitest
 #   go      the machine lock, ulimit -v, GOFLAGS=-mod=mod, a per-clone GOCACHE, timeout
 #   python  ulimit -v and timeout
-#   shell   nothing
+#   shell   timeout only
 # JPDEV_STEP_TIMEOUT (seconds) replaces the toolchain's default timeout for this one command.
-# JPDEV_NODE_BIN, when set, is put first on PATH; so is <clone>/.venv/bin for python.
+# JPDEV_NODE_BIN, when set, is put first on PATH; so is <clone>/$JPDEV_VENV/bin for python.
 set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -19,7 +19,7 @@ step_timeout=${JPDEV_STEP_TIMEOUT:-}
 
 if [ -n "${JPDEV_NODE_BIN:-}" ]; then PATH=$JPDEV_NODE_BIN:$PATH; fi
 clone=${JPDEV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
-if [ "$toolchain" = python ] && [ -d "$clone/.venv/bin" ]; then PATH=$clone/.venv/bin:$PATH; fi
+if [ "$toolchain" = python ] && [ -n "${JPDEV_VENV:-}" ] && [ -d "$clone/$JPDEV_VENV/bin" ]; then PATH=$clone/$JPDEV_VENV/bin:$PATH; fi
 export PATH
 
 case $toolchain in
@@ -40,7 +40,7 @@ case $toolchain in
       "$JPDEV_PY_ULIMIT_KB" "${step_timeout:-1200}" "$@"
     ;;
   shell)
-    exec "$@"
+    exec timeout -k 10 "${step_timeout:-1200}" "$@"
     ;;
   *)
     echo "wrap.sh: unknown toolchain '$toolchain'" >&2; exit 2

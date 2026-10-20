@@ -115,6 +115,10 @@
         },
         "requires_env": {
           "type": "string"
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "a step whose requires_env is empty is skipped; when CI is set a skip fails the run unless the step is optional"
         }
       }
     }
@@ -163,6 +167,10 @@
         "requires_env": {
           "type": "string",
           "description": "the step is skipped, and said to be, when this environment variable is empty"
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "a step whose requires_env is empty is skipped; when CI is set a skip fails the run unless the step is optional"
         }
       }
     }

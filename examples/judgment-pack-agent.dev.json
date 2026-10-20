@@ -31,5 +31,5 @@
      "summary": "passed", "timeout": 3000}
   ],
   "mutants": {"run": "node scripts/mutation-check.mjs {rows}", "cwd": "packages/harness", "toolchain": "node", "timeout": 3000},
-  "parity": {"run": "scripts/parity.sh \"$JPDEV_DESK\"", "toolchain": "shell", "requires_env": "JPDEV_DESK", "summary": "^parity:", "timeout": 600}
+  "parity": {"run": "scripts/parity.sh \"$JPDEV_DESK\"", "toolchain": "shell", "requires_env": "JPDEV_DESK", "optional": true, "summary": "^parity:", "timeout": 600}
 }

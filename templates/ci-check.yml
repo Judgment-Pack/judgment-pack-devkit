@@ -44,6 +44,21 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.dev.outputs.python }}
+      # A step with requires_env fails under CI when its variable is empty, unless the step is
+      # marked optional in dev.json. A repository whose dev.json has a parity step sets the
+      # variable here: a shallow checkout of the other repository, then the variable pointing at
+      # it (a private repository needs a token with read access). Uncomment and adapt:
+      #
+      # - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      #   with:
+      #     repository: Judgment-Pack/judgment-pack-desk
+      #     ref: the commit the parity table was made against
+      #     path: desk-checkout
+      #     fetch-depth: 1
+      #     persist-credentials: false
+      #     token: ${{ secrets.DESK_READ_TOKEN }}
+      # - name: Name the checkout for the parity step
+      #   run: echo "JPDEV_DESK=$GITHUB_WORKSPACE/desk-checkout" >> "$GITHUB_ENV"
       - name: Setup steps
         run: scripts/dev/check.sh --setup
       - name: Checks

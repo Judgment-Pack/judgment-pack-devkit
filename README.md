@@ -55,7 +55,9 @@ the same name overrides it. `config/env.example` documents each setting with its
   row.
 - `jpdev record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run]`: reduces
   the scratch and home paths to `<scratch>` and `<home>`, refuses to post when any local path
-  remains or a line matches the name patterns, and posts with `gh ... comment --body-file`.
+  remains, a line matches the name patterns, or the name-pattern file is missing or holds a
+  pattern `grep -E` cannot compile, and posts with `gh ... comment --body-file`. A post that
+  should go without the name check says `--no-name-check`.
 - `jpdev env`: the effective settings and where each came from.
 
 ## The caps

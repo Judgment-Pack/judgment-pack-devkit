@@ -11,6 +11,7 @@
     {"name": "python-version", "run": "python3 --version", "toolchain": "python", "summary": "^Python"},
     {"name": "many-lines", "run": "printf 'ok a\\nok b\\nok c\\nok d\\n'", "toolchain": "shell", "summary": "^ok "},
     {"name": "needs-variable", "run": "echo never", "toolchain": "shell", "requires_env": "JPDEV_FIXTURE_UNSET"},
+    {"name": "optional-skip", "run": "echo never", "toolchain": "shell", "requires_env": "JPDEV_FIXTURE_UNSET", "optional": true},
     {"name": "fails", "run": "i=1; while [ $i -le 50 ]; do echo \"output line $i\"; i=$((i+1)); done; exit 3", "toolchain": "shell"},
     {"name": "after-failure", "run": "echo after", "toolchain": "shell"}
   ],
