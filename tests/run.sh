@@ -7,7 +7,7 @@ work=$(mktemp -d)
 trap 'rm -rf -- "${work:?}"' EXIT
 export JPDEV_SCRATCH=$work/scratch XDG_CONFIG_HOME=$work/config HOME=$work/home
 mkdir -p "$HOME" "$XDG_CONFIG_HOME"
-unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS JPDEV_FIXTURE_UNSET
+unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS JPDEV_CODEX_MODEL_DEFAULT JPDEV_CODEX_SANDBOX JPDEV_CODEX_WORDS JPDEV_FIXTURE_UNSET
 # What jpdev check exports to its steps: a run of these tests under it must not inherit it.
 unset JPDEV_ROOT JPDEV_WRAP JPDEV_NODE_BIN JPDEV_GO_BIN JPDEV_LOGDIR JPDEV_STEP_TIMEOUT
 jpdev=$kit/bin/jpdev
@@ -89,8 +89,40 @@ expect "jpdev check applies the Go address-space cap (a 1 MB cap fails the step)
 out=$("$jpdev" check --manifest "$fixture" --only go-env 2>/dev/null) && s=0 || s=$?
 expect "jpdev check runs a Go step" 0 'PASS +go-env' "$out" "$s"
 golog=$(cat "$JPDEV_SCRATCH"/logs/*/go-env.log 2>/dev/null)
-expect "a Go step runs with GOFLAGS=-mod=mod" 0 '^-mod=mod$' "$golog" 0
+expect "a Go step runs with GOFLAGS=-mod=readonly" 0 '^-mod=readonly$' "$golog" 0
+absent "a Go step does not run with -mod=mod" '^-mod=mod$' "$golog"
+out=$(GOFLAGS=-mod=mod "$jpdev" check --manifest "$fixture" --only go-env 2>/dev/null) && s=0 || s=$?
+golog=$(cat "$JPDEV_SCRATCH"/logs/*/go-env.log 2>/dev/null | tail -n 2)
+expect "a GOFLAGS in the environment does not reach a Go step" 0 '^-mod=readonly$' "$golog" 0
 expect "a Go step runs with a per-clone cache under the scratch directory" 0 "^$JPDEV_SCRATCH/gocache/" "$golog" 0
+
+# a Go step leaves go.mod byte-identical: under -mod=mod, go vet drops the "// indirect" marker of a
+# module the code imports directly; under -mod=readonly it does not (the module is a local replace)
+gomod=$work/gomod
+mkdir -p "$gomod/dep"
+git init -q -b main "$gomod"
+printf 'module example.com/dep\n\ngo 1.21\n' > "$gomod/dep/go.mod"
+printf 'package dep\n\nfunc F() int { return 1 }\n' > "$gomod/dep/dep.go"
+printf 'module example.com/app\n\ngo 1.21\n\nrequire example.com/dep v0.0.0 // indirect\n\nreplace example.com/dep => ./dep\n' > "$gomod/go.mod"
+printf 'package main\n\nimport "example.com/dep"\n\nfunc main() { _ = dep.F() }\n' > "$gomod/main.go"
+cat > "$gomod/dev.json" <<'JSON'
+{"version": 1, "toolchains": {"go": {}}, "checks": [{"name": "vet", "run": "go vet . && go build -o /dev/null .", "toolchain": "go"}]}
+JSON
+before=$(sha256sum "$gomod/go.mod")
+out=$(cd "$gomod" && "$jpdev" check 2>&1) && s=0 || s=$?
+expect "a Go step that vets and builds passes on a read-only module" 0 'PASS +vet' "$out" "$s"
+after=$(sha256sum "$gomod/go.mod")
+if [ "$before" = "$after" ]; then ok "a Go step leaves go.mod byte-identical"; else bad "a Go step leaves go.mod byte-identical" "$(cat "$gomod/go.mod")"; fi
+# the same step under -mod=mod does rewrite it, which is what the test above must catch
+(cd "$gomod" && GOFLAGS=-mod=mod go vet . > /dev/null 2>&1)
+if [ "$before" != "$(sha256sum "$gomod/go.mod")" ]; then ok "the test module is one that -mod=mod rewrites"; else bad "the test module is one that -mod=mod rewrites"; fi
+printf 'module example.com/app\n\ngo 1.21\n\nrequire example.com/dep v0.0.0 // indirect\n\nreplace example.com/dep => ./dep\n' > "$gomod/go.mod"
+# a module the files lack fails the step and leaves go.mod alone
+printf 'package main\n\nimport _ "example.com/missing"\n\nfunc main() {}\n' > "$gomod/main.go"
+before=$(sha256sum "$gomod/go.mod")
+out=$(cd "$gomod" && GOPROXY=off "$jpdev" check 2>&1) && s=0 || s=$?
+expect "a Go step that needs a module go.mod lacks fails" 1 'FAIL +vet' "$out" "$s"
+if [ "$before" = "$(sha256sum "$gomod/go.mod")" ]; then ok "a failed Go step leaves go.mod byte-identical"; else bad "a failed Go step leaves go.mod byte-identical"; fi
 
 # --- the node cap
 "$kit/lib/rsscap.sh" 6000 1 -- sleep 5 2>/dev/null; s=$?
@@ -319,6 +351,306 @@ expect "record refuses when the name check itself fails" 1 'the name check faile
 out=$("$jpdev" record post --file "$clean" --dry-run 2>&1) && s=0 || s=$?
 expect "record needs a pull request or an issue" 2 'give --pr N or --issue N' "$out" "$s"
 
+# --- jpdev push
+real_git=$(command -v git)
+mkdir -p "$work/gitstub"
+cat > "$work/gitstub/git" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = push ]; then echo x >> "\$STUB_GIT_ARGS.calls"; printf '%s\\0' "\$@" > "\$STUB_GIT_ARGS"; exit "\${STUB_GIT_EXIT:-0}"; fi
+done
+exec $real_git "\$@"
+STUB
+chmod +x "$work/gitstub/git"
+pushorigin=$work/pushorigin.git
+pushclone=$work/pushclone
+git init -q --bare -b main "$pushorigin"
+git init -q -b main "$pushclone"
+git -C "$pushclone" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m seed
+git -C "$pushclone" remote add origin "$pushorigin"
+git -C "$pushclone" switch -q -c topic
+export STUB_GIT_ARGS=$work/git-args
+rm -f "$STUB_GIT_ARGS"
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push topic 2>&1) && s=0 || s=$?
+expect "push with a branch name runs the push" 0 "" "$out" "$s"
+want=$(printf '%s\0' -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin topic | od -An -c)
+got=$(od -An -c < "$STUB_GIT_ARGS" 2>/dev/null)
+if [ "$want" = "$got" ]; then ok "push runs exactly the gh credential-helper form"; else bad "push runs exactly the gh credential-helper form" "$(tr '\0' ' ' < "$STUB_GIT_ARGS")"; fi
+rm -f "$STUB_GIT_ARGS"
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push 2>&1) && s=0 || s=$?
+expect "push without a branch pushes the current branch" 0 "" "$out" "$s"
+if [ "$(tr '\0' ' ' < "$STUB_GIT_ARGS")" = "-c credential.helper= -c credential.helper=!gh auth git-credential push -u origin topic " ]; then ok "push without a branch names the current branch"; else bad "push without a branch names the current branch" "$(tr '\0' ' ' < "$STUB_GIT_ARGS")"; fi
+for flag in --force -f --force-with-lease --force-if-includes -fu +topic; do
+  rm -f "$STUB_GIT_ARGS"
+  out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push "$flag" topic 2>&1) && s=0 || s=$?
+  expect "push refuses $flag" 2 'refused: a force push is never made' "$out" "$s"
+  if [ -e "$STUB_GIT_ARGS" ]; then bad "push $flag reached git push"; else ok "push $flag did not reach git push"; fi
+done
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push topic --force 2>&1) && s=0 || s=$?
+expect "push refuses --force after the branch" 2 'refused: a force push is never made' "$out" "$s"
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push -u 2>&1) && s=0 || s=$?
+expect "push refuses an option it does not know" 2 'unknown argument -u' "$out" "$s"
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push a b 2>&1) && s=0 || s=$?
+expect "push takes one branch" 2 'one branch only' "$out" "$s"
+out=$(cd "$pushclone" && PATH=$work/gitstub:$PATH "$jpdev" push 'a..b' 2>&1) && s=0 || s=$?
+expect "push refuses a name that is not a branch name" 2 'not a branch name' "$out" "$s"
+out=$(cd "$work" && PATH=$work/gitstub:$PATH "$jpdev" push topic 2>&1) && s=0 || s=$?
+expect "push outside a clone fails" 2 'not inside a git clone' "$out" "$s"
+out=$(cd "$pushclone" && STUB_GIT_EXIT=3 PATH=$work/gitstub:$PATH "$jpdev" push topic 2>&1) && s=0 || s=$?
+expect "push returns the exit status of git push" 3 "" "$out" "$s"
+out=$(cd "$pushclone" && "$jpdev" push topic 2>&1) && s=0 || s=$?
+expect "push pushes to a repository and sets the upstream" 0 "" "$out" "$s"
+if [ "$(git -C "$pushorigin" rev-parse refs/heads/topic 2>/dev/null)" = "$(git -C "$pushclone" rev-parse topic)" ] \
+  && [ "$(git -C "$pushclone" config branch.topic.remote)" = origin ]; then ok "the branch is on origin with its upstream set"; else bad "the branch is on origin with its upstream set"; fi
+unset STUB_GIT_ARGS
+# the agent instructions and the docs state the push form
+pushform="git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH"
+for doc in templates/AGENTS.md templates/CLAUDE.md AGENTS.md CLAUDE.md; do
+  if grep -qF -- "$pushform" "$kit/$doc" && grep -qF 'jpdev push' "$kit/$doc"; then ok "$doc states the push form and names jpdev push"; else bad "$doc states the push form and names jpdev push"; fi
+done
+if grep -qF 'jpdev push' "$kit/docs/adopting.md"; then ok "docs/adopting.md mentions jpdev push"; else bad "docs/adopting.md mentions jpdev push"; fi
+
+# --- jpdev codex (a stub codex first on PATH: the real one is never called)
+mkdir -p "$work/codexbin" "$work/codexclone"
+cat > "$work/codexbin/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$STUB_CODEX_ARGS"
+pwd > "$STUB_CODEX_CWD"
+timeout 2 cat > "$STUB_CODEX_STDIN"
+while [ $# -gt 0 ]; do
+  case $1 in -o) printf 'stub final message\n' > "$2" ;; esac
+  shift
+done
+if [ -n "${STUB_CODEX_EDIT:-}" ]; then
+  echo "edited by codex" >> file.txt
+  echo "new file" > created.txt
+fi
+if [ -n "${STUB_CODEX_MSG:-}" ]; then
+  cp "$STUB_CODEX_MSG" msg.txt
+  if [ -z "${STUB_CODEX_NO_PR:-}" ]; then printf 'Closes #1.\n\n## What it adds\nA line.\n' > pr.md; fi
+fi
+echo "stub transcript line"
+echo "stub stderr line" >&2
+exit "${STUB_CODEX_EXIT:-0}"
+STUB
+chmod +x "$work/codexbin/codex"
+export STUB_CODEX_ARGS=$work/codex-args STUB_CODEX_CWD=$work/codex-cwd STUB_CODEX_STDIN=$work/codex-stdin
+oldpath=$PATH
+PATH=$work/codexbin:$PATH
+printf '# Rules\n' > "$work/codexclone/AGENTS.md"
+printf 'Add the flag.\nIt must refuse an unknown value with exit 2.\n' > "$work/brief.md"
+codex_args() { rm -f "$STUB_CODEX_ARGS" "$STUB_CODEX_CWD" "$STUB_CODEX_STDIN"; }
+has_arg() { tr '\0' '\n' < "$STUB_CODEX_ARGS" 2>/dev/null | grep -qxF -- "$1"; }
+codex_args
+out=$(echo junk | "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort high --dir "$work/codexclone" --log "$work/codex.log" 2>/dev/null) && s=0 || s=$?
+expect "codex run prints the final message" 0 '^stub final message$' "$out" "$s"
+expect "codex run prints the exit code" 0 '^== codex exit 0 ' "$out" "$s"
+for a in exec -m model-x 'model_reasoning_effort=high' --sandbox workspace-write 'sandbox_workspace_write.network_access=true' -C "$work/codexclone"; do
+  if has_arg "$a"; then ok "codex run passes $a"; else bad "codex run passes $a" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+done
+if [ "$(tr '\0' '\n' < "$STUB_CODEX_ARGS" | sed -n '1,7p' | paste -sd' ')" = "exec -m model-x -c model_reasoning_effort=high --sandbox workspace-write" ]; then ok "codex run passes the model and effort as flags and values"; else bad "codex run passes the model and effort as flags and values" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+prompt=$(python3 -I -c 'import sys; a = open(sys.argv[1], "rb").read().split(b"\0"); sys.stdout.write(a[-2].decode())' "$STUB_CODEX_ARGS")
+if [ "$(head -n 1 <<< "$prompt")" = "The rules are this repository's AGENTS.md; follow them." ]; then ok "the prompt opens with one line naming AGENTS.md as the rules"; else bad "the prompt opens with one line naming AGENTS.md as the rules" "$prompt"; fi
+if [ "$(tail -n +2 <<< "$prompt")" = "$(cat "$work/brief.md")" ]; then ok "the prompt is that line and the brief's text"; else bad "the prompt is that line and the brief's text" "$prompt"; fi
+if [ "$(cat "$STUB_CODEX_CWD")" = "$(cd "$work/codexclone" && pwd -P)" ]; then ok "codex runs in the directory given"; else bad "codex runs in the directory given" "$(cat "$STUB_CODEX_CWD")"; fi
+if [ -f "$STUB_CODEX_STDIN" ] && [ ! -s "$STUB_CODEX_STDIN" ]; then ok "codex's stdin is /dev/null, whatever jpdev reads"; else bad "codex's stdin is /dev/null, whatever jpdev reads" "$(cat "$STUB_CODEX_STDIN")"; fi
+log=$(cat "$work/codex.log")
+expect "the transcript (stdout) is in the log" 0 '^stub transcript line$' "$log" 0
+expect "the transcript (stderr) is in the log" 0 '^stub stderr line$' "$log" 0
+absent "the final message is not part of the transcript" 'stub final message' "$log"
+out=$(STUB_CODEX_EXIT=7 "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex7.log" 2>/dev/null) && s=0 || s=$?
+expect "codex run returns codex's exit code" 7 '^== codex exit 7 ' "$out" "$s"
+codex_args
+out=$("$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort medium --dir "$work/codexclone" --sandbox danger-full-access --log "$work/codex-d.log" 2>/dev/null) && s=0 || s=$?
+expect "codex run accepts --sandbox danger-full-access" 0 'codex exit 0' "$out" "$s"
+if has_arg danger-full-access && ! has_arg 'sandbox_workspace_write.network_access=true'; then ok "danger-full-access is passed without the workspace-write network setting"; else bad "danger-full-access is passed without the workspace-write network setting" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+codex_args
+out=$(cd "$work/codexclone" && JPDEV_CODEX_MODEL_DEFAULT=model-d JPDEV_CODEX_SANDBOX=danger-full-access "$jpdev" codex run --no-commit --brief "$work/brief.md" --effort low 2>/dev/null) && s=0 || s=$?
+expect "codex run uses the configured default model, sandbox and the current directory" 0 'codex exit 0' "$out" "$s"
+if has_arg model-d && has_arg danger-full-access; then ok "the defaults reach codex"; else bad "the defaults reach codex" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+logline=$(grep -E '^== codex exit' <<< "$out")
+if [ -f "$(sed -E 's/.*transcript: (.*)\) ==$/\1/' <<< "$logline")" ]; then ok "with no --log the transcript is under the scratch directory"; else bad "with no --log the transcript is under the scratch directory" "$logline"; fi
+codex_args
+out=$("$jpdev" codex run --brief "$work/brief.md" --effort high --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run refuses a run with no model" 2 '--model is needed' "$out" "$s"
+out=$("$jpdev" codex run --brief "$work/brief.md" --model m --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run refuses a run with no effort" 2 'low, medium or high' "$out" "$s"
+out=$("$jpdev" codex run --brief "$work/brief.md" --model m --effort max --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run refuses an effort it does not know" 2 'low, medium or high' "$out" "$s"
+out=$("$jpdev" codex run --brief "$work/brief.md" --model m --effort low --sandbox read-only --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run refuses a sandbox it does not know" 2 'workspace-write or danger-full-access' "$out" "$s"
+out=$("$jpdev" codex run --brief "$work/nobrief.md" --model m --effort low --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run needs the brief file" 2 '--brief must name a file' "$out" "$s"
+mkdir -p "$work/norules"
+out=$("$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$work/norules" 2>&1) && s=0 || s=$?
+expect "codex run refuses a directory with no AGENTS.md" 2 'holds no AGENTS.md' "$out" "$s"
+if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused run did not start codex"; else ok "a refused run did not start codex"; fi
+
+# check-brief: the base list, the neutral phrasing, the config extension
+printf 'Reject a request with an unexpected value and return the documented error.\nA shackle is a ring.\n' > "$work/clean-brief.md"
+out=$("$jpdev" codex check-brief "$work/clean-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief accepts a brief with no listed word" 0 'no word of the filter list' "$out" "$s"
+printf 'Defend against an attacker who sends a prompt injection.\nIt must stop the EXPLOITATION of the parser.\n' > "$work/dirty-brief.md"
+out=$("$jpdev" codex check-brief "$work/dirty-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
+expect "check-brief names the line and the word" 1 'line 1: "attacker"' "$out" "$s"
+expect "check-brief matches a phrase" 1 'line 1: "prompt injection": describe the untrusted text' "$out" "$s"
+expect "check-brief matches regardless of case and ending" 1 'line 2: "EXPLOITATION"' "$out" "$s"
+expect "check-brief suggests the neutral phrasing" 1 'describe the input the code receives and the refusal it must produce' "$out" "$s"
+expect "check-brief points at the documented refusal" 1 'describe the documented refusal instead' "$out" "$s"
+absent "check-brief does not flag a word that merely contains a listed one" 'shackle' "$out"
+n=0
+while IFS= read -r line; do
+  case $line in '' | '#'*) continue ;; esac
+  term=${line%%=>*}; term=${term%"${term##*[![:space:]]}"}
+  n=$((n + 1))
+  printf 'The change handles %s here.\n' "$term" > "$work/term-brief.md"
+  out=$("$jpdev" codex check-brief "$work/term-brief.md" 2>&1) && s=0 || s=$?
+  if [ "$s" -ne 1 ]; then bad "check-brief refuses the base-list term '$term'" "$out"; fi
+  [ -z "${term_failed:-}" ] || true
+done < "$kit/config/codex-words.txt"
+if [ "$n" -ge 20 ]; then ok "check-brief refuses each of the $n terms of config/codex-words.txt"; else bad "the base word list holds at least 20 terms" "$n"; fi
+printf 'extra-term => say it plainly\n' > "$work/extra-words.txt"
+printf 'Handle the extra-term case.\n' > "$work/extra-brief.md"
+out=$("$jpdev" codex check-brief "$work/extra-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief accepts a term the base list lacks" 0 'no word of the filter list' "$out" "$s"
+out=$(JPDEV_CODEX_WORDS=$work/extra-words.txt "$jpdev" codex check-brief "$work/extra-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief refuses a term the config adds, with its phrasing" 1 'line 1: "extra-term": say it plainly' "$out" "$s"
+out=$(JPDEV_CODEX_WORDS=$work/extra-words.txt "$jpdev" codex check-brief "$work/dirty-brief.md" 2>&1) && s=0 || s=$?
+expect "the config extends the base list and does not replace it" 1 'line 1: "attacker"' "$out" "$s"
+out=$("$jpdev" codex check-brief "$work/nobrief.md" 2>&1) && s=0 || s=$?
+expect "check-brief needs the file" 2 'give the brief file' "$out" "$s"
+codex_args
+out=$("$jpdev" codex run --no-commit --brief "$work/dirty-brief.md" --model m --effort low --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
+if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused brief did not start codex"; else ok "a refused brief did not start codex"; fi
+out=$("$jpdev" codex 2>&1) && s=0 || s=$?
+expect "codex needs a subcommand" 2 'the subcommands are run, check-brief and brief-template' "$out" "$s"
+# the git part: commit, push, pull request, from the msg.txt and pr.md codex wrote
+export STUB_GIT_ARGS=$work/git-args
+mkdir -p "$work/ghbin"
+cat > "$work/ghbin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo x >> "$STUB_GH_CALLS"
+printf '%s\0' "$@" > "$STUB_GH_ARGS"
+while [ $# -gt 0 ]; do
+  case $1 in --body-file) cp "$2" "$STUB_GH_BODY" ;; esac
+  shift
+done
+echo "https://github.com/Example/repo/pull/1"
+STUB
+chmod +x "$work/ghbin/gh"
+export STUB_GH_CALLS=$work/gh-calls STUB_GH_ARGS=$work/gh-args STUB_GH_BODY=$work/gh-body
+export GIT_AUTHOR_NAME=Test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=Test GIT_COMMITTER_EMAIL=test@example.com
+cxorigin=$work/cxorigin.git
+cxrepo=$work/cxrepo
+git init -q --bare -b main "$cxorigin"
+git init -q -b main "$cxrepo"
+printf '# Rules\n' > "$cxrepo/AGENTS.md"
+printf 'one\n' > "$cxrepo/file.txt"
+git -C "$cxrepo" add AGENTS.md file.txt
+git -C "$cxrepo" commit -q -m seed
+git -C "$cxrepo" remote add origin "$cxorigin"
+git -C "$cxrepo" push -q origin main
+git -C "$cxrepo" switch -q -c work
+printf 'Add the line\n\nExplain why.\n' > "$work/msg-plain.txt"
+printf 'Add the line\n\nExplain why.\n\nCo-Authored-By: Codex <noreply@openai.com>\n' > "$work/msg-trailer.txt"
+cx_reset() {
+  git -C "$cxrepo" reset -q --hard origin/main
+  git -C "$cxrepo" clean -q -fdx
+  git -C "$cxrepo" switch -q -C work
+  rm -f "$STUB_GIT_ARGS" "$STUB_GIT_ARGS.calls" "$STUB_GH_CALLS" "$STUB_GH_ARGS" "$STUB_GH_BODY" "$STUB_CODEX_ARGS"
+}
+cx_run() { # extra arguments to codex run
+  PATH=$work/gitstub:$work/ghbin:$PATH "$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$cxrepo" --repo Example/repo --log "$work/cx.log" "$@" 2>&1
+}
+cx_calls() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
+base=$(git -C "$cxrepo" rev-parse HEAD)
+
+cx_reset
+printf 'untracked and not named\n' > "$cxrepo/stray.txt"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "codex run commits, pushes and opens the pull request" 0 'committed [0-9a-f]+ on work' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 1 ]; then ok "codex run makes one commit"; else bad "codex run makes one commit"; fi
+if [ "$(git -C "$cxrepo" show --name-only --format= HEAD)" = file.txt ]; then ok "the commit holds the tracked change only"; else bad "the commit holds the tracked change only" "$(git -C "$cxrepo" show --name-only --format= HEAD)"; fi
+expect "the untracked files left out are listed" 0 'stray.txt' "$out" "$s"
+msg=$(git -C "$cxrepo" log -1 --format=%B)
+expect "the commit has the subject of msg.txt" 0 '^Add the line$' "$msg" 0
+expect "the commit is signed off" 0 '^Signed-off-by: Test <test@example.com>$' "$msg" 0
+expect "the commit has the Codex trailer, added" 0 '^Co-Authored-By: Codex <noreply@openai.com>$' "$msg" 0
+if [ "$(grep -c '^Co-Authored-By: Codex' <<< "$msg")" = 1 ]; then ok "the Codex trailer appears once"; else bad "the Codex trailer appears once" "$msg"; fi
+if [ "$(cx_calls "$STUB_GIT_ARGS.calls")" = 1 ] && [ "$(tr '\0' ' ' < "$STUB_GIT_ARGS")" = "-c credential.helper= -c credential.helper=!gh auth git-credential push -u origin work " ]; then ok "one push, in the credential-helper form"; else bad "one push, in the credential-helper form" "$(tr '\0' ' ' < "$STUB_GIT_ARGS" 2>/dev/null)"; fi
+if [ "$(cx_calls "$STUB_GH_CALLS")" = 1 ]; then ok "one gh pr create call"; else bad "one gh pr create call"; fi
+if [ "$(tr '\0' ' ' < "$STUB_GH_ARGS")" = "pr create --repo Example/repo --base main --head work --title Add the line --body-file pr.md " ]; then ok "the pull request is made with --repo, --base, the subject and pr.md"; else bad "the pull request is made with --repo, --base, the subject and pr.md" "$(tr '\0' ' ' < "$STUB_GH_ARGS")"; fi
+expect "the pull request body is pr.md" 0 '^Closes #1\.$' "$(cat "$STUB_GH_BODY")" 0
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-trailer.txt cx_run) && s=0 || s=$?
+expect "codex run takes a msg.txt that has the trailer" 0 'committed' "$out" "$s"
+msg=$(git -C "$cxrepo" log -1 --format=%B)
+if [ "$(grep -c '^Co-Authored-By: Codex' <<< "$msg")" = 1 ]; then ok "a trailer already in msg.txt is not repeated"; else bad "a trailer already in msg.txt is not repeated" "$msg"; fi
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add created.txt) && s=0 || s=$?
+expect "codex run --add commits a new file named" 0 'committed' "$out" "$s"
+if [ "$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')" = "created.txt file.txt" ]; then ok "--add puts the named file in the commit"; else bad "--add puts the named file in the commit"; fi
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --no-push) && s=0 || s=$?
+expect "codex run --no-push commits and stops" 0 'committed' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 1 ] && [ ! -e "$STUB_GIT_ARGS" ] && [ ! -e "$STUB_GH_CALLS" ]; then ok "--no-push: a commit, no push, no pull request"; else bad "--no-push: a commit, no push, no pull request"; fi
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --no-pr) && s=0 || s=$?
+expect "codex run --no-pr pushes and stops" 0 'pushed work' "$out" "$s"
+if [ -e "$STUB_GIT_ARGS" ] && [ ! -e "$STUB_GH_CALLS" ]; then ok "--no-pr: a push, no pull request"; else bad "--no-pr: a push, no pull request"; fi
+
+cx_reset
+out=$(STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "with no edits codex run makes no commit and exits 1" 1 'nothing to commit' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ] && [ ! -e "$STUB_GIT_ARGS" ] && [ ! -e "$STUB_GH_CALLS" ]; then ok "no edits: no commit, no push, no pull request"; else bad "no edits: no commit, no push, no pull request"; fi
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 cx_run) && s=0 || s=$?
+expect "codex run refuses when codex wrote no msg.txt" 1 'wrote no msg.txt' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "no msg.txt: no commit"; else bad "no msg.txt: no commit"; fi
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_NO_PR=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "codex run refuses when codex wrote no pr.md" 1 'wrote no pr.md' "$out" "$s"
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_EXIT=4 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "codex run does not commit after a failed codex run" 4 'codex exit 4' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "a failed codex run: no commit"; else bad "a failed codex run: no commit"; fi
+cx_reset
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add msg.txt) && s=0 || s=$?
+expect "codex run refuses --add msg.txt" 2 'read, never committed' "$out" "$s"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add ../outside) && s=0 || s=$?
+expect "codex run refuses --add outside the clone" 2 'inside the clone' "$out" "$s"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt PATH=$work/gitstub:$work/ghbin:$PATH "$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$cxrepo" 2>&1) && s=0 || s=$?
+expect "codex run needs --repo to open the pull request" 2 '--repo OWNER/NAME is needed' "$out" "$s"
+if [ ! -e "$STUB_CODEX_ARGS" ]; then ok "a run refused for its flags did not start codex"; else bad "a run refused for its flags did not start codex"; fi
+git -C "$cxrepo" switch -q main
+out=$(STUB_CODEX_EDIT=1 cx_run) && s=0 || s=$?
+expect "codex run refuses to commit on main" 2 'make a work branch first' "$out" "$s"
+if [ ! -e "$STUB_CODEX_ARGS" ]; then ok "a run refused for the branch did not start codex"; else bad "a run refused for the branch did not start codex"; fi
+git -C "$cxrepo" switch -q work
+cx_reset
+printf 'stale\n' > "$cxrepo/msg.txt"
+out=$(STUB_CODEX_EDIT=1 cx_run --no-push) && s=0 || s=$?
+expect "a msg.txt left by an earlier run is not used" 1 'wrote no msg.txt' "$out" "$s"
+
+# the brief template
+out=$("$jpdev" codex brief-template 2>&1) && s=0 || s=$?
+if [ "$out" = "$(cat "$kit/templates/codex-brief.md")" ]; then ok "brief-template prints templates/codex-brief.md"; else bad "brief-template prints templates/codex-brief.md"; fi
+expect "the brief template tells codex to write msg.txt" 0 'msg\.txt' "$out" "$s"
+expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
+expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
+out=$("$jpdev" codex check-brief "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
+expect "the brief template passes check-brief" 0 'no word of the filter list' "$out" "$s"
+unset STUB_GIT_ARGS STUB_GH_CALLS STUB_GH_ARGS STUB_GH_BODY GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+PATH=$oldpath
+unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN
+
 # --- env
 printf 'JPDEV_NODE_RSS_MB=4321\nJPDEV_GO_TIMEOUT_S=99\n' > "$XDG_CONFIG_HOME/jpdev.env.tmp"
 mkdir -p "$XDG_CONFIG_HOME/jpdev"; mv "$XDG_CONFIG_HOME/jpdev.env.tmp" "$XDG_CONFIG_HOME/jpdev/env"
@@ -326,6 +658,7 @@ out=$(JPDEV_GO_TIMEOUT_S=55 "$jpdev" env 2>&1) && s=0 || s=$?
 expect "env reports a config-file value as such" 0 'JPDEV_NODE_RSS_MB +4321 +config file' "$out" "$s"
 expect "env lets the environment win over the config file" 0 'JPDEV_GO_TIMEOUT_S +55 +environment' "$out" "$s"
 expect "env reports a default as such" 0 'JPDEV_PY_ULIMIT_KB +4000000 +default' "$out" "$s"
+expect "env reports the codex sandbox default" 0 'JPDEV_CODEX_SANDBOX +workspace-write +default' "$out" "$s"
 rm -f "$XDG_CONFIG_HOME/jpdev/env"
 
 # --- setup, on a local origin

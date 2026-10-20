@@ -2,7 +2,9 @@
 # wrap.sh TOOLCHAIN -- command...
 # Runs one command under the cap its toolchain needs on a shared machine:
 #   node    the resident-memory cap (lib/rsscap.sh); never ulimit -v, which breaks vite and vitest
-#   go      the machine lock, ulimit -v, GOFLAGS=-mod=mod, a per-clone GOCACHE, timeout
+#   go      the machine lock, ulimit -v, GOFLAGS=-mod=readonly, a per-clone GOCACHE, timeout
+#           (-mod=readonly: a step never rewrites go.mod or go.sum, as in CI; a module the
+#           files lack fails the step instead of being added)
 #   python  ulimit -v and timeout
 #   shell   timeout only
 # JPDEV_STEP_TIMEOUT (seconds) replaces the toolchain's default timeout for this one command.
@@ -34,7 +36,7 @@ case $toolchain in
     if ! flock -n "$JPDEV_LOCK" true; then jpdev_log "waiting for the machine lock"; fi
     # shellcheck disable=SC2016  # the script is for the inner bash, which expands it
     exec flock "$JPDEV_LOCK" bash -c '
-      ulimit -v "$1"; export GOFLAGS=-mod=mod GOCACHE="$2"; tmo=$3; shift 3
+      ulimit -v "$1"; export GOFLAGS=-mod=readonly GOCACHE="$2"; tmo=$3; shift 3
       exec timeout -k 10 "$tmo" "$@"' jpdev-go "$JPDEV_GO_ULIMIT_KB" "$cache" "${step_timeout:-$JPDEV_GO_TIMEOUT_S}" "$@"
     ;;
   python)

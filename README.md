@@ -77,6 +77,9 @@ the same name overrides it. `config/env.example` documents each setting with its
 | `JPDEV_NVM_DIR` | `$NVM_DIR` or `~/.nvm` | where node versions live |
 | `JPDEV_GO_SDK_DIR` | `~/sdk` | where a Go release the manifest names is looked for, when the go on PATH is another (`sdk/go1.26.5/bin/go`) |
 | `JPDEV_NAME_PATTERNS` | `~/.config/jpdev/name-patterns` | regexes the record gate refuses |
+| `JPDEV_CODEX_MODEL_DEFAULT` | none (the model is always passed) | the model `jpdev codex run` uses when `--model` is not given |
+| `JPDEV_CODEX_SANDBOX` | `workspace-write` | the sandbox mode of `jpdev codex run` |
+| `JPDEV_CODEX_WORDS` | `~/.config/jpdev/codex-words.txt` | extra terms for `jpdev codex check-brief` |
 
 ## Commands
 
@@ -96,6 +99,38 @@ the same name overrides it. `config/env.example` documents each setting with its
   remains, a line matches the name patterns, or the name-pattern file is missing or holds a
   pattern `grep -E` cannot compile, and posts with `gh ... comment --body-file`. A post that
   should go without the name check says `--no-name-check`.
+- `jpdev push [BRANCH]`: pushes BRANCH (default: the current branch) to `origin` with exactly
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`,
+  so the push uses the `gh` login and no stored credential. It refuses `--force`, `-f` and a
+  `+` refspec.
+- `jpdev codex run --brief FILE --model M --effort low|medium|high [--dir CLONE] [--repo OWNER/NAME]
+  [--base main] [--add PATH]... [--no-commit] [--no-push] [--no-pr] [--sandbox
+  workspace-write|danger-full-access] [--log FILE]`: checks the brief, then runs `codex exec` in
+  CLONE (a clone on a work branch that holds an `AGENTS.md`) with `-m`,
+  `-c model_reasoning_effort=`, `--sandbox` (network access on for `workspace-write`), stdin from
+  `/dev/null`, and a prompt of one line naming the repository's `AGENTS.md` as the rules followed
+  by the brief's text. The transcript goes to the log (default under `JPDEV_SCRATCH/logs`); the
+  command prints the final message and the exit code. The model is always passed: `--model`, or
+  `JPDEV_CODEX_MODEL_DEFAULT` from the config file.
+
+  Codex in `workspace-write` cannot write `.git`, so it does not commit. It writes `msg.txt` (the
+  commit message) and `pr.md` (the pull request body) in the clone, and after `codex exec` returns
+  the command does the git part: it stages the changes to tracked files (`git add -u`, plus the
+  paths named with `--add`; no other untracked file, and never `msg.txt` or `pr.md`), commits with
+  `-s` and the message of `msg.txt` with the `Co-Authored-By: Codex <noreply@openai.com>` trailer
+  added when `msg.txt` lacks it, pushes as `jpdev push` does, and opens the pull request with
+  `gh pr create --repo OWNER/NAME --base BASE --head BRANCH`, the subject of `msg.txt` as the
+  title and `pr.md` as the body. `--no-push` stops after the commit, `--no-pr` after the push and
+  `--no-commit` runs Codex alone. It stops with exit 1 and commits nothing when Codex changed no
+  tracked file or wrote no `msg.txt` (or no `pr.md`, when a pull request is to be opened), and
+  refuses a clone on `main`. The exit status is Codex's own when it fails, else 0 when every step
+  asked for was done. `--sandbox danger-full-access` is an explicit option only.
+- `jpdev codex brief-template`: prints `templates/codex-brief.md`, a brief skeleton that tells
+  Codex to write `msg.txt` and `pr.md` and not to commit.
+- `jpdev codex check-brief FILE`: exits 1 and names the neutral phrasing for each word of
+  [`config/codex-words.txt`](config/codex-words.txt) (and of the file `JPDEV_CODEX_WORDS` names)
+  that the brief holds. `codex run` runs the same check first and does not start the run on a
+  refusal.
 - `jpdev env`: the effective settings and where each came from.
 
 ## The caps
@@ -103,7 +138,7 @@ the same name overrides it. `config/env.example` documents each setting with its
 | Toolchain | Cap |
 | --- | --- |
 | `node` | `lib/rsscap.sh`: the process group's resident memory and a timeout; never `ulimit -v`, which breaks vite and vitest |
-| `go` | `flock` on the machine lock, `ulimit -v`, `GOFLAGS=-mod=mod`, a per-clone `GOCACHE`, `timeout` |
+| `go` | `flock` on the machine lock, `ulimit -v`, `GOFLAGS=-mod=readonly` (a step never rewrites `go.mod`), a per-clone `GOCACHE`, `timeout` |
 | `python` | `ulimit -v` and `timeout` |
 | `shell` | `timeout` only |
 
@@ -113,9 +148,12 @@ script uses the environment's interpreter and packages.
 
 ## What is here
 
-- `bin/jpdev`, `lib/`: the command, the caps, the manifest check.
+- `bin/jpdev`, `lib/`: the command, the caps, the manifest check, the brief check.
+- `config/env.example`, `config/codex-words.txt`: the settings by example, and the base word list of
+  `jpdev codex check-brief`.
 - `templates/dev.json`, `templates/dev.schema.json`: the manifest by example and its JSON Schema.
 - `templates/check.sh`: the public runner a repository vendors as `scripts/dev/check.sh`.
+- `templates/codex-brief.md`: the brief skeleton `jpdev codex brief-template` prints.
 - `templates/AGENTS.md`, `templates/CLAUDE.md`: the agent instructions (one text, generated from
   the other by `scripts/sync-agent-docs.sh`).
 - `templates/ci-check.yml`: the CI step list.

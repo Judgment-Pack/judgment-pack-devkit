@@ -11,6 +11,11 @@ Edit `AGENTS.md` and run `scripts/sync-agent-docs.sh` to regenerate `CLAUDE.md`.
 - If a check fails: read its first lines in the block, fix the cause, re-run that one check with
   `--only NAME`, then run the whole list once more. Do not loop on the whole list.
 - Start no CI watch. Push, report once, and stop; CI owns everything deterministic.
+- Push with `jpdev push [BRANCH]`, or where the kit is not installed with
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`.
+  The machine's stored git credential can be another account's, and a plain `git push` is then
+  refused; the helper form uses the `gh` login. Never store a credential, never change global git
+  configuration, never push with force (`jpdev push` refuses `--force` and `-f`).
 
 ## Rules
 

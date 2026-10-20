@@ -54,6 +54,15 @@ Copy `templates/AGENTS.md` to the repository root and generate `CLAUDE.md` from 
 without writing, for a CI step. Add the repository's own rules below the shared ones in
 `AGENTS.md`, not in `CLAUDE.md`.
 
+The shared rules state how to push: with the `gh` credential helper and never with force, because
+the machine's stored git credential can be another account's and a plain `git push` is then
+refused. Where the kit is installed, `jpdev push [BRANCH]` runs exactly that form
+(`git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`)
+and refuses `--force` and `-f`; the instructions give the full command for where it is not. The
+kit changes no global git configuration. A repository that adopted an earlier copy of the
+instructions copies `templates/AGENTS.md` again (keeping its own rules below the shared ones) and
+regenerates `CLAUDE.md`.
+
 ## 4. Add the CI workflow
 
 Copy `templates/ci-check.yml` to `.github/workflows/dev-check.yml`. It reads the toolchain

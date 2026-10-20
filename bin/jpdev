@@ -20,6 +20,20 @@ usage: jpdev COMMAND [ARGS]
   record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run] [--no-name-check]
                      reduce local paths, refuse a path, a name pattern, a missing or invalid
                      name-pattern file, then post the file
+  push [BRANCH]      push BRANCH (default: the current branch) to origin with the gh credential
+                     helper and no stored credential; refuses --force and -f
+  codex run --brief FILE --model M --effort low|medium|high [--dir CLONE] [--repo OWNER/NAME]
+            [--base main] [--add PATH]... [--no-commit] [--no-push] [--no-pr]
+            [--sandbox workspace-write|danger-full-access] [--log FILE]
+                     check the brief, run `codex exec` on it in CLONE (a work branch) with the
+                     model, effort and sandbox explicit, stdin closed and the transcript in the
+                     log; print the final message and the exit code; then commit the tracked
+                     changes (msg.txt, signed off), push, and open the pull request (pr.md)
+  codex brief-template
+                     print the brief skeleton: what Codex writes (msg.txt, pr.md) and does not do
+  codex check-brief FILE
+                     refuse a brief that holds a word of the filter list, and suggest the
+                     neutral phrasing
   env                print the effective settings and where each came from
   --version          print the version
 USAGE
@@ -254,6 +268,205 @@ cmd_record() {
   gh "$kind" comment "$number" ${repo:+--repo "$repo"} --body-file "$reduced"
 }
 
+# cmd_push [BRANCH]: the push form with the gh credential helper, never a stored credential.
+cmd_push() {
+  local branch="" arg
+  for arg in "$@"; do
+    case $arg in
+      --force* | -f* | +*) jpdev_die "push: refused: a force push is never made (jpdev push takes a branch name only)" ;;
+      -*) jpdev_die "push: unknown argument $arg (jpdev push takes a branch name only)" ;;
+      *) [ -z "$branch" ] || jpdev_die "push: one branch only"; branch=$arg ;;
+    esac
+  done
+  repo_root > /dev/null
+  if [ -z "$branch" ]; then
+    branch=$(git symbolic-ref --short -q HEAD) || jpdev_die "push: HEAD is not on a branch; name the branch"
+  fi
+  git check-ref-format --branch "$branch" > /dev/null 2>&1 || jpdev_die "push: '$branch' is not a branch name"
+  jpdev_git_net push -u origin "$branch"
+}
+
+# cmd_codex run|check-brief ...
+cmd_codex() {
+  local sub=${1:-}
+  [ $# -eq 0 ] || shift
+  case $sub in
+    run) codex_run "$@" ;;
+    check-brief) codex_check_brief "$@" ;;
+    brief-template) codex_brief_template ;;
+    -h | --help | help) usage; exit 0 ;;
+    *) jpdev_die "codex: the subcommands are run, check-brief and brief-template" ;;
+  esac
+}
+
+# codex_check_brief FILE: exit 1 and the neutral phrasing for each word of the filter list in FILE.
+codex_check_brief() {
+  local file=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -h | --help) usage; exit 0 ;;
+      -*) jpdev_die "codex check-brief: unknown argument $1" ;;
+      *) [ -z "$file" ] || jpdev_die "codex check-brief: one brief only"; file=$1; shift ;;
+    esac
+  done
+  [ -f "$file" ] || jpdev_die "codex check-brief: give the brief file"
+  local out status
+  out=$(python3 -I "$kit/lib/codex_words.py" "$file" "$kit/config/codex-words.txt" "$JPDEV_CODEX_WORDS")
+  status=$?
+  case $status in
+    0) echo "jpdev codex check-brief: no word of the filter list in $file" ;;
+    1)
+      printf 'jpdev codex check-brief: refused: %s holds words the content filter trips on:\n' "$file" >&2
+      printf '  %s\n' "${out//$'\n'/$'\n'  }" >&2
+      echo "describe the documented refusal instead (the input, and the exact refusal the code must produce)" >&2
+      exit 1
+      ;;
+    *) jpdev_die "codex check-brief: the check failed (exit $status)" ;;
+  esac
+}
+
+# codex_run: the Codex CLI build from a brief, then the git part (commit, push, pull request).
+# Codex runs in workspace-write and cannot write .git, so the wrapper commits, pushes and opens
+# the pull request itself from the msg.txt and pr.md that Codex wrote.
+codex_run() {
+  local brief="" model=$JPDEV_CODEX_MODEL_DEFAULT effort="" dir=. sandbox=$JPDEV_CODEX_SANDBOX log=""
+  local repo="" base=main commit=1 push=1 pr=1 adds=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --brief) need_value "$@"; brief=$2; shift 2 ;;
+      --model) need_value "$@"; model=$2; shift 2 ;;
+      --effort) need_value "$@"; effort=$2; shift 2 ;;
+      --dir) need_value "$@"; dir=$2; shift 2 ;;
+      --sandbox) need_value "$@"; sandbox=$2; shift 2 ;;
+      --log) need_value "$@"; log=$2; shift 2 ;;
+      --repo) need_value "$@"; repo=$2; shift 2 ;;
+      --base) need_value "$@"; base=$2; shift 2 ;;
+      --add) need_value "$@"; adds+=("$2"); shift 2 ;;
+      --no-commit) commit=0; shift ;;
+      --no-push) push=0; shift ;;
+      --no-pr) pr=0; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) jpdev_die "codex run: unknown argument $1" ;;
+    esac
+  done
+  [ -f "$brief" ] || jpdev_die "codex run: --brief must name a file"
+  [ -n "$model" ] || jpdev_die "codex run: --model is needed (the model is always passed; JPDEV_CODEX_MODEL_DEFAULT can name one)"
+  case $effort in
+    low | medium | high) ;;
+    *) jpdev_die "codex run: --effort is low, medium or high" ;;
+  esac
+  case $sandbox in
+    workspace-write | danger-full-access) ;;
+    *) jpdev_die "codex run: --sandbox is workspace-write or danger-full-access" ;;
+  esac
+  [ -d "$dir" ] || jpdev_die "codex run: --dir is not a directory"
+  dir=$(cd "$dir" && pwd)
+  [ -f "$dir/AGENTS.md" ] || jpdev_die "codex run: $dir holds no AGENTS.md, which the prompt names as the rules"
+  command -v codex > /dev/null || jpdev_die "codex run: codex is not on PATH"
+  local branch=""
+  if [ "$commit" -eq 1 ]; then
+    git -C "$dir" rev-parse --show-toplevel > /dev/null 2>&1 || jpdev_die "codex run: $dir is not a git clone (--no-commit runs codex alone)"
+    branch=$(git -C "$dir" symbolic-ref --short -q HEAD) || jpdev_die "codex run: HEAD is not on a branch"
+    case $branch in
+      main | master) jpdev_die "codex run: the clone is on $branch; make a work branch first (the wrapper commits and pushes the current branch)" ;;
+    esac
+    if [ "$push" -eq 1 ] && [ "$pr" -eq 1 ] && [ -z "$repo" ]; then
+      jpdev_die "codex run: --repo OWNER/NAME is needed to open the pull request (--no-pr stops after the push)"
+    fi
+    local path
+    for path in "${adds[@]}"; do
+      case $path in
+        msg.txt | pr.md | ./msg.txt | ./pr.md) jpdev_die "codex run: --add $path: msg.txt and pr.md are read, never committed" ;;
+        /* | .. | ../* | */../*) jpdev_die "codex run: --add takes a path inside the clone" ;;
+      esac
+    done
+  fi
+  brief=$(cd "$(dirname "$brief")" && pwd)/$(basename "$brief")
+  codex_check_brief "$brief"
+  if [ -z "$log" ]; then
+    mkdir -p "$JPDEV_SCRATCH/logs"
+    log=$JPDEV_SCRATCH/logs/codex-$(basename "$dir")-$(date +%Y%m%dT%H%M%S).log
+  fi
+  mkdir -p "$(dirname "$log")"
+  log=$(cd "$(dirname "$log")" && pwd)/$(basename "$log")
+  local final prompt
+  final=$(mktemp)
+  # a msg.txt or pr.md left by an earlier run is not this run's
+  rm -f -- "$dir/msg.txt" "$dir/pr.md"
+  prompt="The rules are this repository's AGENTS.md; follow them.
+$(cat "$brief")"
+  local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
+  if [ "$sandbox" = workspace-write ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
+  args+=(-C "$dir" -o "$final" "$prompt")
+  jpdev_log "codex run: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log"
+  (cd "$dir" && codex "${args[@]}" < /dev/null > "$log" 2>&1)
+  local status=$?
+  echo "== codex final message =="
+  if [ -s "$final" ]; then cat "$final"; else echo "(none written)"; fi
+  rm -f -- "$final"
+  echo "== codex exit $status (transcript: $log) =="
+  if [ "$status" -ne 0 ] || [ "$commit" -eq 0 ]; then exit "$status"; fi
+  codex_publish "$dir" "$branch" "$push" "$pr" "$repo" "$base" "${adds[@]}"
+}
+
+# codex_publish DIR BRANCH PUSH PR REPO BASE [ADD...]: stage the tracked changes (and the paths
+# named with --add; never an untracked file otherwise, never msg.txt or pr.md), commit them signed
+# off with the message in msg.txt plus the Codex trailer, push the branch, open the pull request
+# from pr.md. Exits 0 when every step asked for was done, 1 when there was nothing to commit or a
+# file was missing, and the failing command's status otherwise.
+codex_publish() {
+  local dir=$1 branch=$2 push=$3 pr=$4 repo=$5 base=$6
+  shift 6
+  local trailer="Co-Authored-By: Codex <noreply@openai.com>" tmpd
+  cd "$dir" || exit 2
+  if [ ! -s msg.txt ]; then
+    echo "jpdev codex run: refused: codex wrote no msg.txt (the commit message); nothing was committed" >&2
+    exit 1
+  fi
+  if [ "$pr" -eq 1 ] && [ "$push" -eq 1 ] && [ ! -s pr.md ]; then
+    echo "jpdev codex run: refused: codex wrote no pr.md (the pull request body); nothing was committed" >&2
+    exit 1
+  fi
+  git add -u || exit 1
+  local path
+  for path in "$@"; do
+    git add -- "$path" || { echo "jpdev codex run: --add $path could not be staged" >&2; exit 1; }
+  done
+  if git diff --cached --name-only | grep -qxE 'msg\.txt|pr\.md'; then
+    git reset -q -- msg.txt pr.md
+    echo "jpdev codex run: refused: msg.txt or pr.md is tracked and changed; they are read, never committed" >&2
+    exit 1
+  fi
+  if git diff --cached --quiet; then
+    echo "jpdev codex run: nothing to commit: codex made no change to a tracked file" >&2
+    exit 1
+  fi
+  tmpd=$(mktemp -d)
+  git interpret-trailers --if-exists addIfDifferent --trailer "$trailer" msg.txt > "$tmpd/message" || { rm -rf -- "${tmpd:?}"; exit 1; }
+  git commit -q -s -F "$tmpd/message" || { local st=$?; rm -rf -- "${tmpd:?}"; echo "jpdev codex run: the commit failed" >&2; exit "$st"; }
+  local subject sha
+  subject=$(head -n 1 "$tmpd/message")
+  rm -rf -- "${tmpd:?}"
+  sha=$(git rev-parse --short HEAD)
+  echo "== jpdev codex run: committed $sha on $branch =="
+  git diff-tree --no-commit-id --name-status -r HEAD
+  local stray
+  stray=$(git ls-files --others --exclude-standard | grep -vxE 'msg\.txt|pr\.md')
+  if [ -n "$stray" ]; then
+    echo "untracked files left out of the commit (pass --add PATH to include one):"
+    printf '  %s\n' "$stray"
+  fi
+  [ "$push" -eq 1 ] || exit 0
+  cmd_push "$branch" || { local st=$?; echo "jpdev codex run: the push failed; the commit $sha is local" >&2; exit "$st"; }
+  echo "== jpdev codex run: pushed $branch =="
+  [ "$pr" -eq 1 ] || exit 0
+  gh pr create --repo "$repo" --base "$base" --head "$branch" --title "$subject" --body-file pr.md || { local st=$?; echo "jpdev codex run: opening the pull request failed; the branch is pushed" >&2; exit "$st"; }
+  exit 0
+}
+
+# codex_brief_template prints the brief skeleton a Codex build starts from.
+codex_brief_template() { cat "$kit/templates/codex-brief.md"; }
+
 cmd_env() {
   local v cfg
   cfg=$(jpdev_config_file)
@@ -274,6 +487,8 @@ case ${1:-} in
   check) shift; cmd_check "$@" ;;
   mutants) shift; cmd_mutants "$@" ;;
   record) shift; cmd_record "$@" ;;
+  push) shift; cmd_push "$@" ;;
+  codex) shift; cmd_codex "$@" ;;
   env) shift; cmd_env "$@" ;;
   --version | version) echo "jpdev $JPDEV_VERSION" ;;
   -h | --help | help | "") usage; [ -n "${1:-}" ] || exit 2 ;;

@@ -7,7 +7,8 @@ JPDEV_VERSION=0.2.0
 
 # Every setting jpdev reads. The environment wins over the config file, the config file over the default.
 JPDEV_SETTINGS=(JPDEV_SCRATCH JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB
-  JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS)
+  JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS
+  JPDEV_CODEX_MODEL_DEFAULT JPDEV_CODEX_SANDBOX JPDEV_CODEX_WORDS)
 
 jpdev_log() { printf 'jpdev: %s\n' "$*" >&2; }
 jpdev_die() { printf 'jpdev: %s\n' "$*" >&2; exit 2; }
@@ -28,6 +29,9 @@ jpdev_default() {
     JPDEV_NVM_DIR) printf '%s' "${NVM_DIR:-$HOME/.nvm}" ;;
     JPDEV_GO_SDK_DIR) printf '%s/sdk' "$HOME" ;;
     JPDEV_NAME_PATTERNS) printf '%s/jpdev/name-patterns' "${XDG_CONFIG_HOME:-$HOME/.config}" ;;
+    JPDEV_CODEX_MODEL_DEFAULT) ;; # none: `jpdev codex run` always passes the model
+    JPDEV_CODEX_SANDBOX) printf workspace-write ;;
+    JPDEV_CODEX_WORDS) printf '%s/jpdev/codex-words.txt' "${XDG_CONFIG_HOME:-$HOME/.config}" ;;
   esac
 }
 
