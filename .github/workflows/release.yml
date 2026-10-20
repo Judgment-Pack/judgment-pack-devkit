@@ -168,7 +168,7 @@ jobs:
           mkdir dist
           tarball="judgment-pack-devkit-${VERSION}.tgz"
           git archive --format=tar --prefix="judgment-pack-devkit-${VERSION}/" "${GITHUB_SHA}" \
-            bin lib templates config scripts docs README.md LICENSE NOTICE | gzip -n -9 > "dist/${tarball}"
+            bin lib templates config scripts docs examples README.md LICENSE NOTICE | gzip -n -9 > "dist/${tarball}"
           (cd dist && sha256sum "${tarball}" > checksums.txt && sha256sum --check --strict checksums.txt)
           cat dist/checksums.txt
 
@@ -184,7 +184,7 @@ jobs:
           kit="${unpack}/judgment-pack-devkit-${VERSION}"
           [ "$("${kit}/bin/jpdev" --version)" = "jpdev ${VERSION}" ] || { echo "the packaged jpdev does not report ${VERSION}" >&2; exit 1; }
           "${kit}/bin/jpdev" env > /dev/null
-          for path in bin/jpdev lib/wrap.sh templates/check.sh templates/dev.schema.json scripts/sync-agent-docs.sh LICENSE NOTICE README.md; do
+          for path in bin/jpdev lib/wrap.sh templates/check.sh templates/dev.schema.json scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
             test -e "${kit}/${path}" || { echo "the tarball does not hold ${path}" >&2; exit 1; }
           done
 
