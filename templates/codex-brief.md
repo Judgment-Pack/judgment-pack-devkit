@@ -23,6 +23,18 @@ or message it returns.
 A test for every new behaviour. Write vectors by hand. Break the change and watch the test fail
 before you rely on it.
 
+## Before you write msg.txt
+Use AGENTS.md "Before you hand over" for the full self-check text.
+- (a) Confirm the boundary-path diff changes no admission or verdict unless the issue names it.
+- (b) Confirm every new schema member and enum value is carried by a vector.
+- (c) Confirm both language readers pass over every shared vector added.
+- (d) Confirm every new mutation row and its hand-written twin are caught.
+- (e) Confirm every new refusal event validates with empty, missing and oversized input.
+- (f) Confirm interrupted and resumed runs carry every new checkpoint member.
+- (g) Confirm the design's words and the code agree sentence by sentence.
+Run touched checks with `--only` while iterating and the whole check list exactly once at the end.
+Append only to `handover.shared_paths`; never fetch, rebase or merge as the builder.
+
 ## Files you write
 Write both in the repository root. They are read, never committed.
 
