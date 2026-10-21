@@ -1,6 +1,21 @@
 {
   "$schema": "../templates/dev.schema.json",
   "version": 1,
+  "handover": {
+    "boundary_paths": [
+      "go/gate",
+      "packages/harness/toolGate.ts",
+      "packages/harness/refutation.ts",
+      "go/adapter/turn/refutation.go"
+    ],
+    "shared_paths": [
+      "contract/schemas",
+      "contract/vectors",
+      "packages/harness/scripts/mutation-rows.json",
+      "packages/harness/parity.json",
+      "docs/reference"
+    ]
+  },
   "toolchains": {
     "node": {"version": "22"},
     "go": {"version": "1.26.5"},

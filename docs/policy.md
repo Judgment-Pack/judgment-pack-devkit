@@ -39,6 +39,24 @@ are the ones a brief does not repeat.
   refuse a brief that names attacks as verbs or nouns. `jpdev codex check-brief` refuses such a
   brief before the run, and `jpdev codex run` runs the same check first.
 
+## Turnaround
+
+Two builds may run in parallel on sibling branches of one repository when their shared paths are
+additive. Builders append to the manifest's `handover.shared_paths`; they do not reorder or rewrite
+those files, and they never fetch, rebase or merge. The coordinator carries `main` into each branch
+after its push.
+
+Before handover, a builder runs the self-checks in AGENTS.md on its own head. It uses `--only` for
+touched check steps while iterating and runs the whole check list exactly once at the end. CI must
+be green before any review begins. `jpdev codex run` gives Codex clone-local scratch, lock, Go and
+npm caches and an XDG cache when those variables are empty, and creates their directories under
+the clone.
+
+After a fix round that closed only MEDIUM findings, the review re-read may use the cheaper tier.
+After a HIGH finding, the re-read uses the same tier as the review of record. A HIGH is fixed in the
+pull request before review, MEDIUMs named by the review of record are fixed in that fix round, a
+MEDIUM found only on re-read goes to the pre-release batch, and LOW rides.
+
 ## Reviews
 
 - A change to a security boundary (what a model or a caller may reach, what is trusted, what is

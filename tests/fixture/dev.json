@@ -1,5 +1,9 @@
 {
   "version": 1,
+  "handover": {
+    "boundary_paths": ["gate", "verdict"],
+    "shared_paths": ["contract", "vectors", "docs/reference"]
+  },
   "toolchains": {"go": {}, "python": {}},
   "setup": [
     {"name": "prepare", "run": "echo prepared", "toolchain": "shell"}

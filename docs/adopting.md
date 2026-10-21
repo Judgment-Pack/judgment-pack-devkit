@@ -24,6 +24,11 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
   never hides a check that did not run: either the CI workflow sets the variable (see the
   commented checkout step in `templates/ci-check.yml`) or the step says `"optional": true`.
 
+The optional `handover` object names `boundary_paths`, where a builder checks that admission and
+verdict behavior did not move beyond the issue, and `shared_paths`, which a builder changes by
+appending only while a sibling build is open. The builder runs the checks described in AGENTS.md
+before handover and never fetches, rebases or merges; the coordinator carries `main`.
+
 A step has a `name` (letters, digits, `.`, `_`, `-`), a `run` (a bash command line), a `cwd`
 (relative to the repository root, default `.`), a `toolchain` (`node`, `go`, `python` or
 `shell`, default `shell`), a `summary` (a regex: the lines of the output it matches are printed

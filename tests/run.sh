@@ -39,6 +39,10 @@ expect "check.sh skips a step whose variable is unset and says why" 1 'SKIP +nee
 expect "check.sh prints the first 40 lines of a failure and says how many more" 1 '\.\.\. 10 more lines' "$out" "$s"
 absent "check.sh prints no 41st line of a failure" 'output line 41$' "$out"
 expect "check.sh prints the totals" 1 '== 5 passed, 1 failed, 2 skipped, 1 not run ==' "$out" "$s"
+expect "check.sh prints the handover path counts" 1 'handover: boundary 2 paths, shared 3 paths; see AGENTS.md "Before you hand over"' "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "pass", "run": "true"}]}\n' > "$work/no-handover.json"
+out=$("$kit/templates/check.sh" --manifest "$work/no-handover.json" 2>/dev/null) && s=0 || s=$?
+absent "check.sh prints no handover line when the manifest has none" '^handover:' "$out"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --all 2>/dev/null) && s=0 || s=$?
 expect "check.sh --all runs past a failure" 1 'PASS +after-failure' "$out" "$s"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --only first,python-version 2>/dev/null) && s=0 || s=$?
@@ -81,6 +85,7 @@ if [ "$SECONDS" -lt 5 ]; then ok "jpdev check stops the step at its timeout"; el
 out=$("$jpdev" check --manifest "$fixture" --all 2>"$work/err") && s=0 || s=$?
 expect "jpdev check runs the go and python steps under their caps" 1 'PASS +go-version' "$out" "$s"
 expect "jpdev check names the failure" 1 'FAIL +fails ' "$out" "$s"
+expect "jpdev check prints the handover path counts" 1 'handover: boundary 2 paths, shared 3 paths' "$out" "$s"
 if grep -q 'go version go' <<< "$out" && grep -q 'Python 3' <<< "$out"; then ok "jpdev check prints the counts the checks printed"; else bad "jpdev check prints the counts the checks printed" "$out"; fi
 out=$("$jpdev" check --manifest "$fixture" --skip fails,after-failure,needs-variable 2>/dev/null) && s=0 || s=$?
 expect "jpdev check exits 0 when every check passes" 0 '== 5 passed' "$out" "$s"
@@ -282,6 +287,17 @@ out=$(python3 "$kit/lib/validate_manifest.py" "$kit/templates/dev.json" "$kit/te
 expect "the template manifest is valid" 0 "valid" "$out" "$s"
 out=$(python3 "$kit/lib/validate_manifest.py" "$kit/examples/judgment-pack-agent.dev.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the agent repository's example manifest is valid" 0 "valid" "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"boundary_paths": ["gate"], "shared_paths": ["contract"]}}\n' > "$work/handover.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema accepts handover path lists" 0 "valid" "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"boundary_paths": ["gate"], "shared_paths": [], "other": []}}\n' > "$work/handover-unknown.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-unknown.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an unknown handover member" 1 "dev.json:" "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"boundary_paths": [""], "shared_paths": []}}\n' > "$work/handover-empty.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-empty.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an empty handover path" 1 "dev.json:" "$out" "$s"
+out=$(python3 "$kit/lib/validate_manifest.py" "$kit/tests/fixture/handover-empty-shared.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an empty shared handover path" 1 "dev.json:" "$out" "$s"
 printf '{"version": 2, "checks": []}\n' > "$work/bad.json"
 out=$(python3 "$kit/lib/validate_manifest.py" "$work/bad.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the manifest check refuses a wrong version" 1 "dev.json:" "$out" "$s"
@@ -417,6 +433,8 @@ cat > "$work/codexbin/codex" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\0' "$@" > "$STUB_CODEX_ARGS"
 pwd > "$STUB_CODEX_CWD"
+printf '%s\n' "JPDEV_SCRATCH=$JPDEV_SCRATCH" "JPDEV_LOCK=$JPDEV_LOCK" "GOCACHE=${GOCACHE:-}" \
+  "GOFLAGS=${GOFLAGS:-}" "npm_config_cache=${npm_config_cache:-}" "XDG_CACHE_HOME=${XDG_CACHE_HOME:-}" > "$STUB_CODEX_ENV"
 timeout 2 cat > "$STUB_CODEX_STDIN"
 while [ $# -gt 0 ]; do
   case $1 in -o) printf 'stub final message\n' > "$2" ;; esac
@@ -435,11 +453,11 @@ echo "stub stderr line" >&2
 exit "${STUB_CODEX_EXIT:-0}"
 STUB
 chmod +x "$work/codexbin/codex"
-export STUB_CODEX_ARGS=$work/codex-args STUB_CODEX_CWD=$work/codex-cwd STUB_CODEX_STDIN=$work/codex-stdin
+export STUB_CODEX_ARGS=$work/codex-args STUB_CODEX_CWD=$work/codex-cwd STUB_CODEX_STDIN=$work/codex-stdin STUB_CODEX_ENV=$work/codex-env
 oldpath=$PATH
 PATH=$work/codexbin:$PATH
 printf '# Rules\n' > "$work/codexclone/AGENTS.md"
-printf 'Add the flag.\nIt must refuse an unknown value with exit 2.\n' > "$work/brief.md"
+printf 'Add the flag.\nIt must refuse an unknown value with exit 2.\n\n## Before you write msg.txt\n' > "$work/brief.md"
 codex_args() { rm -f "$STUB_CODEX_ARGS" "$STUB_CODEX_CWD" "$STUB_CODEX_STDIN"; }
 has_arg() { tr '\0' '\n' < "$STUB_CODEX_ARGS" 2>/dev/null | grep -qxF -- "$1"; }
 codex_args
@@ -459,6 +477,21 @@ log=$(cat "$work/codex.log")
 expect "the transcript (stdout) is in the log" 0 '^stub transcript line$' "$log" 0
 expect "the transcript (stderr) is in the log" 0 '^stub stderr line$' "$log" 0
 absent "the final message is not part of the transcript" 'stub final message' "$log"
+want_root=$(cd "$work/codexclone" && pwd -P)
+out=$(JPDEV_SCRATCH='' JPDEV_LOCK='' GOCACHE='' GOFLAGS='' npm_config_cache='' XDG_CACHE_HOME='' \
+  "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex-env.log" 2>&1) && s=0 || s=$?
+expect "codex run sets clone-local sandbox variables" 0 "codex exit 0" "$out" "$s"
+for pair in "JPDEV_SCRATCH=$want_root/.jpdev" "JPDEV_LOCK=$want_root/.jpdev/lock" \
+  "GOCACHE=$want_root/.gocache" "GOFLAGS=-mod=readonly" \
+  "npm_config_cache=$want_root/.npm-cache" "XDG_CACHE_HOME=$want_root/.xdg-cache"; do
+  if grep -qxF "$pair" "$STUB_CODEX_ENV"; then ok "codex receives $pair"; else bad "codex receives $pair" "$(cat "$STUB_CODEX_ENV")"; fi
+done
+for cache in .jpdev .gocache .npm-cache .xdg-cache; do
+  if [ -d "$work/codexclone/$cache" ]; then ok "codex run creates $cache under the clone"; else bad "codex run creates $cache under the clone"; fi
+done
+out=$(GOCACHE=$work/preset-go-cache "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex-preset.log" 2>&1) && s=0 || s=$?
+expect "codex run leaves a pre-set GOCACHE alone" 0 "codex exit 0" "$out" "$s"
+expect "the pre-set GOCACHE reaches codex" 0 '^GOCACHE=.*/preset-go-cache$' "$(cat "$STUB_CODEX_ENV")" 0
 out=$(STUB_CODEX_EXIT=7 "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex7.log" 2>/dev/null) && s=0 || s=$?
 expect "codex run returns codex's exit code" 7 '^== codex exit 7 ' "$out" "$s"
 codex_args
@@ -488,10 +521,10 @@ expect "codex run refuses a directory with no AGENTS.md" 2 'holds no AGENTS.md' 
 if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused run did not start codex"; else ok "a refused run did not start codex"; fi
 
 # check-brief: the base list, the neutral phrasing, the config extension
-printf 'Reject a request with an unexpected value and return the documented error.\nA shackle is a ring.\n' > "$work/clean-brief.md"
+printf 'Reject a request with an unexpected value and return the documented error.\nA shackle is a ring.\n\n## Before you write msg.txt\n' > "$work/clean-brief.md"
 out=$("$jpdev" codex check-brief "$work/clean-brief.md" 2>&1) && s=0 || s=$?
 expect "check-brief accepts a brief with no listed word" 0 'no word of the filter list' "$out" "$s"
-printf 'Defend against an attacker who sends a prompt injection.\nIt must stop the EXPLOITATION of the parser.\n' > "$work/dirty-brief.md"
+printf 'Defend against an attacker who sends a prompt injection.\nIt must stop the EXPLOITATION of the parser.\n\n## Before you write msg.txt\n' > "$work/dirty-brief.md"
 out=$("$jpdev" codex check-brief "$work/dirty-brief.md" 2>&1) && s=0 || s=$?
 expect "check-brief refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
 expect "check-brief names the line and the word" 1 'line 1: "attacker"' "$out" "$s"
@@ -531,6 +564,19 @@ out=$(JPDEV_CODEX_WORDS=$work/extra-words.txt "$jpdev" codex check-brief "$work/
 expect "the config extends the base list and does not replace it" 1 'line 1: "attacker"' "$out" "$s"
 out=$("$jpdev" codex check-brief "$work/nobrief.md" 2>&1) && s=0 || s=$?
 expect "check-brief needs the file" 2 'give the brief file' "$out" "$s"
+printf 'A clean build brief without the required handover heading.\n' > "$work/no-handover-heading.md"
+out=$("$jpdev" codex check-brief --build "$work/no-handover-heading.md" 2>&1) && s=0 || s=$?
+expect "check-brief --build refuses a missing handover heading" 1 'refused: .* has no line exactly' "$out" "$s"
+codex_args
+out=$("$jpdev" codex run --no-commit --brief "$work/no-handover-heading.md" --model m --effort low --dir "$work/codexclone" 2>&1) && s=0 || s=$?
+expect "codex run requires the handover heading" 1 'refused: .* has no line exactly' "$out" "$s"
+if [ -e "$STUB_CODEX_ARGS" ]; then bad "a run refused for the missing heading did not start codex"; else ok "a run refused for the missing heading did not start codex"; fi
+out=$("$jpdev" codex check-brief "$work/no-handover-heading.md" 2>"$work/brief-warning.err") && s=0 || s=$?
+expect "check-brief without --build accepts a missing handover heading" 0 'no word of the filter list' "$out" "$s"
+expect "check-brief without --build warns once about the heading" 0 '^jpdev codex check-brief: warning: .* has no line exactly' "$(cat "$work/brief-warning.err")" 0
+if [ "$(wc -l < "$work/brief-warning.err")" -eq 1 ]; then ok "the missing-heading warning is one line"; else bad "the missing-heading warning is one line" "$(cat "$work/brief-warning.err")"; fi
+out=$("$jpdev" codex check-brief --build "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief --build accepts the brief template" 0 'no word of the filter list' "$out" "$s"
 codex_args
 out=$("$jpdev" codex run --no-commit --brief "$work/dirty-brief.md" --model m --effort low --dir "$work/codexclone" 2>&1) && s=0 || s=$?
 expect "codex run refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
@@ -559,7 +605,8 @@ git init -q --bare -b main "$cxorigin"
 git init -q -b main "$cxrepo"
 printf '# Rules\n' > "$cxrepo/AGENTS.md"
 printf 'one\n' > "$cxrepo/file.txt"
-git -C "$cxrepo" add AGENTS.md file.txt
+printf 'msg.txt\npr.md\n' > "$cxrepo/.gitignore"
+git -C "$cxrepo" add .gitignore AGENTS.md file.txt
 git -C "$cxrepo" commit -q -m seed
 git -C "$cxrepo" remote add origin "$cxorigin"
 git -C "$cxrepo" push -q origin main
@@ -616,6 +663,28 @@ expect "codex run --add commits a new file named" 0 'committed' "$out" "$s"
 if [ "$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')" = "created.txt file.txt" ]; then ok "--add puts the named file in the commit"; else bad "--add puts the named file in the commit"; fi
 
 cx_reset
+for cache in .jpdev .gocache .npm-cache .xdg-cache; do
+  mkdir -p "$cxrepo/$cache"
+  printf 'cache\n' > "$cxrepo/$cache/file"
+done
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .) && s=0 || s=$?
+expect "codex run --add . commits while excluding cache directories" 0 'committed' "$out" "$s"
+names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
+if [ "$names" = "created.txt file.txt" ]; then ok "--add . commits none of the cache directories"; else bad "--add . commits none of the cache directories" "$names"; fi
+
+cx_reset
+mkdir -p "$cxrepo/parent/keep"
+printf 'keep\n' > "$cxrepo/parent/keep/file"
+for cache in .jpdev .gocache .npm-cache .xdg-cache; do
+  mkdir -p "$cxrepo/parent/$cache"
+  printf 'cache\n' > "$cxrepo/parent/$cache/file"
+done
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add parent) && s=0 || s=$?
+expect "codex run --add of a containing directory commits while excluding caches" 0 'committed' "$out" "$s"
+names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
+if [ "$names" = "file.txt parent/keep/file" ]; then ok "--add of a containing directory commits none of its cache directories"; else bad "--add of a containing directory commits none of its cache directories" "$names"; fi
+
+cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --no-push) && s=0 || s=$?
 expect "codex run --no-push commits and stops" 0 'committed' "$out" "$s"
 if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 1 ] && [ ! -e "$STUB_GIT_ARGS" ] && [ ! -e "$STUB_GH_CALLS" ]; then ok "--no-push: a commit, no push, no pull request"; else bad "--no-push: a commit, no push, no pull request"; fi
@@ -644,6 +713,8 @@ if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "a fail
 cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add msg.txt) && s=0 || s=$?
 expect "codex run refuses --add msg.txt" 2 'read, never committed' "$out" "$s"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .jpdev) && s=0 || s=$?
+expect "codex run refuses --add .jpdev" 2 'sandbox cache directory' "$out" "$s"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add ../outside) && s=0 || s=$?
 expect "codex run refuses --add outside the clone" 2 'inside the clone' "$out" "$s"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt PATH=$work/gitstub:$work/ghbin:$PATH "$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$cxrepo" 2>&1) && s=0 || s=$?
@@ -665,11 +736,11 @@ if [ "$out" = "$(cat "$kit/templates/codex-brief.md")" ]; then ok "brief-templat
 expect "the brief template tells codex to write msg.txt" 0 'msg\.txt' "$out" "$s"
 expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
 expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
-out=$("$jpdev" codex check-brief "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
-expect "the brief template passes check-brief" 0 'no word of the filter list' "$out" "$s"
+out=$("$jpdev" codex check-brief --build "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
+expect "the brief template passes check-brief --build" 0 'no word of the filter list' "$out" "$s"
 unset STUB_GIT_ARGS STUB_GH_CALLS STUB_GH_ARGS STUB_GH_BODY GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 PATH=$oldpath
-unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN
+unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN STUB_CODEX_ENV
 
 # --- env
 printf 'JPDEV_NODE_RSS_MB=4321\nJPDEV_GO_TIMEOUT_S=99\n' > "$XDG_CONFIG_HOME/jpdev.env.tmp"

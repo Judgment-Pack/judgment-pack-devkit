@@ -31,9 +31,9 @@ usage: jpdev COMMAND [ARGS]
                      changes (msg.txt, signed off), push, and open the pull request (pr.md)
   codex brief-template
                      print the brief skeleton: what Codex writes (msg.txt, pr.md) and does not do
-  codex check-brief FILE
+  codex check-brief [--build] FILE
                      refuse a brief that holds a word of the filter list, and suggest the
-                     neutral phrasing
+                     neutral phrasing; require the handover heading for a build brief
   env                print the effective settings and where each came from
   --version          print the version
 USAGE
@@ -299,17 +299,25 @@ cmd_codex() {
   esac
 }
 
-# codex_check_brief FILE: exit 1 and the neutral phrasing for each word of the filter list in FILE.
+# codex_check_brief [--build] FILE: check the build heading and the filter-list words in FILE.
 codex_check_brief() {
-  local file=""
+  local file="" build=0
   while [ $# -gt 0 ]; do
     case $1 in
+      --build) build=1; shift ;;
       -h | --help) usage; exit 0 ;;
       -*) jpdev_die "codex check-brief: unknown argument $1" ;;
       *) [ -z "$file" ] || jpdev_die "codex check-brief: one brief only"; file=$1; shift ;;
     esac
   done
   [ -f "$file" ] || jpdev_die "codex check-brief: give the brief file"
+  if ! grep -qxF '## Before you write msg.txt' "$file"; then
+    if [ "$build" -eq 1 ]; then
+      echo "jpdev codex check-brief: refused: $file has no line exactly '## Before you write msg.txt'" >&2
+      exit 1
+    fi
+    echo "jpdev codex check-brief: warning: $file has no line exactly '## Before you write msg.txt'" >&2
+  fi
   local out status
   out=$(python3 -I "$kit/lib/codex_words.py" "$file" "$kit/config/codex-words.txt" "$JPDEV_CODEX_WORDS")
   status=$?
@@ -377,12 +385,17 @@ codex_run() {
     for path in "${adds[@]}"; do
       case $path in
         msg.txt | pr.md | ./msg.txt | ./pr.md) jpdev_die "codex run: --add $path: msg.txt and pr.md are read, never committed" ;;
+        .jpdev | .jpdev/* | ./.jpdev | ./.jpdev/* | \
+        .gocache | .gocache/* | ./.gocache | ./.gocache/* | \
+        .npm-cache | .npm-cache/* | ./.npm-cache | ./.npm-cache/* | \
+        .xdg-cache | .xdg-cache/* | ./.xdg-cache | ./.xdg-cache/*)
+          jpdev_die "codex run: --add $path: a sandbox cache directory is never committed" ;;
         /* | .. | ../* | */../*) jpdev_die "codex run: --add takes a path inside the clone" ;;
       esac
     done
   fi
   brief=$(cd "$(dirname "$brief")" && pwd)/$(basename "$brief")
-  codex_check_brief "$brief"
+  codex_check_brief --build "$brief"
   if [ -z "$log" ]; then
     mkdir -p "$JPDEV_SCRATCH/logs"
     log=$JPDEV_SCRATCH/logs/codex-$(basename "$dir")-$(date +%Y%m%dT%H%M%S).log
@@ -398,8 +411,28 @@ $(cat "$brief")"
   local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
   if [ "$sandbox" = workspace-write ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
   args+=(-C "$dir" -o "$final" "$prompt")
+  local codex_scratch=$JPDEV_SCRATCH codex_lock=$JPDEV_LOCK codex_gocache=${GOCACHE:-}
+  local codex_goflags=${GOFLAGS:-} codex_npm_cache=${npm_config_cache:-} codex_xdg_cache=${XDG_CACHE_HOME:-}
+  local set_vars=()
+  if [ "${JPDEV_SOURCE[JPDEV_SCRATCH]}" = default ]; then codex_scratch=$dir/.jpdev; set_vars+=(JPDEV_SCRATCH); fi
+  if [ "${JPDEV_SOURCE[JPDEV_LOCK]}" = default ]; then codex_lock=$dir/.jpdev/lock; set_vars+=(JPDEV_LOCK); fi
+  if [ -z "$codex_gocache" ]; then codex_gocache=$dir/.gocache; set_vars+=(GOCACHE); fi
+  if [ -z "$codex_goflags" ]; then codex_goflags=-mod=readonly; set_vars+=(GOFLAGS); fi
+  if [ -z "$codex_npm_cache" ]; then codex_npm_cache=$dir/.npm-cache; set_vars+=(npm_config_cache); fi
+  if [ -z "$codex_xdg_cache" ]; then codex_xdg_cache=$dir/.xdg-cache; set_vars+=(XDG_CACHE_HOME); fi
+  mkdir -p "$dir/.jpdev" "$dir/.gocache" "$dir/.npm-cache" "$dir/.xdg-cache"
+  jpdev_log "codex run: sandbox environment set: ${set_vars[*]:-none}"
   jpdev_log "codex run: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log"
-  (cd "$dir" && codex "${args[@]}" < /dev/null > "$log" 2>&1)
+  (
+    cd "$dir" || exit 2
+    [ "${JPDEV_SOURCE[JPDEV_SCRATCH]}" != default ] || export JPDEV_SCRATCH=$codex_scratch
+    [ "${JPDEV_SOURCE[JPDEV_LOCK]}" != default ] || export JPDEV_LOCK=$codex_lock
+    [ -n "${GOCACHE:-}" ] || export GOCACHE=$codex_gocache
+    [ -n "${GOFLAGS:-}" ] || export GOFLAGS=$codex_goflags
+    [ -n "${npm_config_cache:-}" ] || export npm_config_cache=$codex_npm_cache
+    [ -n "${XDG_CACHE_HOME:-}" ] || export XDG_CACHE_HOME=$codex_xdg_cache
+    codex "${args[@]}" < /dev/null > "$log" 2>&1
+  )
   local status=$?
   echo "== codex final message =="
   if [ -s "$final" ]; then cat "$final"; else echo "(none written)"; fi
@@ -432,6 +465,18 @@ codex_publish() {
   for path in "$@"; do
     git add -- "$path" || { echo "jpdev codex run: --add $path could not be staged" >&2; exit 1; }
   done
+  local cache_paths=()
+  while IFS= read -r -d '' path; do
+    case /$path/ in
+      */.jpdev/* | */.gocache/* | */.npm-cache/* | */.xdg-cache/*) cache_paths+=("$path") ;;
+    esac
+  done < <(git diff --cached --name-only -z)
+  if [ "${#cache_paths[@]}" -gt 0 ]; then
+    git rm -r --cached --quiet --ignore-unmatch -- "${cache_paths[@]}" || exit 1
+  fi
+  if git diff --cached --name-only | grep -qE '(^|/)\.(jpdev|gocache|npm-cache|xdg-cache)(/|$)'; then
+    jpdev_die "codex run: a sandbox cache directory remained staged"
+  fi
   if git diff --cached --name-only | grep -qxE 'msg\.txt|pr\.md'; then
     git reset -q -- msg.txt pr.md
     echo "jpdev codex run: refused: msg.txt or pr.md is tracked and changed; they are read, never committed" >&2

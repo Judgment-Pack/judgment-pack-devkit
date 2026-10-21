@@ -46,6 +46,10 @@ for c in steps:
     failed += 1
     rows.append((n, 'FAIL', '%s, exit %d' % (took, p.returncode), note + ['    --'] + ['    ' + l for l in lines[:40]] + (['    ... %d more lines' % (len(lines) - 40)] if len(lines) > 40 else [])))
 print('== %s summary (%s) ==' % ('setup' if opt['setup'] else 'check', os.path.basename(opt['manifest'])))
+if not opt['setup'] and 'handover' in m:
+    h = m['handover']
+    print('handover: boundary %d paths, shared %d paths; see AGENTS.md "Before you hand over"' %
+          (len(h.get('boundary_paths', [])), len(h.get('shared_paths', []))))
 for n, s, head, extra in rows: print('\n'.join(['%-8s %-24s %s' % (s, n, head)] + extra))
 print('== %d passed, %d failed, %d skipped, %d not run ==' % tuple(sum(1 for r in rows if r[1] == k) for k in ('PASS', 'FAIL', 'SKIP', 'NOT RUN')))
 sys.exit(min(failed, 255))

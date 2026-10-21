@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "name": "a",
+      "run": "true"
+    }
+  ],
+  "handover": {
+    "boundary_paths": [],
+    "shared_paths": [
+      ""
+    ]
+  }
+}

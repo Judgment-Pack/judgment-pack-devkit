@@ -45,6 +45,24 @@ def main():
                 for index, step in enumerate(manifest.get(kind, [])):
                     if not isinstance(step, dict) or not step.get("name") or not step.get("run"):
                         problems.append("%s/%d: a step needs a name and a run" % (kind, index))
+            if "handover" in manifest:
+                handover = manifest["handover"]
+                if not isinstance(handover, dict):
+                    problems.append("handover: not an object")
+                else:
+                    for key in handover:
+                        if key not in ("boundary_paths", "shared_paths"):
+                            problems.append("handover: unknown member %r" % key)
+                    for key in ("boundary_paths", "shared_paths"):
+                        if key not in handover:
+                            continue
+                        paths = handover[key]
+                        if not isinstance(paths, list):
+                            problems.append("handover/%s: not an array" % key)
+                        else:
+                            for index, path in enumerate(paths):
+                                if not isinstance(path, str) or not path:
+                                    problems.append("handover/%s/%d: must be a non-empty string" % (key, index))
     if isinstance(manifest, dict):
         steps = [s for k in ("setup", "checks") for s in manifest.get(k, []) if isinstance(s, dict)]
         if isinstance(manifest.get("parity"), dict):
