@@ -57,6 +57,26 @@ After a HIGH finding, the re-read uses the same tier as the review of record. A 
 pull request before review, MEDIUMs named by the review of record are fixed in that fix round, a
 MEDIUM found only on re-read goes to the pre-release batch, and LOW rides.
 
+`jpdev codex run --small` is for a bounded fix on an existing branch. It tells the builder to run
+only the touched check-list steps; CI runs the whole list. The wrapper refuses the result after the
+run if it changed a manifest `handover.shared_paths` or `handover.boundary_paths` entry, or if its
+added and removed lines exceed `JPDEV_SMALL_MAX_LINES` (80 by default). A red CI run costs a resume,
+not another cold build.
+
+Use `jpdev codex run --resume THREAD` only for the fix round after review on the same branch. Every
+thread id the CLI reports is recorded in `.jpdev/output/thread`. Never resume a builder that a safeguard stopped;
+the fresh-builder rule under Safeguards and stops still applies.
+
+For sibling work, `jpdev codex run --worktree BASE` and `jpdev worktree add|list|remove` keep the git
+objects in one base clone. Go, npm and XDG caches are shared under `BASE/.jpdev-shared`; the lock and
+other scratch state stay in each worktree. npm `node_modules` may be linked from the base when both
+worktrees use the same platform, Node release and lockfile. Where lifecycle scripts, native modules
+or package-manager behavior make that unsafe, leave it unlinked and run `npm ci` in the worktree.
+
+The update-branches workflow normally carries the default branch without an agent. When it applies
+the `carry needed` label, `jpdev carry --pr N` starts from a generated conflict brief and uses the
+normal no-new-pull-request Codex path; a carry with no conflicts is signed and pushed directly.
+
 ## Reviews
 
 - A change to a security boundary (what a model or a caller may reach, what is trusted, what is

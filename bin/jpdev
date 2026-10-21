@@ -22,9 +22,19 @@ usage: jpdev COMMAND [ARGS]
                      name-pattern file, then post the file
   push [BRANCH]      push BRANCH (default: the current branch) to origin with the gh credential
                      helper and no stored credential; refuses --force and -f
+  worktree add BASE BRANCH [DIR]
+  worktree list BASE
+  worktree remove DIR [--force]
+                     add, list or remove managed git worktrees; removal refuses dirty or
+                     unpushed work unless --force
+  carry --pr N --model M --effort low|medium|high [--dir CLONE] [--repo OWNER/NAME]
+        [--worktree BASE]
+                     merge origin/main into a pull-request branch, sign and push a clean carry,
+                     or start Codex on a generated carry brief when conflicts remain
   codex run --brief FILE --model M --effort low|medium|high [--dir CLONE] [--repo OWNER/NAME]
             [--base main] [--add PATH]... [--no-commit] [--no-push] [--no-pr]
             [--sandbox workspace-write|danger-full-access] [--log FILE]
+            [--worktree BASE] [--branch NAME] [--small] [--resume THREAD]
                      check the brief, run `codex exec` on it in CLONE (a work branch) with the
                      model, effort and sandbox explicit, stdin closed and the transcript in the
                      log; print the final message and the exit code; then commit the tracked
@@ -286,6 +296,97 @@ cmd_push() {
   jpdev_git_net push -u origin "$branch"
 }
 
+# worktree_add BASE BRANCH DIR: add BRANCH from origin/main when it does not exist locally.
+worktree_link_node_modules() {
+  local base=$1 dir=$2
+  [ -d "$base/node_modules" ] && [ ! -e "$dir/node_modules" ] || return 0
+  if [ -f "$base/package-lock.json" ] && [ -f "$dir/package-lock.json" ] && cmp -s "$base/package-lock.json" "$dir/package-lock.json"; then
+    ln -s "$base/node_modules" "$dir/node_modules" || jpdev_log "worktree: node_modules could not be linked; run npm ci in $dir"
+  else
+    jpdev_log "worktree: package-lock.json differs or is absent; run npm ci in $dir instead of linking node_modules"
+  fi
+}
+
+worktree_add() {
+  local base=$1 branch=$2 dir=$3 start=${4:-origin/main}
+  [ -d "$base" ] || jpdev_die "worktree add: $base is not a clone"
+  base=$(cd "$base" && git rev-parse --show-toplevel) || jpdev_die "worktree add: $base is not a git clone"
+  git check-ref-format --branch "$branch" > /dev/null 2>&1 || jpdev_die "worktree add: '$branch' is not a branch name"
+  [ ! -e "$dir" ] || jpdev_die "worktree add: $dir already exists"
+  mkdir -p "$(dirname "$dir")"
+  if git -C "$base" show-ref --verify -q "refs/heads/$branch"; then
+    git -C "$base" worktree add "$dir" "$branch" || jpdev_die "worktree add: could not add $branch"
+  else
+    git -C "$base" worktree add -b "$branch" "$dir" "$start" || jpdev_die "worktree add: could not make $branch from $start"
+  fi
+  worktree_link_node_modules "$base" "$dir"
+  printf '%s\n' "$(cd "$dir" && pwd)"
+}
+
+cmd_worktree() {
+  local sub=${1:-}
+  [ $# -eq 0 ] || shift
+  case $sub in
+    add)
+      local base="" branch="" dir="" start=origin/main arg
+      while [ $# -gt 0 ]; do
+        case $1 in
+          --branch) need_value "$@"; branch=$2; shift 2 ;;
+          --dir) need_value "$@"; dir=$2; shift 2 ;;
+          --base) need_value "$@"; start=$2; shift 2 ;;
+          -*) jpdev_die "worktree add: unknown argument $1" ;;
+          *)
+            arg=$1; shift
+            if [ -z "$base" ]; then base=$arg
+            elif [ -z "$branch" ]; then branch=$arg
+            elif [ -z "$dir" ]; then dir=$arg
+            else jpdev_die "worktree add: too many arguments"
+            fi
+            ;;
+        esac
+      done
+      if [ -z "$base" ] || [ -z "$branch" ]; then jpdev_die "worktree add: BASE and BRANCH are needed"; fi
+      if [ -z "$dir" ]; then dir=$(dirname "$base")/"$(basename "$base")-${branch//\//-}"; fi
+      worktree_add "$base" "$branch" "$dir" "$start" > /dev/null
+      echo "== jpdev worktree add =="
+      printf '%-8s %s\n' base "$(cd "$base" && pwd)" branch "$branch" worktree "$(cd "$dir" && pwd)"
+      ;;
+    list)
+      [ $# -le 1 ] || jpdev_die "worktree list: give at most one base clone"
+      local list_base=${1:-.}
+      git -C "$list_base" worktree list || jpdev_die "worktree list: $list_base is not a git clone"
+      ;;
+    remove)
+      local dir="" force=0
+      while [ $# -gt 0 ]; do
+        case $1 in
+          --force) force=1 ;;
+          -*) jpdev_die "worktree remove: unknown argument $1" ;;
+          *) [ -z "$dir" ] || jpdev_die "worktree remove: one worktree directory only"; dir=$1 ;;
+        esac
+        shift
+      done
+      if [ -z "$dir" ] || [ ! -d "$dir" ]; then jpdev_die "worktree remove: give a worktree directory"; fi
+      if [ "$force" -eq 0 ]; then
+        local dirty
+        dirty=$(git -C "$dir" status --porcelain | grep -vE '^\?\? (\.jpdev|\.gocache|\.npm-cache|\.xdg-cache|node_modules)(/|$)')
+        [ -z "$dirty" ] || jpdev_die "worktree remove: refused: $dir has uncommitted work (pass --force to remove it)"
+        local upstream
+        upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || \
+          jpdev_die "worktree remove: refused: $dir has no upstream, so its work is not known to be pushed (pass --force to remove it)"
+        [ "$(git -C "$dir" rev-list --count "$upstream"..HEAD)" -eq 0 ] || \
+          jpdev_die "worktree remove: refused: $dir has unpushed work (pass --force to remove it)"
+      fi
+      local remove_args=(worktree remove)
+      [ "$force" -eq 0 ] || remove_args+=(--force)
+      remove_args+=("$dir")
+      git -C "$dir" "${remove_args[@]}" || jpdev_die "worktree remove: could not remove $dir"
+      ;;
+    -h | --help | help) usage ;;
+    *) jpdev_die "worktree: the subcommands are add, list and remove" ;;
+  esac
+}
+
 # cmd_codex run|check-brief ...
 cmd_codex() {
   local sub=${1:-}
@@ -338,7 +439,7 @@ codex_check_brief() {
 # the pull request itself from the msg.txt and pr.md that Codex wrote.
 codex_run() {
   local brief="" model=$JPDEV_CODEX_MODEL_DEFAULT effort="" dir=. sandbox=$JPDEV_CODEX_SANDBOX log=""
-  local repo="" base=main commit=1 push=1 pr=1 adds=()
+  local repo="" base=main commit=1 push=1 pr=1 adds=() worktree="" branch_arg="" small=0 resume=""
   while [ $# -gt 0 ]; do
     case $1 in
       --brief) need_value "$@"; brief=$2; shift 2 ;;
@@ -350,6 +451,10 @@ codex_run() {
       --repo) need_value "$@"; repo=$2; shift 2 ;;
       --base) need_value "$@"; base=$2; shift 2 ;;
       --add) need_value "$@"; adds+=("$2"); shift 2 ;;
+      --worktree) need_value "$@"; worktree=$2; shift 2 ;;
+      --branch) need_value "$@"; branch_arg=$2; shift 2 ;;
+      --small) small=1; shift ;;
+      --resume) need_value "$@"; resume=$2; shift 2 ;;
       --no-commit) commit=0; shift ;;
       --no-push) push=0; shift ;;
       --no-pr) pr=0; shift ;;
@@ -367,8 +472,21 @@ codex_run() {
     workspace-write | danger-full-access) ;;
     *) jpdev_die "codex run: --sandbox is workspace-write or danger-full-access" ;;
   esac
+  if [ -n "$worktree" ] && [ ! -d "$dir" ]; then
+    [ -n "$branch_arg" ] || branch_arg=$(basename "$dir")
+    worktree_add "$worktree" "$branch_arg" "$dir" origin/main > /dev/null
+  fi
   [ -d "$dir" ] || jpdev_die "codex run: --dir is not a directory"
   dir=$(cd "$dir" && pwd)
+  if [ -n "$worktree" ]; then
+    worktree=$(cd "$worktree" && git rev-parse --show-toplevel) || jpdev_die "codex run: --worktree is not a git clone"
+    local common_dir want_common
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || jpdev_die "codex run: $dir is not a worktree"
+    common_dir=$(cd "$dir" && cd "$common_dir" && pwd)
+    want_common=$(cd "$worktree/.git" && pwd)
+    [ "$common_dir" = "$want_common" ] || jpdev_die "codex run: $dir is not a worktree of $worktree"
+    worktree_link_node_modules "$worktree" "$dir"
+  fi
   [ -f "$dir/AGENTS.md" ] || jpdev_die "codex run: $dir holds no AGENTS.md, which the prompt names as the rules"
   command -v codex > /dev/null || jpdev_die "codex run: codex is not on PATH"
   local branch=""
@@ -390,6 +508,8 @@ codex_run() {
         .npm-cache | .npm-cache/* | ./.npm-cache | ./.npm-cache/* | \
         .xdg-cache | .xdg-cache/* | ./.xdg-cache | ./.xdg-cache/*)
           jpdev_die "codex run: --add $path: a sandbox cache directory is never committed" ;;
+        .jpdev-shared | .jpdev-shared/* | ./.jpdev-shared | ./.jpdev-shared/*)
+          jpdev_die "codex run: --add $path: a shared cache directory is never committed" ;;
         /* | .. | ../* | */../*) jpdev_die "codex run: --add takes a path inside the clone" ;;
       esac
     done
@@ -406,21 +526,30 @@ codex_run() {
   final=$(mktemp)
   # a msg.txt or pr.md left by an earlier run is not this run's
   rm -f -- "$dir/msg.txt" "$dir/pr.md"
-  prompt="The rules are this repository's AGENTS.md; follow them.
-$(cat "$brief")"
+  prompt="The rules are this repository's AGENTS.md; follow them."
+  if [ "$small" -eq 1 ]; then
+    prompt+=$'\nThis is a small fix: run only the check-list steps the change touches with `jpdev check --only <steps>`; CI runs the whole list.'
+  fi
+  prompt+=$'\n'"$(cat "$brief")"
   local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
   if [ "$sandbox" = workspace-write ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
-  args+=(-C "$dir" -o "$final" "$prompt")
+  args+=(--json -C "$dir" -o "$final")
+  if [ -n "$resume" ]; then args+=(resume "$resume"); fi
+  args+=("$prompt")
   local codex_scratch=$JPDEV_SCRATCH codex_lock=$JPDEV_LOCK codex_gocache=${GOCACHE:-}
   local codex_goflags=${GOFLAGS:-} codex_npm_cache=${npm_config_cache:-} codex_xdg_cache=${XDG_CACHE_HOME:-}
   local set_vars=()
   if [ "${JPDEV_SOURCE[JPDEV_SCRATCH]}" = default ]; then codex_scratch=$dir/.jpdev; set_vars+=(JPDEV_SCRATCH); fi
   if [ "${JPDEV_SOURCE[JPDEV_LOCK]}" = default ]; then codex_lock=$dir/.jpdev/lock; set_vars+=(JPDEV_LOCK); fi
-  if [ -z "$codex_gocache" ]; then codex_gocache=$dir/.gocache; set_vars+=(GOCACHE); fi
+  if [ -z "$codex_gocache" ]; then codex_gocache=${worktree:+$worktree/.jpdev-shared/gocache}; codex_gocache=${codex_gocache:-$dir/.gocache}; set_vars+=(GOCACHE); fi
   if [ -z "$codex_goflags" ]; then codex_goflags=-mod=readonly; set_vars+=(GOFLAGS); fi
-  if [ -z "$codex_npm_cache" ]; then codex_npm_cache=$dir/.npm-cache; set_vars+=(npm_config_cache); fi
-  if [ -z "$codex_xdg_cache" ]; then codex_xdg_cache=$dir/.xdg-cache; set_vars+=(XDG_CACHE_HOME); fi
-  mkdir -p "$dir/.jpdev" "$dir/.gocache" "$dir/.npm-cache" "$dir/.xdg-cache"
+  if [ -z "$codex_npm_cache" ]; then codex_npm_cache=${worktree:+$worktree/.jpdev-shared/npm-cache}; codex_npm_cache=${codex_npm_cache:-$dir/.npm-cache}; set_vars+=(npm_config_cache); fi
+  if [ -z "$codex_xdg_cache" ]; then codex_xdg_cache=${worktree:+$worktree/.jpdev-shared/xdg-cache}; codex_xdg_cache=${codex_xdg_cache:-$dir/.xdg-cache}; set_vars+=(XDG_CACHE_HOME); fi
+  if [ -n "$worktree" ]; then
+    mkdir -p "$dir/.jpdev" "$worktree/.jpdev-shared/gocache" "$worktree/.jpdev-shared/npm-cache" "$worktree/.jpdev-shared/xdg-cache"
+  else
+    mkdir -p "$dir/.jpdev" "$dir/.gocache" "$dir/.npm-cache" "$dir/.xdg-cache"
+  fi
   jpdev_log "codex run: sandbox environment set: ${set_vars[*]:-none}"
   jpdev_log "codex run: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log"
   (
@@ -434,12 +563,93 @@ $(cat "$brief")"
     codex "${args[@]}" < /dev/null > "$log" 2>&1
   )
   local status=$?
+  mkdir -p "$dir/.jpdev/output"
+  local thread
+  thread=$(python3 -I - "$log" <<'PY'
+import json, re, sys
+found = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        value = json.loads(line)
+    except Exception:
+        value = None
+    todo = [value]
+    while todo:
+        item = todo.pop()
+        if isinstance(item, dict):
+            for key, val in item.items():
+                if key in ("thread_id", "threadId") and isinstance(val, str): found = val
+                elif isinstance(val, (dict, list)): todo.append(val)
+        elif isinstance(item, list): todo.extend(item)
+    match = re.search(r'(?:thread[_ ]id[=: ]+)([A-Za-z0-9_-]+)', line, re.I)
+    if match: found = match.group(1)
+print(found)
+PY
+)
+  if [ -z "$thread" ]; then thread=$resume; fi
+  if [ -n "$thread" ]; then printf '%s\n' "$thread" > "$dir/.jpdev/output/thread"; fi
   echo "== codex final message =="
   if [ -s "$final" ]; then cat "$final"; else echo "(none written)"; fi
   rm -f -- "$final"
   echo "== codex exit $status (transcript: $log) =="
-  if [ "$status" -ne 0 ] || [ "$commit" -eq 0 ]; then exit "$status"; fi
+  if [ "$status" -ne 0 ]; then exit "$status"; fi
+  if [ "$small" -eq 1 ]; then codex_small_check "$dir"; fi
+  if [ "$commit" -eq 0 ]; then exit 0; fi
   codex_publish "$dir" "$branch" "$push" "$pr" "$repo" "$base" "${adds[@]}"
+}
+
+# codex_small_check DIR refuses a small run after Codex has changed a handover path or too many lines.
+codex_small_check() {
+  local dir=$1 manifest
+  manifest=$dir/dev.json
+  [ -f "$manifest" ] || jpdev_die "codex run --small: $dir has no dev.json"
+  local result status
+  result=$(python3 -I - "$dir" "$manifest" "$JPDEV_SMALL_MAX_LINES" <<'PY'
+import json, os, subprocess, sys
+root, manifest, limit_text = sys.argv[1:]
+try:
+    limit = int(limit_text)
+    if limit < 0: raise ValueError
+except ValueError:
+    print("JPDEV_SMALL_MAX_LINES must be a non-negative integer")
+    raise SystemExit(2)
+m = json.load(open(manifest, encoding="utf-8"))
+handover = m.get("handover", {})
+protected = handover.get("shared_paths", []) + handover.get("boundary_paths", [])
+names = subprocess.check_output(["git", "-C", root, "status", "--porcelain", "-z"]).split(b"\0")
+paths = []
+for row in names:
+    if not row: continue
+    path = row[3:].decode("utf-8", "replace")
+    if " -> " in path: path = path.split(" -> ", 1)[1]
+    paths.append(path)
+for path in paths:
+    for prefix in protected:
+        prefix = prefix.rstrip("/")
+        if path == prefix or path.startswith(prefix + "/"):
+            print("protected\t" + path)
+            raise SystemExit(1)
+out = subprocess.check_output(["git", "-C", root, "diff", "--numstat", "HEAD"], text=True)
+changed = 0
+for row in out.splitlines():
+    added, removed, _ = row.split("\t", 2)
+    changed += (int(added) if added.isdigit() else 0) + (int(removed) if removed.isdigit() else 0)
+tracked = set(subprocess.check_output(["git", "-C", root, "ls-files"], text=True).splitlines())
+for path in paths:
+    if path not in tracked and os.path.isfile(os.path.join(root, path)):
+        with open(os.path.join(root, path), "rb") as f: changed += sum(1 for _ in f)
+if changed > limit:
+    print("lines\t%d\t%d" % (changed, limit))
+    raise SystemExit(1)
+print("ok\t%d\t%d" % (changed, limit))
+PY
+  )
+  status=$?
+  case $result in
+    protected$'\t'*) jpdev_die "codex run --small: refused after the run: ${result#*$'\t'} is a shared or boundary path" ;;
+    lines$'\t'*) local rest=${result#*$'\t'}; jpdev_die "codex run --small: refused after the run: ${rest%%$'\t'*} changed lines exceeds JPDEV_SMALL_MAX_LINES=${rest#*$'\t'}" ;;
+  esac
+  [ "$status" -eq 0 ] || jpdev_die "codex run --small: could not inspect the change: $result"
 }
 
 # codex_publish DIR BRANCH PUSH PR REPO BASE [ADD...]: stage the tracked changes (and the paths
@@ -468,13 +678,13 @@ codex_publish() {
   local cache_paths=()
   while IFS= read -r -d '' path; do
     case /$path/ in
-      */.jpdev/* | */.gocache/* | */.npm-cache/* | */.xdg-cache/*) cache_paths+=("$path") ;;
+      */.jpdev/* | */.jpdev-shared/* | */.gocache/* | */.npm-cache/* | */.xdg-cache/*) cache_paths+=("$path") ;;
     esac
   done < <(git diff --cached --name-only -z)
   if [ "${#cache_paths[@]}" -gt 0 ]; then
     git rm -r --cached --quiet --ignore-unmatch -- "${cache_paths[@]}" || exit 1
   fi
-  if git diff --cached --name-only | grep -qE '(^|/)\.(jpdev|gocache|npm-cache|xdg-cache)(/|$)'; then
+  if git diff --cached --name-only | grep -qE '(^|/)\.(jpdev|jpdev-shared|gocache|npm-cache|xdg-cache)(/|$)'; then
     jpdev_die "codex run: a sandbox cache directory remained staged"
   fi
   if git diff --cached --name-only | grep -qxE 'msg\.txt|pr\.md'; then
@@ -512,6 +722,85 @@ codex_publish() {
 # codex_brief_template prints the brief skeleton a Codex build starts from.
 codex_brief_template() { cat "$kit/templates/codex-brief.md"; }
 
+# cmd_carry merges the current base into a pull-request branch. Conflicts are handed to the same
+# codex_run path as a normal --no-pr build, using a generated brief.
+cmd_carry() {
+  local pr="" model=$JPDEV_CODEX_MODEL_DEFAULT effort="" dir=. dir_given=0 repo="" base=main
+  local sandbox=$JPDEV_CODEX_SANDBOX worktree=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --pr) need_value "$@"; pr=$2; shift 2 ;;
+      --model) need_value "$@"; model=$2; shift 2 ;;
+      --effort) need_value "$@"; effort=$2; shift 2 ;;
+      --dir) need_value "$@"; dir=$2; dir_given=1; shift 2 ;;
+      --repo) need_value "$@"; repo=$2; shift 2 ;;
+      --base) need_value "$@"; base=$2; shift 2 ;;
+      --worktree) need_value "$@"; worktree=$2; shift 2 ;;
+      --sandbox) need_value "$@"; sandbox=$2; shift 2 ;;
+      *) jpdev_die "carry: unknown argument $1" ;;
+    esac
+  done
+  [ -n "$pr" ] || jpdev_die "carry: --pr N is needed"
+  [ -n "$model" ] || jpdev_die "carry: --model is needed"
+  case $effort in low | medium | high) ;; *) jpdev_die "carry: --effort is low, medium or high" ;; esac
+  local view branch pr_base
+  view=$(gh pr view "$pr" ${repo:+--repo "$repo"} --json headRefName,baseRefName --jq '.headRefName + "\t" + .baseRefName') || jpdev_die "carry: could not read pull request #$pr"
+  IFS=$'\t' read -r branch pr_base <<< "$view"
+  [ -n "$branch" ] || jpdev_die "carry: pull request #$pr has no branch"
+  [ -z "$pr_base" ] || base=$pr_base
+  if [ -n "$worktree" ]; then
+    if [ "$dir_given" -eq 0 ]; then dir=$(dirname "$worktree")/"$(basename "$worktree")-${branch//\//-}"; fi
+    if [ ! -d "$dir" ]; then
+      if ! git -C "$worktree" show-ref --verify -q "refs/heads/$branch"; then
+        jpdev_git_net -C "$worktree" fetch -q origin "$branch:$branch" || jpdev_die "carry: could not fetch $branch"
+      fi
+      worktree_add "$worktree" "$branch" "$dir" "origin/$base" > /dev/null
+    fi
+  elif [ ! -d "$dir" ]; then
+    [ -n "$repo" ] || jpdev_die "carry: $dir is not a clone; give --repo OWNER/NAME or --worktree BASE"
+    gh repo clone "$repo" "$dir" -- -q || jpdev_die "carry: the clone failed"
+  fi
+  dir=$(cd "$dir" && git rev-parse --show-toplevel) || jpdev_die "carry: --dir is not a git clone"
+  jpdev_git_net -C "$dir" fetch -q origin "$base" || jpdev_die "carry: could not fetch origin/$base"
+  if [ "$(git -C "$dir" symbolic-ref --short -q HEAD)" != "$branch" ]; then
+    if git -C "$dir" show-ref --verify -q "refs/heads/$branch"; then
+      git -C "$dir" switch -q "$branch" || jpdev_die "carry: could not switch to $branch"
+    else
+      jpdev_git_net -C "$dir" fetch -q origin "$branch:$branch" || jpdev_die "carry: could not fetch $branch"
+      git -C "$dir" switch -q "$branch" || jpdev_die "carry: could not switch to $branch"
+    fi
+  fi
+  [ -z "$(git -C "$dir" status --porcelain)" ] || jpdev_die "carry: $dir has uncommitted work"
+  local merge_status=0
+  git -C "$dir" merge --no-ff --no-commit "origin/$base" || merge_status=$?
+  if [ "$merge_status" -eq 0 ]; then
+    if git -C "$dir" diff --cached --quiet; then
+      jpdev_log "carry: $branch already contains origin/$base"
+    else
+      git -C "$dir" commit -q -s -m "Merge origin/$base into $branch" || jpdev_die "carry: the merge commit failed"
+    fi
+    (cd "$dir" && cmd_push "$branch") || jpdev_die "carry: the push failed"
+    echo "== jpdev carry: pushed $branch =="
+    return
+  fi
+  local conflicts
+  conflicts=$(git -C "$dir" diff --name-only --diff-filter=U)
+  [ -n "$conflicts" ] || jpdev_die "carry: git merge failed without conflicts"
+  mkdir -p "$dir/.jpdev/output"
+  local brief=$dir/.jpdev/output/carry-brief.md base_commit
+  base_commit=$(git -C "$dir" rev-parse "origin/$base")
+  python3 -I - "$kit/templates/carry-brief.md" "$brief" "$pr" "$branch" "$base_commit" "$conflicts" <<'PY'
+import sys
+source, target, number, branch, base, conflicts = sys.argv[1:]
+text = open(source, encoding="utf-8").read()
+for old, new in (("{{PR}}", number), ("{{BRANCH}}", branch), ("{{BASE_COMMIT}}", base), ("{{CONFLICTS}}", conflicts)):
+    text = text.replace(old, new)
+open(target, "w", encoding="utf-8").write(text)
+PY
+  jpdev_log "carry: conflicts remain; generated $brief"
+  codex_run --brief "$brief" --model "$model" --effort "$effort" --sandbox "$sandbox" --dir "$dir" --base "$base" --no-pr
+}
+
 cmd_env() {
   local v cfg
   cfg=$(jpdev_config_file)
@@ -533,6 +822,8 @@ case ${1:-} in
   mutants) shift; cmd_mutants "$@" ;;
   record) shift; cmd_record "$@" ;;
   push) shift; cmd_push "$@" ;;
+  worktree) shift; cmd_worktree "$@" ;;
+  carry) shift; cmd_carry "$@" ;;
   codex) shift; cmd_codex "$@" ;;
   env) shift; cmd_env "$@" ;;
   --version | version) echo "jpdev $JPDEV_VERSION" ;;

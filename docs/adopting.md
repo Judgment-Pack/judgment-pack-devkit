@@ -26,8 +26,12 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
 
 The optional `handover` object names `boundary_paths`, where a builder checks that admission and
 verdict behavior did not move beyond the issue, and `shared_paths`, which a builder changes by
-appending only while a sibling build is open. The builder runs the checks described in AGENTS.md
-before handover and never fetches, rebases or merges; the coordinator carries `main`.
+appending only while a sibling build is open. Its optional `schema_probe` is a command the CI
+handover job runs with `JPDEV_HANDOVER_BASE` set to the pull request's base commit, so a repository
+can prove that schema changes are carried by vectors. These paths also bound `jpdev codex run
+--small`: touching one makes the wrapper refuse the small result. The builder runs the checks
+described in AGENTS.md before handover and never fetches, rebases or merges; the coordinator carries
+`main`.
 
 A step has a `name` (letters, digits, `.`, `_`, `-`), a `run` (a bash command line), a `cwd`
 (relative to the repository root, default `.`), a `toolchain` (`node`, `go`, `python` or
@@ -72,8 +76,11 @@ regenerates `CLAUDE.md`.
 
 Copy `templates/ci-check.yml` to `.github/workflows/dev-check.yml`. It reads the toolchain
 versions from `dev.json`, sets the toolchains up, and runs `scripts/dev/check.sh --setup` and
-`scripts/dev/check.sh --all`. A repository that already has CI jobs keeps them and uses the
-workflow as the list of steps to move its checks into.
+`scripts/dev/check.sh --all`. Its handover job rejects removals from boundary paths unless the pull
+request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present. Copy
+`templates/update-branches.yml` to `.github/workflows/update-branches.yml` to update open branches
+after a default-branch push and label conflict cases `carry needed`. A repository that already has
+CI jobs keeps them and uses the workflow as the list of steps to move its checks into.
 
 ## 5. Check it
 
