@@ -320,6 +320,27 @@ PY
   expect "the workflow templates parse as YAML" 0 "parsed workflow templates" "$out" "$s"
 fi
 
+handover_repo=$work/handover-check
+git init -q -b main "$handover_repo"
+git -C "$handover_repo" config user.email test@example.invalid
+git -C "$handover_repo" config user.name Test
+printf '{"version":1,"checks":[],"handover":{"boundary_paths":["boundary.txt"]}}\n' > "$handover_repo/dev.json"
+printf 'kept\nremoved\n' > "$handover_repo/boundary.txt"
+git -C "$handover_repo" add dev.json boundary.txt
+git -C "$handover_repo" commit -q -m base
+handover_base=$(git -C "$handover_repo" rev-parse HEAD)
+sed -i '/removed/d' "$handover_repo/boundary.txt"
+git -C "$handover_repo" commit -q -am removal
+out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY= "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
+expect "the handover check refuses a boundary removal" 1 'handover: boundary path has removals: boundary.txt' "$out" "$s"
+out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY='Boundary change: yes' "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
+expect "the handover check accepts an exempted boundary removal" 0 "" "$out" "$s"
+git -C "$handover_repo" switch -q --detach "$handover_base"
+printf 'added\n' >> "$handover_repo/boundary.txt"
+git -C "$handover_repo" commit -q -am addition
+out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY= "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
+expect "the handover check accepts a boundary addition" 0 "" "$out" "$s"
+
 # --- mutants
 out=$("$jpdev" mutants --manifest "$fixture" --row alpha 2>/dev/null) && s=0 || s=$?
 expect "jpdev mutants reports a caught row" 0 'caught +alpha is checked' "$out" "$s"

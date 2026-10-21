@@ -64,7 +64,7 @@ added and removed lines exceed `JPDEV_SMALL_MAX_LINES` (80 by default). A red CI
 not another cold build.
 
 Use `jpdev codex run --resume THREAD` only for the fix round after review on the same branch. Every
-run records the thread id in `.jpdev/output/thread`. Never resume a builder that a safeguard stopped;
+thread id the CLI reports is recorded in `.jpdev/output/thread`. Never resume a builder that a safeguard stopped;
 the fresh-builder rule under Safeguards and stops still applies.
 
 For sibling work, `jpdev codex run --worktree BASE` and `jpdev worktree add|list|remove` keep the git
