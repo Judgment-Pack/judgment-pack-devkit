@@ -331,14 +331,14 @@ git -C "$handover_repo" commit -q -m base
 handover_base=$(git -C "$handover_repo" rev-parse HEAD)
 sed -i '/removed/d' "$handover_repo/boundary.txt"
 git -C "$handover_repo" commit -q -am removal
-out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY= "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
+out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY='' "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
 expect "the handover check refuses a boundary removal" 1 'handover: boundary path has removals: boundary.txt' "$out" "$s"
 out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY='Boundary change: yes' "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
 expect "the handover check accepts an exempted boundary removal" 0 "" "$out" "$s"
 git -C "$handover_repo" switch -q --detach "$handover_base"
 printf 'added\n' >> "$handover_repo/boundary.txt"
 git -C "$handover_repo" commit -q -am addition
-out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY= "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
+out=$(cd "$handover_repo" && JPDEV_HANDOVER_BASE=$handover_base JPDEV_PR_BODY='' "$kit/lib/handover_check.sh" 2>&1) && s=0 || s=$?
 expect "the handover check accepts a boundary addition" 0 "" "$out" "$s"
 
 # --- mutants
