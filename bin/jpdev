@@ -465,6 +465,18 @@ codex_publish() {
   for path in "$@"; do
     git add -- "$path" || { echo "jpdev codex run: --add $path could not be staged" >&2; exit 1; }
   done
+  local cache_paths=()
+  while IFS= read -r -d '' path; do
+    case /$path/ in
+      */.jpdev/* | */.gocache/* | */.npm-cache/* | */.xdg-cache/*) cache_paths+=("$path") ;;
+    esac
+  done < <(git diff --cached --name-only -z)
+  if [ "${#cache_paths[@]}" -gt 0 ]; then
+    git rm -r --cached --quiet --ignore-unmatch -- "${cache_paths[@]}" || exit 1
+  fi
+  if git diff --cached --name-only | grep -qE '(^|/)\.(jpdev|gocache|npm-cache|xdg-cache)(/|$)'; then
+    jpdev_die "codex run: a sandbox cache directory remained staged"
+  fi
   if git diff --cached --name-only | grep -qxE 'msg\.txt|pr\.md'; then
     git reset -q -- msg.txt pr.md
     echo "jpdev codex run: refused: msg.txt or pr.md is tracked and changed; they are read, never committed" >&2

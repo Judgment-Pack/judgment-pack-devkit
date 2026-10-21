@@ -296,6 +296,8 @@ expect "the schema refuses an unknown handover member" 1 "dev.json:" "$out" "$s"
 printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"boundary_paths": [""], "shared_paths": []}}\n' > "$work/handover-empty.json"
 out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-empty.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the schema refuses an empty handover path" 1 "dev.json:" "$out" "$s"
+out=$(python3 "$kit/lib/validate_manifest.py" "$kit/tests/fixture/handover-empty-shared.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an empty shared handover path" 1 "dev.json:" "$out" "$s"
 printf '{"version": 2, "checks": []}\n' > "$work/bad.json"
 out=$(python3 "$kit/lib/validate_manifest.py" "$work/bad.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the manifest check refuses a wrong version" 1 "dev.json:" "$out" "$s"
@@ -603,7 +605,8 @@ git init -q --bare -b main "$cxorigin"
 git init -q -b main "$cxrepo"
 printf '# Rules\n' > "$cxrepo/AGENTS.md"
 printf 'one\n' > "$cxrepo/file.txt"
-git -C "$cxrepo" add AGENTS.md file.txt
+printf 'msg.txt\npr.md\n' > "$cxrepo/.gitignore"
+git -C "$cxrepo" add .gitignore AGENTS.md file.txt
 git -C "$cxrepo" commit -q -m seed
 git -C "$cxrepo" remote add origin "$cxorigin"
 git -C "$cxrepo" push -q origin main
@@ -658,6 +661,28 @@ cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add created.txt) && s=0 || s=$?
 expect "codex run --add commits a new file named" 0 'committed' "$out" "$s"
 if [ "$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')" = "created.txt file.txt" ]; then ok "--add puts the named file in the commit"; else bad "--add puts the named file in the commit"; fi
+
+cx_reset
+for cache in .jpdev .gocache .npm-cache .xdg-cache; do
+  mkdir -p "$cxrepo/$cache"
+  printf 'cache\n' > "$cxrepo/$cache/file"
+done
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .) && s=0 || s=$?
+expect "codex run --add . commits while excluding cache directories" 0 'committed' "$out" "$s"
+names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
+if [ "$names" = "created.txt file.txt" ]; then ok "--add . commits none of the cache directories"; else bad "--add . commits none of the cache directories" "$names"; fi
+
+cx_reset
+mkdir -p "$cxrepo/parent/keep"
+printf 'keep\n' > "$cxrepo/parent/keep/file"
+for cache in .jpdev .gocache .npm-cache .xdg-cache; do
+  mkdir -p "$cxrepo/parent/$cache"
+  printf 'cache\n' > "$cxrepo/parent/$cache/file"
+done
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add parent) && s=0 || s=$?
+expect "codex run --add of a containing directory commits while excluding caches" 0 'committed' "$out" "$s"
+names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
+if [ "$names" = "file.txt parent/keep/file" ]; then ok "--add of a containing directory commits none of its cache directories"; else bad "--add of a containing directory commits none of its cache directories" "$names"; fi
 
 cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --no-push) && s=0 || s=$?
