@@ -51,8 +51,10 @@ def main():
                     problems.append("handover: not an object")
                 else:
                     for key in handover:
-                        if key not in ("boundary_paths", "shared_paths"):
+                        if key not in ("boundary_paths", "shared_paths", "schema_probe"):
                             problems.append("handover: unknown member %r" % key)
+                    if "schema_probe" in handover and (not isinstance(handover["schema_probe"], str) or not handover["schema_probe"]):
+                        problems.append("handover/schema_probe: must be a non-empty string")
                     for key in ("boundary_paths", "shared_paths"):
                         if key not in handover:
                             continue

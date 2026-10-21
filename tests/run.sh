@@ -298,9 +298,27 @@ out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-empty.json" "$kit/
 expect "the schema refuses an empty handover path" 1 "dev.json:" "$out" "$s"
 out=$(python3 "$kit/lib/validate_manifest.py" "$kit/tests/fixture/handover-empty-shared.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the schema refuses an empty shared handover path" 1 "dev.json:" "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"schema_probe": "scripts/schema-probe.sh"}}\n' > "$work/handover-probe.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-probe.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema accepts handover.schema_probe" 0 "valid" "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"schema_probe": ""}}\n' > "$work/handover-empty-probe.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover-empty-probe.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an empty handover.schema_probe" 1 "handover/schema_probe" "$out" "$s"
 printf '{"version": 2, "checks": []}\n' > "$work/bad.json"
 out=$(python3 "$kit/lib/validate_manifest.py" "$work/bad.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the manifest check refuses a wrong version" 1 "dev.json:" "$out" "$s"
+if command -v actionlint > /dev/null; then
+  out=$(actionlint "$kit/templates/ci-check.yml" "$kit/templates/update-branches.yml" 2>&1) && s=0 || s=$?
+  expect "the workflow templates pass actionlint" 0 "" "$out" "$s"
+else
+  out=$(python3 - "$kit/templates/ci-check.yml" "$kit/templates/update-branches.yml" <<'PY'
+import sys, yaml
+for path in sys.argv[1:]: yaml.safe_load(open(path, encoding="utf-8"))
+print("parsed workflow templates")
+PY
+  ) && s=0 || s=$?
+  expect "the workflow templates parse as YAML" 0 "parsed workflow templates" "$out" "$s"
+fi
 
 # --- mutants
 out=$("$jpdev" mutants --manifest "$fixture" --row alpha 2>/dev/null) && s=0 || s=$?
@@ -441,14 +459,16 @@ while [ $# -gt 0 ]; do
   shift
 done
 if [ -n "${STUB_CODEX_EDIT:-}" ]; then
-  echo "edited by codex" >> file.txt
+  echo "edited by codex" >> "${STUB_CODEX_EDIT_FILE:-file.txt}"
   echo "new file" > created.txt
 fi
 if [ -n "${STUB_CODEX_MSG:-}" ]; then
   cp "$STUB_CODEX_MSG" msg.txt
   if [ -z "${STUB_CODEX_NO_PR:-}" ]; then printf 'Closes #1.\n\n## What it adds\nA line.\n' > pr.md; fi
 fi
+if [ -n "${STUB_CODEX_RESOLVE:-}" ]; then printf 'main addition\nbranch addition\n' > "$STUB_CODEX_RESOLVE"; fi
 echo "stub transcript line"
+echo '{"type":"thread.started","thread_id":"thread-test"}'
 echo "stub stderr line" >&2
 exit "${STUB_CODEX_EXIT:-0}"
 STUB
@@ -477,6 +497,11 @@ log=$(cat "$work/codex.log")
 expect "the transcript (stdout) is in the log" 0 '^stub transcript line$' "$log" 0
 expect "the transcript (stderr) is in the log" 0 '^stub stderr line$' "$log" 0
 absent "the final message is not part of the transcript" 'stub final message' "$log"
+if [ "$(cat "$work/codexclone/.jpdev/output/thread")" = thread-test ]; then ok "codex run records the thread id"; else bad "codex run records the thread id"; fi
+codex_args
+out=$("$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --resume prior-thread --log "$work/codex-resume.log" 2>&1) && s=0 || s=$?
+expect "codex run --resume completes" 0 "codex exit 0" "$out" "$s"
+if has_arg resume && has_arg prior-thread; then ok "codex run passes resume and the thread id"; else bad "codex run passes resume and the thread id" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
 want_root=$(cd "$work/codexclone" && pwd -P)
 out=$(JPDEV_SCRATCH='' JPDEV_LOCK='' GOCACHE='' GOFLAGS='' npm_config_cache='' XDG_CACHE_HOME='' \
   "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex-env.log" 2>&1) && s=0 || s=$?
@@ -519,6 +544,49 @@ mkdir -p "$work/norules"
 out=$("$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$work/norules" 2>&1) && s=0 || s=$?
 expect "codex run refuses a directory with no AGENTS.md" 2 'holds no AGENTS.md' "$out" "$s"
 if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused run did not start codex"; else ok "a refused run did not start codex"; fi
+
+# worktrees: creation, linked dependencies, shared caches and guarded removal
+wtorigin=$work/wtorigin.git
+wtseed=$work/wtseed
+wtbase=$work/wtbase
+wt=$work/wt-topic
+git init -q --bare -b main "$wtorigin"
+git init -q -b main "$wtseed"
+printf '# Rules\n' > "$wtseed/AGENTS.md"
+printf '{"version":1,"checks":[{"name":"one","run":"true"}]}\n' > "$wtseed/dev.json"
+printf '{"lockfileVersion":3}\n' > "$wtseed/package-lock.json"
+printf 'one\n' > "$wtseed/file.txt"
+git -C "$wtseed" add .
+git -C "$wtseed" -c user.name=test -c user.email=test@example.com commit -q -m seed
+git -C "$wtseed" remote add origin "$wtorigin"
+git -C "$wtseed" push -q origin main
+git clone -q "$wtorigin" "$wtbase"
+mkdir -p "$wtbase/node_modules"
+out=$("$jpdev" worktree add "$wtbase" topic "$wt" 2>&1) && s=0 || s=$?
+expect "worktree add creates the branch worktree" 0 'branch +topic' "$out" "$s"
+if [ -L "$wt/node_modules" ]; then ok "worktree add links node_modules from the base"; else bad "worktree add links node_modules from the base"; fi
+out=$(JPDEV_SCRATCH='' JPDEV_LOCK='' GOCACHE='' npm_config_cache='' XDG_CACHE_HOME='' \
+  "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$wt" --worktree "$wtbase" --log "$work/wt-codex.log" 2>&1) && s=0 || s=$?
+expect "codex run --worktree completes" 0 'codex exit 0' "$out" "$s"
+for pair in "GOCACHE=$wtbase/.jpdev-shared/gocache" "npm_config_cache=$wtbase/.jpdev-shared/npm-cache" \
+  "XDG_CACHE_HOME=$wtbase/.jpdev-shared/xdg-cache" "JPDEV_LOCK=$wt/.jpdev/lock"; do
+  if grep -qxF "$pair" "$STUB_CODEX_ENV"; then ok "worktree codex receives $pair"; else bad "worktree codex receives $pair" "$(cat "$STUB_CODEX_ENV")"; fi
+done
+printf 'dirty\n' >> "$wt/file.txt"
+out=$("$jpdev" worktree remove "$wt" 2>&1) && s=0 || s=$?
+expect "worktree remove refuses a dirty worktree" 2 'refused: .* has uncommitted work' "$out" "$s"
+out=$("$jpdev" worktree remove "$wt" --force 2>&1) && s=0 || s=$?
+expect "worktree remove --force removes the dirty worktree" 0 '' "$out" "$s"
+if [ ! -e "$wt" ]; then ok "the forced worktree removal removed its directory"; else bad "the forced worktree removal removed its directory"; fi
+wt_auto=$work/wt-auto
+out=$(JPDEV_SCRATCH='' JPDEV_LOCK='' GOCACHE='' npm_config_cache='' XDG_CACHE_HOME='' \
+  "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$wt_auto" \
+  --worktree "$wtbase" --branch auto-topic --log "$work/wt-auto.log" 2>&1) && s=0 || s=$?
+expect "codex run --worktree creates a missing worktree" 0 'codex exit 0' "$out" "$s"
+if [ "$(git -C "$wt_auto" branch --show-current)" = auto-topic ]; then ok "the Codex worktree uses the requested branch"; else bad "the Codex worktree uses the requested branch"; fi
+out=$("$jpdev" worktree list "$wtbase" 2>&1) && s=0 || s=$?
+expect "worktree list shows the Codex worktree" 0 'auto-topic' "$out" "$s"
+"$jpdev" worktree remove "$wt_auto" --force
 
 # check-brief: the base list, the neutral phrasing, the config extension
 printf 'Reject a request with an unexpected value and return the documented error.\nA shackle is a ring.\n\n## Before you write msg.txt\n' > "$work/clean-brief.md"
@@ -605,8 +673,9 @@ git init -q --bare -b main "$cxorigin"
 git init -q -b main "$cxrepo"
 printf '# Rules\n' > "$cxrepo/AGENTS.md"
 printf 'one\n' > "$cxrepo/file.txt"
+printf '{"version":1,"checks":[{"name":"one","run":"true"}],"handover":{"shared_paths":["file.txt"],"boundary_paths":[]}}\n' > "$cxrepo/dev.json"
 printf 'msg.txt\npr.md\n' > "$cxrepo/.gitignore"
-git -C "$cxrepo" add .gitignore AGENTS.md file.txt
+git -C "$cxrepo" add .gitignore AGENTS.md dev.json file.txt
 git -C "$cxrepo" commit -q -m seed
 git -C "$cxrepo" remote add origin "$cxorigin"
 git -C "$cxrepo" push -q origin main
@@ -624,6 +693,15 @@ cx_run() { # extra arguments to codex run
 }
 cx_calls() { if [ -f "$1" ]; then wc -l < "$1" | tr -d ' '; else echo 0; fi; }
 base=$(git -C "$cxrepo" rev-parse HEAD)
+
+cx_reset
+out=$(STUB_CODEX_EDIT=1 cx_run --no-commit --small) && s=0 || s=$?
+expect "codex run --small refuses a shared path after the run" 2 'refused after the run: file.txt is a shared or boundary path' "$out" "$s"
+prompt=$(python3 -I -c 'import sys; a = open(sys.argv[1], "rb").read().split(b"\0"); sys.stdout.write(a[-2].decode())' "$STUB_CODEX_ARGS")
+expect "codex run --small prepends its scoped-check line" 0 '^This is a small fix: run only the check-list steps' "$(sed -n '2p' <<< "$prompt")" 0
+cx_reset
+out=$(JPDEV_SMALL_MAX_LINES=0 STUB_CODEX_EDIT=1 STUB_CODEX_EDIT_FILE=AGENTS.md cx_run --no-commit --small) && s=0 || s=$?
+expect "codex run --small refuses a change over the line bound" 2 'changed lines exceeds JPDEV_SMALL_MAX_LINES=0' "$out" "$s"
 
 cx_reset
 printf 'untracked and not named\n' > "$cxrepo/stray.txt"
@@ -715,6 +793,8 @@ out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add msg.txt)
 expect "codex run refuses --add msg.txt" 2 'read, never committed' "$out" "$s"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .jpdev) && s=0 || s=$?
 expect "codex run refuses --add .jpdev" 2 'sandbox cache directory' "$out" "$s"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .jpdev-shared) && s=0 || s=$?
+expect "codex run refuses --add .jpdev-shared" 2 'shared cache directory' "$out" "$s"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add ../outside) && s=0 || s=$?
 expect "codex run refuses --add outside the clone" 2 'inside the clone' "$out" "$s"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt PATH=$work/gitstub:$work/ghbin:$PATH "$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$cxrepo" 2>&1) && s=0 || s=$?
@@ -729,6 +809,71 @@ cx_reset
 printf 'stale\n' > "$cxrepo/msg.txt"
 out=$(STUB_CODEX_EDIT=1 cx_run --no-push) && s=0 || s=$?
 expect "a msg.txt left by an earlier run is not used" 1 'wrote no msg.txt' "$out" "$s"
+
+# carry: a clean merge is signed and pushed; a conflict uses the generated Codex brief
+mkdir -p "$work/carrybin"
+cat > "$work/carrybin/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then printf '%s\tmain\n' "$STUB_CARRY_BRANCH"; exit 0; fi
+exit 1
+STUB
+chmod +x "$work/carrybin/gh"
+carry_origin=$work/carry-origin.git
+carry_seed=$work/carry-seed
+carry_base=$work/carry-base
+carry_repo=$work/carry-repo
+git init -q --bare -b main "$carry_origin"
+git init -q -b main "$carry_seed"
+printf '# Rules\n' > "$carry_seed/AGENTS.md"
+printf 'base\n' > "$carry_seed/file.txt"
+git -C "$carry_seed" add .
+git -C "$carry_seed" commit -q -m base
+git -C "$carry_seed" remote add origin "$carry_origin"
+git -C "$carry_seed" push -q origin main
+git -C "$carry_seed" switch -q -c feature
+printf 'branch\n' > "$carry_seed/branch.txt"
+git -C "$carry_seed" add branch.txt
+git -C "$carry_seed" commit -q -m branch
+git -C "$carry_seed" push -q origin feature
+git -C "$carry_seed" switch -q main
+printf 'main\n' > "$carry_seed/main.txt"
+git -C "$carry_seed" add main.txt
+git -C "$carry_seed" commit -q -m main
+git -C "$carry_seed" push -q origin main
+git clone -q "$carry_origin" "$carry_base"
+out=$(STUB_CARRY_BRANCH=feature PATH=$work/carrybin:$work/codexbin:$oldpath "$jpdev" carry --pr 1 --model m --effort low --dir "$carry_repo" --worktree "$carry_base" 2>&1) && s=0 || s=$?
+expect "carry without conflicts signs and pushes the merge" 0 'jpdev carry: pushed feature' "$out" "$s"
+if [ -d "$carry_repo" ]; then ok "carry can make a worktree for the pull-request branch"; else bad "carry can make a worktree for the pull-request branch"; fi
+msg=$(git -C "$carry_repo" log -1 --format=%B)
+expect "the clean carry commit is signed off" 0 '^Signed-off-by: Test <test@example.com>$' "$msg" 0
+if [ "$(git --git-dir="$carry_origin" rev-parse feature)" = "$(git -C "$carry_repo" rev-parse HEAD)" ]; then ok "the clean carry reaches origin"; else bad "the clean carry reaches origin"; fi
+
+conflict_origin=$work/conflict-origin.git
+conflict_seed=$work/conflict-seed
+conflict_repo=$work/conflict-repo
+git init -q --bare -b main "$conflict_origin"
+git init -q -b main "$conflict_seed"
+printf '# Rules\n' > "$conflict_seed/AGENTS.md"
+printf 'base\n' > "$conflict_seed/conflict.txt"
+git -C "$conflict_seed" add .
+git -C "$conflict_seed" commit -q -m base
+git -C "$conflict_seed" remote add origin "$conflict_origin"
+git -C "$conflict_seed" push -q origin main
+git -C "$conflict_seed" switch -q -c conflict-work
+printf 'branch\n' > "$conflict_seed/conflict.txt"
+git -C "$conflict_seed" commit -qam branch
+git -C "$conflict_seed" push -q origin conflict-work
+git -C "$conflict_seed" switch -q main
+printf 'main\n' > "$conflict_seed/conflict.txt"
+git -C "$conflict_seed" commit -qam main
+git -C "$conflict_seed" push -q origin main
+git clone -q --branch conflict-work "$conflict_origin" "$conflict_repo"
+codex_args
+out=$(STUB_CARRY_BRANCH=conflict-work STUB_CODEX_RESOLVE=conflict.txt STUB_CODEX_MSG=$work/msg-plain.txt \
+  PATH=$work/carrybin:$work/codexbin:$oldpath "$jpdev" carry --pr 2 --model m --effort low --dir "$conflict_repo" 2>&1) && s=0 || s=$?
+expect "carry with conflicts starts the Codex no-PR path" 0 'jpdev codex run: pushed conflict-work' "$out" "$s"
+if grep -qF 'conflict.txt' "$conflict_repo/.jpdev/output/carry-brief.md" && grep -qF "with main's additions" "$conflict_repo/.jpdev/output/carry-brief.md"; then ok "the carry brief names conflicts and the ordering rule"; else bad "the carry brief names conflicts and the ordering rule"; fi
+if has_arg exec; then ok "the conflicted carry starts codex"; else bad "the conflicted carry starts codex"; fi
 
 # the brief template
 out=$("$jpdev" codex brief-template 2>&1) && s=0 || s=$?

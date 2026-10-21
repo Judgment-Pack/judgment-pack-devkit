@@ -33,6 +33,11 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "schema_probe": {
+          "type": "string",
+          "minLength": 1,
+          "description": "command CI runs to prove schema changes are carried by a vector; JPDEV_HANDOVER_BASE names the base commit"
         }
       }
     },

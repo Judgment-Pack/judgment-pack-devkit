@@ -71,3 +71,39 @@ jobs:
         run: scripts/dev/check.sh --setup
       - name: Checks
         run: scripts/dev/check.sh --all
+
+  handover:
+    name: handover
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check boundary paths and run the schema probe
+        env:
+          JPDEV_HANDOVER_BASE: ${{ github.event.pull_request.base.sha }}
+          JPDEV_PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          manifest = json.load(open("dev.json", encoding="utf-8"))
+          handover = manifest.get("handover", {})
+          base = os.environ["JPDEV_HANDOVER_BASE"]
+          if "Boundary change: yes" not in os.environ.get("JPDEV_PR_BODY", "").splitlines():
+              for path in handover.get("boundary_paths", []):
+                  diff = subprocess.check_output(
+                      ["git", "diff", "--unified=0", base + "...HEAD", "--", path], text=True
+                  )
+                  removed = [line for line in diff.splitlines() if line.startswith("-") and not line.startswith("---")]
+                  if removed:
+                      print("handover: boundary path has removals: " + path, file=sys.stderr)
+                      raise SystemExit(1)
+          probe = handover.get("schema_probe")
+          if probe:
+              subprocess.run(["bash", "-c", probe], check=True)
+          PY

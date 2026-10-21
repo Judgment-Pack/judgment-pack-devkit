@@ -80,6 +80,7 @@ the same name overrides it. `config/env.example` documents each setting with its
 | `JPDEV_CODEX_MODEL_DEFAULT` | none (the model is always passed) | the model `jpdev codex run` uses when `--model` is not given |
 | `JPDEV_CODEX_SANDBOX` | `workspace-write` | the sandbox mode of `jpdev codex run` |
 | `JPDEV_CODEX_WORDS` | `~/.config/jpdev/codex-words.txt` | extra terms for `jpdev codex check-brief` |
+| `JPDEV_SMALL_MAX_LINES` | `80` | maximum added and removed lines for `jpdev codex run --small` |
 
 ## Commands
 
@@ -103,9 +104,15 @@ the same name overrides it. `config/env.example` documents each setting with its
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`,
   so the push uses the `gh` login and no stored credential. It refuses `--force`, `-f` and a
   `+` refspec.
+- `jpdev worktree add BASE BRANCH [DIR]`, `jpdev worktree list BASE`, and `jpdev worktree remove
+  DIR [--force]`: manage sibling worktrees. Removal refuses dirty or unpushed work unless forced.
+- `jpdev carry --pr N --model M --effort low|medium|high [--dir CLONE] [--worktree BASE]`: clone
+  or worktree the pull-request branch and merge the current base into it. A clean carry is signed
+  and pushed; conflicts start Codex through the normal `--no-pr` path with a generated brief.
 - `jpdev codex run --brief FILE --model M --effort low|medium|high [--dir CLONE] [--repo OWNER/NAME]
   [--base main] [--add PATH]... [--no-commit] [--no-push] [--no-pr] [--sandbox
-  workspace-write|danger-full-access] [--log FILE]`: checks the brief, then runs `codex exec` in
+  workspace-write|danger-full-access] [--log FILE] [--worktree BASE] [--branch NAME] [--small]
+  [--resume THREAD]`: checks the brief, then runs `codex exec` in
   CLONE (a clone on a work branch that holds an `AGENTS.md`) with `-m`,
   `-c model_reasoning_effort=`, `--sandbox` (network access on for `workspace-write`), stdin from
   `/dev/null`, and a prompt of one line naming the repository's `AGENTS.md` as the rules followed
@@ -124,7 +131,10 @@ the same name overrides it. `config/env.example` documents each setting with its
   `--no-commit` runs Codex alone. It stops with exit 1 and commits nothing when Codex changed no
   tracked file or wrote no `msg.txt` (or no `pr.md`, when a pull request is to be opened), and
   refuses a clone on `main`. The exit status is Codex's own when it fails, else 0 when every step
-  asked for was done. `--sandbox danger-full-access` is an explicit option only.
+  asked for was done. `--sandbox danger-full-access` is an explicit option only. Worktree runs
+  share caches below `BASE/.jpdev-shared`; `--small` enforces the manifest handover paths and line
+  bound after the run; `--resume` continues the named thread. Every detected thread id is written
+  to `.jpdev/output/thread`.
 - `jpdev codex brief-template`: prints `templates/codex-brief.md`, a brief skeleton that tells
   Codex to write `msg.txt` and `pr.md` and not to commit.
 - `jpdev codex check-brief FILE`: exits 1 and names the neutral phrasing for each word of
