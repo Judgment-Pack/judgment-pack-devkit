@@ -754,6 +754,18 @@ absent "check-brief does not flag a word that merely contains a listed one" 'sha
 printf 'Name the `exploitParser` identifier.\n\n## Before you write msg.txt\n' > "$work/backticked-brief.md"
 out=$("$jpdev" codex check-brief "$work/backticked-brief.md" 2>&1) && s=0 || s=$?
 expect "check-brief ignores a listed word inside backticks" 0 'no word of the filter list' "$out" "$s"
+  # shellcheck disable=SC2016  # literal unmatched and paired delimiters in the fixture
+printf 'An unmatched ` marker leaves exploitParser bare before `safe`.\n\n## Before you write msg.txt\n' > "$work/unbalanced-backtick-brief.md"
+out=$("$jpdev" codex check-brief "$work/unbalanced-backtick-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief fails closed on an odd run of backticks" 1 'line 1: "exploitParser"' "$out" "$s"
+  # shellcheck disable=SC2016  # literal fenced blocks in the fixtures
+printf '```text\nexploitParser\n```\n\n## Before you write msg.txt\n' > "$work/balanced-fence-brief.md"
+out=$("$jpdev" codex check-brief "$work/balanced-fence-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief exempts a balanced fenced block" 0 'no word of the filter list' "$out" "$s"
+  # shellcheck disable=SC2016  # literal unclosed fenced block in the fixture
+printf '```text\nexploitParser\n\n## Before you write msg.txt\n' > "$work/unbalanced-fence-brief.md"
+out=$("$jpdev" codex check-brief "$work/unbalanced-fence-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief fails closed on an unbalanced fenced block" 1 'line 2: "exploitParser"' "$out" "$s"
 printf 'Name the exploitParser identifier.\n\n## Before you write msg.txt\n' > "$work/bare-brief.md"
 out=$("$jpdev" codex check-brief "$work/bare-brief.md" 2>&1) && s=0 || s=$?
 expect "check-brief still refuses the same word bare" 1 'line 1: "exploitParser": describe the malformed or unexpected input and the documented refusal' "$out" "$s"
@@ -904,10 +916,21 @@ mkdir -p "$cxrepo/bundle"
 printf 'one\n' > "$cxrepo/bundle/one.txt"
 printf 'two\n' > "$cxrepo/bundle/two.txt"
 printf 'ignored\n' > "$cxrepo/bundle/ignored.txt"
+mkdir -p "$cxrepo/bundle/handover"
+printf 'nested message\n' > "$cxrepo/bundle/handover/msg.txt"
+printf 'nested body\n' > "$cxrepo/bundle/handover/pr.md"
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add bundle) && s=0 || s=$?
 expect "codex run --add accepts a directory" 0 'committed' "$out" "$s"
 names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
 if [ "$names" = "bundle/one.txt bundle/two.txt file.txt" ]; then ok "--add commits every non-ignored new file in a directory"; else bad "--add commits every non-ignored new file in a directory" "$names"; fi
+
+cx_reset
+mkdir -p "$cxrepo/nested/handover"
+printf 'nested message\n' > "$cxrepo/nested/handover/msg.txt"
+printf 'nested body\n' > "$cxrepo/nested/handover/pr.md"
+out=$(STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add nested) && s=0 || s=$?
+expect "codex run --add refuses a directory holding only nested handover files" 1 'codex run: --add nested: directory holds nothing to add' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "a nested handover-only directory makes no commit"; else bad "a nested handover-only directory makes no commit"; fi
 
 cx_reset
 out=$(STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .) && s=0 || s=$?

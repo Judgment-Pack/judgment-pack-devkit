@@ -33,14 +33,56 @@ def load(path):
     return entries
 
 
+def blank(text):
+    """Blank text while preserving line boundaries and offsets."""
+    return re.sub(r"[^\n]", " ", text)
+
+
+def mask_inline_backticks(line):
+    """Blank paired inline spans, or return the whole line unchanged if unbalanced."""
+    runs = list(re.finditer(r"`+", line))
+    spans = []
+    index = 0
+    while index < len(runs):
+        opener = runs[index]
+        for closing in range(index + 1, len(runs)):
+            if len(runs[closing].group(0)) == len(opener.group(0)):
+                spans.append((opener.start(), runs[closing].end()))
+                index = closing + 1
+                break
+        else:
+            return line
+    chars = list(line)
+    for start, end in spans:
+        chars[start:end] = blank(line[start:end])
+    return "".join(chars)
+
+
 def mask_backticks(text):
-    """Blank paired backtick spans while preserving offsets and line numbers."""
-    return re.sub(
-        r"(`+).*?\1",
-        lambda found: re.sub(r"[^\n]", " ", found.group(0)),
-        text,
-        flags=re.DOTALL,
-    )
+    """Blank balanced inline spans and fenced blocks, preserving unbalanced text."""
+    lines = text.splitlines(keepends=True)
+    masked = []
+    index = 0
+    while index < len(lines):
+        body = lines[index].rstrip("\r\n")
+        opened = re.fullmatch(r"[ \t]{0,3}(`{3,})[^`]*", body)
+        if not opened:
+            masked.append(mask_inline_backticks(lines[index]))
+            index += 1
+            continue
+        width = len(opened.group(1))
+        closing = index + 1
+        while closing < len(lines):
+            candidate = lines[closing].rstrip("\r\n")
+            if re.fullmatch(r"[ \t]{0,3}`{%d,}[ \t]*" % width, candidate):
+                break
+            closing += 1
+        if closing == len(lines):
+            masked.extend(lines[index:])
+            break
+        masked.extend(blank(line) for line in lines[index:closing + 1])
+        index = closing + 1
+    return "".join(masked)
 
 
 def main(argv):
