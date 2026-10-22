@@ -12,6 +12,8 @@ unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_U
 unset JPDEV_ROOT JPDEV_WRAP JPDEV_NODE_BIN JPDEV_GO_BIN JPDEV_LOGDIR JPDEV_STEP_TIMEOUT
 jpdev=$kit/bin/jpdev
 fixture=$kit/tests/fixture/dev.json
+system_python=$(python3 -c 'import sys; print(sys.executable)')
+system_git=$(command -v git)
 pass=0 fail=0
 
 ok() { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
@@ -167,6 +169,87 @@ cat > "$vclone/dev.json" <<'JSON'
 JSON
 out=$(cd "$vclone" && "$jpdev" check 2>/dev/null) && s=0 || s=$?
 expect "the python step runs in the virtual environment the manifest names" 0 'from-the-venv' "$out" "$s"
+
+# a missing declared environment is made with the declared interpreter before a check runs
+madeclone=$work/madeclone
+mkdir -p "$madeclone" "$work/pythonbin"
+git init -q -b main "$madeclone"
+python_release=$($system_python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+python_calls=$work/python-calls
+cat > "$work/pythonbin/python$python_release" <<'STUB'
+#!/bin/sh
+printf 'path\n' >> PYTHON_CALLS
+exec SYSTEM_PYTHON "$@"
+STUB
+sed -i "s#PYTHON_CALLS#$python_calls#g; s#SYSTEM_PYTHON#$system_python#g" "$work/pythonbin/python$python_release"
+chmod +x "$work/pythonbin/python$python_release"
+cat > "$madeclone/dev.json" <<JSON
+{"version": 1, "toolchains": {"python": {"version": "$python_release", "venv": "made-venv"}}, "checks": [{"name": "python-version", "run": "python3 -c 'import sys; print(sys.executable)'", "toolchain": "python", "summary": "made-venv"}]}
+JSON
+out=$(cd "$madeclone" && PATH=$work/pythonbin:$PATH "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check makes a missing declared virtual environment" 0 'PASS +python-version' "$out" "$s"
+if [ -x "$madeclone/made-venv/bin/python3" ]; then ok "the declared virtual environment holds python3"; else bad "the declared virtual environment holds python3"; fi
+expect "a python step summary names its interpreter" 0 'python-version +.*python .*made-venv/bin/python' "$out" "$s"
+if [ "$(sort -u "$python_calls")" = path ]; then ok "python3.X on PATH is tried before pyenv"; else bad "python3.X on PATH is tried before pyenv" "$(cat "$python_calls")"; fi
+rm -rf "$madeclone/made-venv"
+out=$(cd "$madeclone" && JPDEV_ROOT=$madeclone PATH=$work/pythonbin:$PATH \
+  "$kit/templates/check.sh" --manifest "$madeclone/dev.json" 2>&1) && s=0 || s=$?
+expect "the vendored runner makes a missing declared virtual environment" 0 'PASS +python-version' "$out" "$s"
+
+# With no matching python3.X on PATH, the newest matching pyenv version supplies the environment.
+mkdir -p "$work/wrong-pythonbin"
+cat > "$work/wrong-pythonbin/python$python_release" <<'STUB'
+#!/bin/sh
+printf '3.99\n'
+STUB
+chmod +x "$work/wrong-pythonbin/python$python_release"
+for patch in 1 9; do
+  pyenv_python=$HOME/.pyenv/versions/$python_release.$patch/bin/python3
+  mkdir -p "$(dirname "$pyenv_python")"
+  cat > "$pyenv_python" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$0" >> PYTHON_CALLS
+exec SYSTEM_PYTHON "$@"
+STUB
+  sed -i "s#PYTHON_CALLS#$python_calls#g; s#SYSTEM_PYTHON#$system_python#g" "$pyenv_python"
+  chmod +x "$pyenv_python"
+done
+rm -rf "$madeclone/made-venv"
+: > "$python_calls"
+out=$(cd "$madeclone" && PATH=$work/wrong-pythonbin:$PATH "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check falls back from a wrong python3.X on PATH to pyenv" 0 'PASS +python-version' "$out" "$s"
+expect "the newest matching pyenv version creates the environment" 0 "/$python_release\.9/bin/python3$" "$(tail -n 1 "$python_calls")" "$s"
+
+cat > "$madeclone/dev.json" <<'JSON'
+{"version": 1, "toolchains": {"python": {"version": "3.99", "venv": "absent-venv"}}, "checks": [{"name": "must-not-run", "run": "touch ran", "toolchain": "python"}]}
+JSON
+out=$(cd "$madeclone" && PATH=$work/pythonbin:$PATH "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check refuses an unavailable declared Python before a step" 2 'python 3\.99 is not installed.*python3\.99 on PATH, or a pyenv version' "$out" "$s"
+if [ ! -e "$madeclone/ran" ]; then ok "an unavailable declared Python runs no check"; else bad "an unavailable declared Python runs no check"; fi
+
+# A virtual environment is always a non-root child of the clone.
+invalid_venvs=('empty|' 'dot|.' 'parent|../outside-venv' "absolute|$work/absolute-venv")
+for row in "${invalid_venvs[@]}"; do
+  IFS='|' read -r label value <<< "$row"
+  for runner in template jpdev; do
+    invalid_clone=$work/invalid-$label-$runner
+    mkdir -p "$invalid_clone"
+    git init -q -b main "$invalid_clone"
+    printf '{"version":1,"toolchains":{"python":{"venv":"%s"}},"checks":[{"name":"must-not-run","run":"touch ran","toolchain":"python"}]}\n' "$value" > "$invalid_clone/dev.json"
+    rm -rf "$work/outside-venv" "$work/absolute-venv"
+    if [ "$runner" = template ]; then
+      out=$(cd "$invalid_clone" && JPDEV_ROOT=$invalid_clone "$kit/templates/check.sh" 2>&1) && s=0 || s=$?
+    else
+      out=$(cd "$invalid_clone" && "$jpdev" check 2>&1) && s=0 || s=$?
+    fi
+    expect "$runner refuses the $label virtual-environment path" 2 'venv must be a relative child path of the clone' "$out" "$s"
+    if [ ! -e "$invalid_clone/ran" ] && [ ! -e "$work/outside-venv" ] && [ ! -e "$work/absolute-venv" ]; then
+      ok "$runner creates nothing for the $label virtual-environment path"
+    else
+      bad "$runner creates nothing for the $label virtual-environment path"
+    fi
+  done
+done
 
 # the virtual environment is first on PATH for every step, whatever its toolchain
 pyclone=$work/pyclone
@@ -716,7 +799,7 @@ out=$("$jpdev" codex run --no-commit --brief "$work/dirty-brief.md" --model m --
 expect "codex run refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
 if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused brief did not start codex"; else ok "a refused brief did not start codex"; fi
 out=$("$jpdev" codex 2>&1) && s=0 || s=$?
-expect "codex needs a subcommand" 2 'the subcommands are run, check-brief and brief-template' "$out" "$s"
+expect "codex needs a subcommand" 2 'the subcommands are run, review, check-brief and brief-template' "$out" "$s"
 # the git part: commit, push, pull request, from the msg.txt and pr.md codex wrote
 export STUB_GIT_ARGS=$work/git-args
 mkdir -p "$work/ghbin"
@@ -876,6 +959,67 @@ printf 'stale\n' > "$cxrepo/msg.txt"
 out=$(STUB_CODEX_EDIT=1 cx_run --no-push) && s=0 || s=$?
 expect "a msg.txt left by an earlier run is not used" 1 'wrote no msg.txt' "$out" "$s"
 
+# codex review: a checked brief, explicit model/effort, a final-message record and no git writes
+reviewrepo=$work/reviewrepo
+mkdir -p "$reviewrepo"
+git init -q -b review "$reviewrepo"
+printf '# Rules\n' > "$reviewrepo/AGENTS.md"
+printf 'unchanged\n' > "$reviewrepo/file.txt"
+git -C "$reviewrepo" add .
+git -C "$reviewrepo" commit -q -m base
+printf 'Review the change and report findings first.\n' > "$work/review-brief.md"
+review_sha=$(git -C "$reviewrepo" rev-parse HEAD)
+mkdir -p "$work/review-audit"
+cat > "$work/review-audit/git" <<'STUB'
+#!/usr/bin/env bash
+printf 'git' >> "$JPDEV_REVIEW_GIT_CALLS"
+printf ' <%s>' "$@" >> "$JPDEV_REVIEW_GIT_CALLS"
+printf '\n' >> "$JPDEV_REVIEW_GIT_CALLS"
+exec "$JPDEV_SYSTEM_GIT" "$@"
+STUB
+cat > "$work/review-audit/gh" <<'STUB'
+#!/usr/bin/env bash
+printf 'gh' >> "$JPDEV_REVIEW_GH_CALLS"
+printf ' <%s>' "$@" >> "$JPDEV_REVIEW_GH_CALLS"
+printf '\n' >> "$JPDEV_REVIEW_GH_CALLS"
+exit 99
+STUB
+chmod +x "$work/review-audit/git" "$work/review-audit/gh"
+export JPDEV_REVIEW_GIT_CALLS=$work/review-git-calls JPDEV_REVIEW_GH_CALLS=$work/review-gh-calls
+export JPDEV_SYSTEM_GIT=$system_git
+codex_args
+out=$(echo junk | PATH=$work/review-audit:$PATH "$jpdev" codex review --brief "$work/review-brief.md" --model review-model --effort high \
+  --dir "$reviewrepo" --pr 23 --repo Example/repo --out "$work/review.md" 2>&1) && s=0 || s=$?
+expect "codex review prints the reviewed SHA" 0 "reviewed $review_sha" "$out" "$s"
+expect "codex review logs disabled network access first" 0 '^jpdev: codex review: .*network disabled$' "$(head -n 1 <<< "$out")" "$s"
+if [ "$(cat "$work/review.md")" = 'stub final message' ]; then ok "codex review writes the final message to --out"; else bad "codex review writes the final message to --out" "$(cat "$work/review.md" 2>/dev/null)"; fi
+for a in exec -m review-model 'model_reasoning_effort=high' --sandbox workspace-write -C "$reviewrepo" -o "$work/review.md"; do
+  if has_arg "$a"; then ok "codex review passes $a"; else bad "codex review passes $a" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+done
+if ! has_arg 'sandbox_workspace_write.network_access=true'; then ok "codex review keeps network access off by default"; else bad "codex review keeps network access off by default" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+if [ -f "$STUB_CODEX_STDIN" ] && [ ! -s "$STUB_CODEX_STDIN" ]; then ok "codex review closes stdin"; else bad "codex review closes stdin"; fi
+expected_review_git=$(printf '%s\n' \
+  'git <rev-parse> <--show-toplevel>' \
+  "git <-C> <$reviewrepo> <rev-parse> <HEAD>" \
+  "git <-C> <$reviewrepo> <rev-parse> <HEAD>" \
+  "git <-C> <$reviewrepo> <diff> <--quiet>" \
+  "git <-C> <$reviewrepo> <diff> <--cached> <--quiet>")
+if [ "$(cat "$JPDEV_REVIEW_GIT_CALLS")" = "$expected_review_git" ]; then ok "codex review runs only its exact read-only git command set"; else bad "codex review runs only its exact read-only git command set" "$(cat "$JPDEV_REVIEW_GIT_CALLS")"; fi
+if [ ! -e "$JPDEV_REVIEW_GH_CALLS" ]; then ok "codex review makes no gh call"; else bad "codex review makes no gh call" "$(cat "$JPDEV_REVIEW_GH_CALLS")"; fi
+
+codex_args
+out=$(PATH=$work/review-audit:$PATH "$jpdev" codex review --brief "$work/review-brief.md" \
+  --model review-model --effort low --dir "$reviewrepo" --network --out "$work/network-review.md" 2>&1) && s=0 || s=$?
+expect "codex review logs enabled network access first" 0 '^jpdev: codex review: .*network enabled$' "$(head -n 1 <<< "$out")" "$s"
+if has_arg 'sandbox_workspace_write.network_access=true'; then ok "codex review enables network only when requested"; else bad "codex review enables network only when requested" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+
+codex_args
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_EDIT_FILE=file.txt "$jpdev" codex review --brief "$work/review-brief.md" \
+  --model review-model --effort low --dir "$reviewrepo" --sandbox read-only 2>&1) && s=0 || s=$?
+expect "codex review refuses tracked changes made during the review" 1 'refused: the review changed tracked files' "$out" "$s"
+if has_arg read-only; then ok "codex review accepts and passes the read-only sandbox"; else bad "codex review accepts and passes the read-only sandbox"; fi
+git -C "$reviewrepo" restore file.txt
+
 # carry: a clean merge is signed and pushed; a conflict uses the generated Codex brief
 mkdir -p "$work/carrybin"
 cat > "$work/carrybin/gh" <<'STUB'
@@ -949,9 +1093,15 @@ expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
 expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
 out=$("$jpdev" codex check-brief --build "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
 expect "the brief template passes check-brief --build" 0 'no word of the filter list' "$out" "$s"
+out=$("$jpdev" codex brief-template --review 2>&1) && s=0 || s=$?
+expect "the review brief template names the reviewer role" 0 '^# Review brief:' "$out" "$s"
+expect "the review brief template requires findings first" 0 'Findings first' "$out" "$s"
+expect "the review brief template forbids repository writes" 0 'Do not change tracked files' "$out" "$s"
+expect "the review brief template carries the merge yes line" 0 '^merge: yes$' "$out" "$s"
+expect "the review brief template carries the merge after-fixes line" 0 '^merge: after fixes$' "$out" "$s"
 unset STUB_GIT_ARGS STUB_GH_CALLS STUB_GH_ARGS STUB_GH_BODY GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 PATH=$oldpath
-unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN STUB_CODEX_ENV
+unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN STUB_CODEX_ENV JPDEV_REVIEW_GIT_CALLS JPDEV_REVIEW_GH_CALLS JPDEV_SYSTEM_GIT
 
 # --- env
 printf 'JPDEV_NODE_RSS_MB=4321\nJPDEV_GO_TIMEOUT_S=99\n' > "$XDG_CONFIG_HOME/jpdev.env.tmp"
@@ -968,7 +1118,9 @@ origin=$work/origin.git
 seed=$work/seed
 git init -q --bare -b main "$origin"
 git init -q -b main "$seed"
-cp "$fixture" "$seed/dev.json"
+cat > "$seed/dev.json" <<JSON
+{"version": 1, "toolchains": {"python": {"version": "$python_release", "venv": "setup-venv"}}, "setup": [{"name": "prepare", "run": "python3 -c 'import pathlib, sys; pathlib.Path(\"prepared-by\").write_text(sys.executable)'", "toolchain": "python"}], "checks": [{"name": "first", "run": "true"}]}
+JSON
 git -C "$seed" add dev.json
 git -C "$seed" -c user.name=test -c user.email=test@example.com commit -q -m seed
 git -C "$seed" remote add origin "$origin"
@@ -976,14 +1128,24 @@ git -C "$seed" push -q origin main
 git clone -q "$origin" "$work/clone"
 mkdir -p "$work/clone/scripts/dev"
 cp "$kit/templates/check.sh" "$work/clone/scripts/dev/check.sh"
-out=$("$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
+: > "$python_calls"
+out=$(PYENV_ROOT=$HOME/.pyenv PATH=$work/wrong-pythonbin:$PATH "$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
 expect "setup makes the branch from the base" 0 'branch +topic at' "$out" "$s"
 expect "setup runs the manifest's setup steps" 0 'PASS +prepare' "$out" "$s"
 expect "setup names the toolchains" 0 'python +Python' "$out" "$s"
 expect "setup names both scripts in its adoption guidance" 0 'vendor scripts/dev/check\.sh and scripts/dev/handover_check\.sh together' "$out" "$s"
+expect "setup makes the declared virtual environment before its steps" 0 '/setup-venv/bin/python' "$(cat "$work/clone/prepared-by" 2>/dev/null)" "$s"
+expect "setup chooses the newest matching pyenv version" 0 "/$python_release\.9/bin/python3$" "$(tail -n 1 "$python_calls")" "$s"
 if [ "$(git -C "$work/clone" rev-parse --abbrev-ref HEAD)" = topic ]; then ok "setup leaves the clone on the new branch"; else bad "setup leaves the clone on the new branch"; fi
-out=$("$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
+out=$(PYENV_ROOT=$HOME/.pyenv PATH=$work/wrong-pythonbin:$PATH "$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
 expect "setup reuses an existing clone and an existing branch" 0 'branch +topic' "$out" "$s"
+cat > "$work/clone/dev.json" <<'JSON'
+{"version":1,"toolchains":{"python":{"venv":"../setup-outside"}},"checks":[{"name":"must-not-run","run":"touch ran","toolchain":"python"}]}
+JSON
+rm -rf "$work/setup-outside"
+out=$("$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
+expect "setup refuses a virtual environment outside the clone" 2 'venv must be a relative child path of the clone' "$out" "$s"
+if [ ! -e "$work/setup-outside" ] && [ ! -e "$work/clone/ran" ]; then ok "setup creates nothing for an outside virtual environment"; else bad "setup creates nothing for an outside virtual environment"; fi
 out=$("$jpdev" setup "$work/not-a-clone" 2>&1) && s=0 || s=$?
 expect "setup asks for --repo when the directory is not a clone" 2 'give --repo' "$out" "$s"
 

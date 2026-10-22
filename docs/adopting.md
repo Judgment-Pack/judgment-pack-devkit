@@ -13,7 +13,9 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
   `jpdev` selects an installed Go that matches it and says when none is installed, and the
   workflow falls back to the `go.mod` version when the manifest names none), `python`
   (`{"version": "3.12", "venv": ".venv"}`; the version and the virtual environment are optional;
-  a declared virtual environment is first on PATH for every step).
+  the environment path is a non-root relative child of the clone with no `..` segment; setup and
+  checks create a missing declared environment with `python3.X` on PATH or the newest matching
+  pyenv version, then put its `bin` first on PATH for every step).
 - `setup`: steps `jpdev setup` and CI run once after a clone (`npm ci`, the python
   requirements).
 - `checks`: the check list, in the order it should run (cheap checks first).
@@ -58,8 +60,14 @@ together, and copy both whole files again when updating them. `jpdev setup` name
 either file is absent.
 
 `scripts/dev/check.sh [--setup] [--only A,B] [--skip A,B] [--all]` runs the manifest with no
-caps and prints the summary block. `jpdev check` uses the vendored copy when it exists and
-sets `JPDEV_WRAP` so that each step runs under its toolchain's cap.
+caps and prints the summary block. Before a setup or check run, it creates a missing declared
+Python environment with `python3.X` on PATH, then the newest
+`~/.pyenv/versions/3.X.*/bin/python3`; it refuses before any step when neither exists. Every step
+runs with that environment's `bin` first on PATH, so the manifest's Python setup step installs its
+requirements into the environment. A summary row names the interpreter for a Python step or any
+step that invokes `python3`. `jpdev check` uses the vendored copy when it exists and sets
+`JPDEV_WRAP` so that each step runs under its toolchain's cap. `jpdev env` shows the interpreter
+selected for the current repository's manifest.
 
 ## 3. Add the agent instructions
 
@@ -108,6 +116,20 @@ the contributor must push from the fork to start the checks on that head.
 jpdev setup . --manifest dev.json
 jpdev check --all
 ```
+
+For a saved Codex review, start from the review skeleton and keep the clone's tracked tree
+unchanged:
+
+```sh
+jpdev codex brief-template --review > review-brief.md
+jpdev codex review --brief review-brief.md --model MODEL --effort medium --dir . --pr NUMBER --repo OWNER/NAME
+jpdev record post --pr NUMBER --repo OWNER/NAME --file .jpdev/output/review.md
+```
+
+The review command defaults to `workspace-write` so focused probes can create temporary files,
+with no network access unless the caller passes `--network`. Its prompt forbids Git writes and it
+refuses the result if HEAD or a tracked file changed. It closes stdin, writes only the final
+message to the record, prints the reviewed SHA, and never posts.
 
 ## Worked example: the agent repository
 

@@ -99,17 +99,23 @@ jpdev_go_bin() {
   printf '%s/bin' "$best"
 }
 
+# jpdev_python_matches PYTHON MAJOR.MINOR succeeds when PYTHON reports that release.
+jpdev_python_matches() {
+  [ "$("$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" = "$2" ]
+}
+
 # jpdev_python_bin MAJOR.MINOR prints the path of a working python of that version: python3.N on
-# PATH when it runs (a pyenv shim for a version that is not selected does not), else the newest
-# one under $PYENV_ROOT/versions (default ~/.pyenv/versions).
+# PATH when it reports the release (a pyenv shim for a version that is not selected does not), else
+# the newest matching version's bin/python3 under $PYENV_ROOT/versions (default ~/.pyenv/versions).
 jpdev_python_bin() {
   local found entry best=""
-  if found=$(command -v "python$1") && "$found" --version > /dev/null 2>&1; then printf '%s' "$found"; return 0; fi
+  if found=$(command -v "python$1") && jpdev_python_matches "$found" "$1"; then printf '%s' "$found"; return 0; fi
   for entry in "${PYENV_ROOT:-$HOME/.pyenv}"/versions/"$1".*; do
-    [ -x "$entry/bin/python$1" ] && best=$(printf '%s\n%s\n' "$best" "$entry" | sort -V | tail -n 1)
+    [ -x "$entry/bin/python3" ] && jpdev_python_matches "$entry/bin/python3" "$1" && \
+      best=$(printf '%s\n%s\n' "$best" "$entry" | sort -V | tail -n 1)
   done
   [ -n "$best" ] || return 1
-  printf '%s/bin/python%s' "$best" "$1"
+  printf '%s/bin/python3' "$best"
 }
 
 # jpdev_clone_key ROOT prints a short name for a clone, used for the per-clone Go cache.
