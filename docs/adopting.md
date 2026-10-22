@@ -95,7 +95,8 @@ pull-request number so the `handover` job can read its base and body. The workfl
 permission permits that fallback dispatch. After adopting the workflows, check that an automatically
 updated pull request shows the `check` and `handover` CI checks on its new head. A repository that
 already has CI jobs keeps their required names and uses the template as the list of steps to move
-into its `ci.yml`.
+into its `ci.yml`. The dispatch passes the updated head SHA, which `ci.yml` names in the run title
+and checks out for both jobs.
 
 The fallback cannot dispatch a fork's short branch name in the base repository. For an updated fork
 pull request it comments that checks must be started by a push from the fork, then fails visibly;

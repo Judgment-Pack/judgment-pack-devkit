@@ -1,6 +1,7 @@
 # Vendor as .github/workflows/ci.yml. Runs the repository's own check list (dev.json)
 # with scripts/dev/check.sh, with the toolchains set up from the manifest and no caps.
 name: dev-check
+run-name: dev-check ${{ inputs.sha || github.sha }}
 
 on:
   push:
@@ -8,11 +9,19 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      sha:
+        description: Updated pull request head to check
+        required: true
+        type: string
       pull_request:
         description: Pull request whose updated head is being checked
         required: true
         type: string
   workflow_call:
+    inputs:
+      sha:
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -26,6 +35,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha }}
       - name: Read the toolchains from dev.json
         id: dev
         run: |
@@ -91,6 +101,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.sha }}
       - name: Read dispatched pull request metadata
         if: github.event_name == 'workflow_dispatch'
         id: pull

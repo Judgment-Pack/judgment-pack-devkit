@@ -65,10 +65,8 @@ jobs:
                 }
                 await github.rest.actions.createWorkflowDispatch({
                   owner, repo, workflow_id: 'ci.yml', ref: updated.head.ref,
-                  inputs: { pull_request: String(pull.number) },
+                  inputs: { pull_request: String(pull.number), sha: updated.head.sha },
                 });
-                const dispatched = await github.rest.git.getRef({owner, repo, ref: `heads/${updated.head.ref}`});
-                if (dispatched.data.object.sha !== updated.head.sha) throw new Error(`Dispatched ref does not name pull request ${pull.number} head ${updated.head.sha}`);
               }
               try {
                 await github.rest.issues.removeLabel({

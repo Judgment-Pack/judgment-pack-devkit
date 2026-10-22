@@ -331,7 +331,11 @@ expect "the branch updater dispatches CI only for the GITHUB_TOKEN fallback" 0 "
 expect "the branch updater waits until the pull request exposes its new head" 0 "updated\.head\.sha !== pull\.head\.sha" "$workflow_templates" 0
 expect "the fallback dispatch targets the updated branch head" 0 "workflow_id: 'ci\.yml', ref: updated\.head\.ref" "$workflow_templates" 0
 expect "the fallback dispatch identifies the pull request" 0 "pull_request: String\(pull\.number\)" "$workflow_templates" 0
+expect "the fallback dispatch carries the updated head SHA" 0 "sha: updated\.head\.sha" "$workflow_templates" 0
 expect "the CI template accepts an explicit dispatch for a pull request" 0 "workflow_dispatch:" "$workflow_templates" 0
+expect "the dispatched CI names its SHA input in the run title" 0 'run-name: .*inputs\.sha' "$workflow_templates" 0
+sha_checkouts=$(grep -cF 'ref: ${{ inputs.sha }}' "$kit/templates/ci-check.yml")
+if [ "$sha_checkouts" -eq 2 ]; then ok "both dispatched CI jobs check out the SHA input"; else bad "both dispatched CI jobs check out the SHA input" "found $sha_checkouts SHA checkouts"; fi
 expect "the dispatched CI keeps the required check job name" 0 '^    name: check$' "$workflow_templates" 0
 expect "the dispatched CI keeps the required handover job name" 0 '^    name: handover$' "$workflow_templates" 0
 expect "the CI handover job calls the vendored handover check" 0 'run: scripts/dev/handover_check\.sh' "$workflow_templates" 0
@@ -339,16 +343,18 @@ if command -v node > /dev/null; then
   out=$(node - "$kit/templates/update-branches.yml" <<'JS'
 const yaml = require('fs').readFileSync(process.argv[2], 'utf8'), body = yaml.slice(yaml.indexOf('          script: |') + 20).split('\n').map(x => x.slice(12)).join('\n'), execute = Function('github', 'context', 'process', 'setTimeout', `return (async()=>{${body}})()`), pull = {number: 7, head: {sha: 'old', ref: 'topic', repo: {full_name: 'base/repo'}}};
 async function vector(headRepo, dispatchError) {
-  const calls = {dispatch: 0, labels: 0, comments: []}, updated = {...pull, head: {...pull.head, sha: 'new', repo: {full_name: headRepo}}};
+  const calls = {dispatch: [], refs: 0, labels: 0, comments: []}, updated = {...pull, head: {...pull.head, sha: 'new', repo: {full_name: headRepo}}};
   const rest = {pulls: {list() {}, async updateBranch() {}, async get() { return {data: updated}; }}, repos: {async compareCommitsWithBasehead() { return {data: {status: 'ahead'}}; }},
-    actions: {async createWorkflowDispatch() { calls.dispatch++; if (dispatchError) throw dispatchError; }}, git: {async getRef() { return {data: {object: {sha: 'new'}}}; }},
+    actions: {async createWorkflowDispatch(x) { calls.dispatch.push(x.inputs); if (dispatchError) throw dispatchError; }}, git: {async getRef() { calls.refs++; return {data: {object: {sha: 'new'}}}; }},
     issues: {async removeLabel() {}, async addLabels() { calls.labels++; }, async createComment(x) { calls.comments.push(x.body); }}};
   let error; try { await execute({rest, paginate: async () => [pull]}, {repo: {owner: 'base', repo: 'repo'}, sha: 'base', payload: {repository: {default_branch: 'main'}}}, {env: {USING_GITHUB_TOKEN: 'true'}}, resolve => resolve()); } catch (caught) { error = caught; }
   return {calls, error};
 }
 (async () => {
   const fork = await vector('fork/repo');
-  if (!fork.error || fork.calls.dispatch || fork.calls.labels || fork.calls.comments[0] !== 'Checks must be started by a push from the fork.') throw Error('fork vector failed');
+  if (!fork.error || fork.calls.dispatch.length || fork.calls.labels || fork.calls.comments[0] !== 'Checks must be started by a push from the fork.') throw Error('fork vector failed');
+  const success = await vector('base/repo');
+  if (success.error || success.calls.dispatch[0].sha !== 'new' || success.calls.refs) throw Error('SHA dispatch vector failed');
   const failure = Object.assign(Error('dispatch refused'), {status: 422}), dispatch = await vector('base/repo', failure);
   if (dispatch.error !== failure || dispatch.calls.labels || dispatch.calls.comments.length) throw Error('dispatch vector failed');
   console.log('workflow update mocks passed');
