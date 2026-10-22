@@ -18,6 +18,23 @@ while args:
     elif a in ('--all', '--setup'): opt[a[2:]] = True
     else: sys.exit('check.sh: unknown argument ' + a)
 m = json.load(open(opt['manifest'], encoding='utf-8'))
+logdir = os.environ.get('JPDEV_LOGDIR')
+if logdir:
+    probe = os.path.join(logdir, '.jpdev-write-probe-%d' % os.getpid())
+    try:
+        os.makedirs(logdir, exist_ok=True)
+        descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try: os.write(descriptor, b'x')
+        finally: os.close(descriptor)
+        os.unlink(probe)
+    except OSError as error:
+        try:
+            if os.path.exists(probe): os.unlink(probe)
+        except OSError:
+            pass
+        print('check.sh: infrastructure failure: cannot create and write the check log directory %s: %s; set JPDEV_LOGDIR or JPDEV_SCRATCH to a writable directory' %
+              (logdir, error.strerror or error), file=sys.stderr)
+        sys.exit(2)
 python = m.get('toolchains', {}).get('python', {})
 venv = python.get('venv')
 run_env = dict(os.environ)
@@ -59,10 +76,11 @@ if venv is not None:
 steps = m.get('setup', []) if opt['setup'] else m['checks'] + ([dict(name='parity', **m['parity'])] if 'parity' in m else [])
 unknown = (opt['only'] | opt['skip']) - set(s['name'] for s in steps)
 if unknown: print('check.sh: no step named ' + ', '.join(sorted(unknown)), file=sys.stderr); sys.exit(2)
-wrap, logdir, rows, failed = os.environ.get('JPDEV_WRAP'), os.environ.get('JPDEV_LOGDIR'), [], 0
+wrap, rows, failed, infrastructure = os.environ.get('JPDEV_WRAP'), [], 0, ''
 for c in steps:
     n = c['name']
     if (opt['only'] and n not in opt['only']) or n in opt['skip']: continue
+    if infrastructure: rows.append((n, 'NOT RUN', '', [])); continue
     if failed and not opt['all']: rows.append((n, 'NOT RUN', '', [])); continue
     if c.get('requires_env') and not os.environ.get(c['requires_env']):
         # A skip is a failure under CI (CI is set) unless the step says optional: true.
@@ -85,18 +103,34 @@ for c in steps:
             found = subprocess.run([executable, '--version'], text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, env=step_env).stdout.strip()
             took += ', python %s (%s)' % (executable, found)
-    if logdir: os.makedirs(logdir, exist_ok=True); open('%s/%s.log' % (logdir, n), 'w').write(out)
     hit = [l.strip() for l in lines if c.get('summary') and re.search(c['summary'], l)]
     note = ['    ' + l for l in (hit if len(hit) <= 3 else ['%d lines matched; last: %s' % (len(hit), hit[-1])])]
-    if p.returncode == 0: rows.append((n, 'PASS', took, note)); continue
-    failed += 1
-    rows.append((n, 'FAIL', '%s, exit %d' % (took, p.returncode), note + ['    --'] + ['    ' + l for l in lines[:40]] + (['    ... %d more lines' % (len(lines) - 40)] if len(lines) > 40 else [])))
+    if p.returncode == 0:
+        rows.append((n, 'PASS', took, note))
+    else:
+        failed += 1
+        rows.append((n, 'FAIL', '%s, exit %d' % (took, p.returncode), note + ['    --'] + ['    ' + l for l in lines[:40]] + (['    ... %d more lines' % (len(lines) - 40)] if len(lines) > 40 else [])))
+    if logdir:
+        log = '%s/%s.log' % (logdir, n)
+        pending = log + '.pending-%d' % os.getpid()
+        try:
+            with open(pending, 'w', encoding='utf-8') as handle: handle.write(out)
+            os.replace(pending, log)
+        except OSError as error:
+            try:
+                if os.path.exists(pending): os.unlink(pending)
+            except OSError:
+                pass
+            infrastructure = 'cannot persist the completed check log %s: %s' % (log, error.strerror or error)
 print('== %s summary (%s) ==' % ('setup' if opt['setup'] else 'check', os.path.basename(opt['manifest'])))
 if not opt['setup'] and 'handover' in m:
     h = m['handover']
     print('handover: boundary %d paths, shared %d paths; see AGENTS.md "Before you hand over"' %
           (len(h.get('boundary_paths', [])), len(h.get('shared_paths', []))))
+if infrastructure: print('infrastructure failure: ' + infrastructure)
 for n, s, head, extra in rows: print('\n'.join(['%-8s %-24s %s' % (s, n, head)] + extra))
-print('== %d passed, %d failed, %d skipped, %d not run ==' % tuple(sum(1 for r in rows if r[1] == k) for k in ('PASS', 'FAIL', 'SKIP', 'NOT RUN')))
-sys.exit(min(failed, 255))
+totals = tuple(sum(1 for r in rows if r[1] == k) for k in ('PASS', 'FAIL', 'SKIP', 'NOT RUN'))
+if infrastructure: print('== %d passed, %d failed, %d skipped, %d not run; infrastructure failure ==' % totals)
+else: print('== %d passed, %d failed, %d skipped, %d not run ==' % totals)
+sys.exit(min(failed + bool(infrastructure), 255))
 PY

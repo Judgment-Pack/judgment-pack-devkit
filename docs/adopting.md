@@ -19,6 +19,12 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
 - `setup`: steps `jpdev setup` and CI run once after a clone (`npm ci`, the python
   requirements).
 - `checks`: the check list, in the order it should run (cheap checks first).
+- `notes`: optional short sentences about repository-specific traps. For example,
+  `"run every Python command with the venv on the PATH"` and
+  `"a change to a file listed in scripts/parity.sh updates its row"`. They are plain text:
+  `jpdev codex brief-template` prints them under `## This repository's notes`, and
+  `jpdev codex check-brief --build` requires that heading when notes are present; no note is
+  executed.
 - `mutants`: the command `jpdev mutants` runs; `{rows}` becomes one `--row 'TEXT'` per row.
 - `parity`: an optional last check that compares the repository against another one; it names
   the environment variable it needs in `requires_env`, and is skipped, and said to be skipped,

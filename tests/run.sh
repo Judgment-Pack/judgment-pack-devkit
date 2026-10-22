@@ -51,6 +51,34 @@ out=$("$kit/templates/check.sh" --manifest "$fixture" --only first,python-versio
 expect "check.sh --only runs the named checks and exits 0" 0 '== 2 passed, 0 failed, 0 skipped, 0 not run ==' "$out" "$s"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --skip fails,after-failure,needs-variable 2>/dev/null) && s=0 || s=$?
 expect "check.sh --skip leaves the rest" 0 '== 5 passed' "$out" "$s"
+
+# A log destination is proved writable before a command starts, and a later persistence failure
+# keeps the completed result while stopping the rest of the list.
+mkdir -p "$work/read-only-scratch"
+chmod 500 "$work/read-only-scratch"
+cat > "$work/log-preflight.json" <<JSON
+{"version": 1, "checks": [{"name": "sentinel", "run": "touch '$work/preflight-ran'"}]}
+JSON
+out=$(JPDEV_SCRATCH=$work/read-only-scratch "$jpdev" check --manifest "$work/log-preflight.json" 2>&1) && s=0 || s=$?
+chmod 700 "$work/read-only-scratch"
+expect "check.sh refuses an unwritable log destination before a check" 2 'infrastructure failure: cannot create and write the check log directory.*JPDEV_LOGDIR.*JPDEV_SCRATCH' "$out" "$s"
+if [ ! -e "$work/preflight-ran" ]; then ok "a log preflight refusal starts no check"; else bad "a log preflight refusal starts no check"; fi
+absent "a log preflight refusal does not imply that logs exist" 'full output of each check:' "$out"
+
+mkdir -p "$work/mid-run-logs"
+cat > "$work/log-persistence.json" <<'JSON'
+{"version": 1, "checks": [
+  {"name": "completed", "run": "echo retained; chmod a-w \"$JPDEV_LOGDIR\""},
+  {"name": "after-persistence-failure", "run": "touch should-not-run"}
+]}
+JSON
+out=$(JPDEV_ROOT=$work JPDEV_LOGDIR=$work/mid-run-logs "$kit/templates/check.sh" --manifest "$work/log-persistence.json" --all 2>&1) && s=0 || s=$?
+chmod u+w "$work/mid-run-logs"
+expect "check.sh reports a mid-run log persistence failure as infrastructure" 1 'infrastructure failure: cannot persist the completed check.*completed\.log' "$out" "$s"
+expect "a persistence failure retains the completed step status" 1 'PASS +completed' "$out" "$s"
+expect "a persistence failure marks later checks not run" 1 'NOT RUN +after-persistence-failure' "$out" "$s"
+if [ ! -e "$work/should-not-run" ]; then ok "a persistence failure does not run another check"; else bad "a persistence failure does not run another check"; fi
+
 out=$(JPDEV_FIXTURE_UNSET=1 "$kit/templates/check.sh" --manifest "$fixture" --only needs-variable 2>/dev/null) && s=0 || s=$?
 expect "check.sh runs a step whose variable is set" 0 'PASS +needs-variable' "$out" "$s"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --setup 2>/dev/null) && s=0 || s=$?
@@ -91,6 +119,11 @@ expect "jpdev check prints the handover path counts" 1 'handover: boundary 2 pat
 if grep -q 'go version go' <<< "$out" && grep -q 'Python 3' <<< "$out"; then ok "jpdev check prints the counts the checks printed"; else bad "jpdev check prints the counts the checks printed" "$out"; fi
 out=$("$jpdev" check --manifest "$fixture" --skip fails,after-failure,needs-variable 2>/dev/null) && s=0 || s=$?
 expect "jpdev check exits 0 when every check passes" 0 '== 5 passed' "$out" "$s"
+stored_scratch=$work/stored-scratch
+out=$(JPDEV_SCRATCH=$stored_scratch "$jpdev" check --manifest "$fixture" --only first 2>&1) && s=0 || s=$?
+expect "jpdev check stores a step log under the configured scratch logs directory" 0 'full output of each check:' "$out" "$s"
+stored_log=$(find "$stored_scratch/logs" -type f -name first.log -print -quit)
+if [ -n "$stored_log" ] && grep -qxF 'Tests 3 passed' "$stored_log"; then ok "the stored check log holds the step output"; else bad "the stored check log holds the step output" "${stored_log:-no first.log}"; fi
 out=$(JPDEV_GO_ULIMIT_KB=1000 "$jpdev" check --manifest "$fixture" --only go-version 2>/dev/null) && s=0 || s=$?
 expect "jpdev check applies the Go address-space cap (a 1 MB cap fails the step)" 1 'FAIL +go-version' "$out" "$s"
 out=$("$jpdev" check --manifest "$fixture" --only go-env 2>/dev/null) && s=0 || s=$?
@@ -375,6 +408,20 @@ out=$(python3 "$kit/lib/validate_manifest.py" "$kit/templates/dev.json" "$kit/te
 expect "the template manifest is valid" 0 "valid" "$out" "$s"
 out=$(python3 "$kit/lib/validate_manifest.py" "$kit/examples/judgment-pack-agent.dev.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the agent repository's example manifest is valid" 0 "valid" "$out" "$s"
+printf '{"version": 1, "notes": ["run every Python command with the venv on the PATH", "a change to a file listed in scripts/parity.sh updates its row"], "checks": [{"name": "a", "run": "true"}]}\n' > "$work/notes.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/notes.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema accepts repository notes" 0 "valid" "$out" "$s"
+out=$(python3 -S "$kit/lib/validate_manifest.py" "$work/notes.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the standard-library manifest validator accepts repository notes" 0 "valid" "$out" "$s"
+printf '{"version": 1, "notes": [""], "checks": [{"name": "a", "run": "true"}]}\n' > "$work/empty-note.json"
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/empty-note.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an empty repository note" 1 "dev.json:" "$out" "$s"
+python3 - "$work/long-note.json" <<'PY'
+import json, sys
+json.dump({"version": 1, "notes": ["x" * 241], "checks": [{"name": "a", "run": "true"}]}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+out=$(python3 "$kit/lib/validate_manifest.py" "$work/long-note.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
+expect "the schema refuses an oversized repository note" 1 "dev.json:" "$out" "$s"
 printf '{"version": 1, "checks": [{"name": "a", "run": "true"}], "handover": {"boundary_paths": ["gate"], "shared_paths": ["contract"]}}\n' > "$work/handover.json"
 out=$(python3 "$kit/lib/validate_manifest.py" "$work/handover.json" "$kit/templates/dev.schema.json" 2>&1) && s=0 || s=$?
 expect "the schema accepts handover path lists" 0 "valid" "$out" "$s"
@@ -1147,6 +1194,20 @@ if [ "$out" = "$(cat "$kit/templates/codex-brief.md")" ]; then ok "brief-templat
 expect "the brief template tells codex to write msg.txt" 0 'msg\.txt' "$out" "$s"
 expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
 expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
+notesrepo=$work/notesrepo
+mkdir -p "$notesrepo"
+git init -q -b main "$notesrepo"
+cp "$work/notes.json" "$notesrepo/dev.json"
+out=$(cd "$notesrepo" && "$jpdev" codex brief-template 2>&1) && s=0 || s=$?
+expect "brief-template prints the repository notes heading" 0 '^## This repository.s notes$' "$out" "$s"
+expect "brief-template prints the first repository note" 0 '^- run every Python command with the venv on the PATH$' "$out" "$s"
+expect "brief-template prints the second repository note" 0 '^- a change to a file listed in scripts/parity.sh updates its row$' "$out" "$s"
+printf 'A build brief.\n\n## Before you write msg.txt\n' > "$notesrepo/build-brief.md"
+out=$(cd "$notesrepo" && "$jpdev" codex check-brief --build build-brief.md 2>&1) && s=0 || s=$?
+expect "check-brief --build refuses missing repository notes" 1 'has no line exactly.*This repository.s notes.*required by .*dev.json' "$out" "$s"
+printf '{"version": 1, "checks": [{"name": "a", "run": "true"}]}\n' > "$notesrepo/dev.json"
+out=$(cd "$notesrepo" && "$jpdev" codex check-brief --build build-brief.md 2>&1) && s=0 || s=$?
+expect "a manifest without notes requires no repository notes heading" 0 'no word of the filter list' "$out" "$s"
 out=$("$jpdev" codex check-brief --build "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
 expect "the brief template passes check-brief --build" 0 'no word of the filter list' "$out" "$s"
 out=$("$jpdev" codex brief-template --review 2>&1) && s=0 || s=$?
