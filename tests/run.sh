@@ -750,6 +750,7 @@ expect "check-brief matches regardless of case and ending" 1 'line 2: "EXPLOITAT
 expect "check-brief suggests the neutral phrasing" 1 'describe the input the code receives and the refusal it must produce' "$out" "$s"
 expect "check-brief points at the documented refusal" 1 'describe the documented refusal instead' "$out" "$s"
 absent "check-brief does not flag a word that merely contains a listed one" 'shackle' "$out"
+  # shellcheck disable=SC2016  # a literal expression the test writes into a fixture
 printf 'Name the `exploitParser` identifier.\n\n## Before you write msg.txt\n' > "$work/backticked-brief.md"
 out=$("$jpdev" codex check-brief "$work/backticked-brief.md" 2>&1) && s=0 || s=$?
 expect "check-brief ignores a listed word inside backticks" 0 'no word of the filter list' "$out" "$s"
