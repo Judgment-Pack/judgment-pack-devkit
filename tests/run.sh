@@ -52,32 +52,41 @@ expect "check.sh --only runs the named checks and exits 0" 0 '== 2 passed, 0 fai
 out=$("$kit/templates/check.sh" --manifest "$fixture" --skip fails,after-failure,needs-variable 2>/dev/null) && s=0 || s=$?
 expect "check.sh --skip leaves the rest" 0 '== 5 passed' "$out" "$s"
 
-# A log destination is proved writable before a command starts, and a later persistence failure
-# keeps the completed result while stopping the rest of the list.
+# An unwritable log destination does not stop the check. Its completed result remains in the
+# summary, the infrastructure failure names the intended log, and no log is advertised.
 mkdir -p "$work/read-only-scratch"
 chmod 500 "$work/read-only-scratch"
 cat > "$work/log-preflight.json" <<JSON
-{"version": 1, "checks": [{"name": "sentinel", "run": "touch '$work/preflight-ran'"}]}
+{"version": 1, "checks": [{"name": "sentinel", "run": "echo retained; touch '$work/preflight-ran'", "summary": "^retained$"}]}
 JSON
 out=$(JPDEV_SCRATCH=$work/read-only-scratch "$jpdev" check --manifest "$work/log-preflight.json" 2>&1) && s=0 || s=$?
 chmod 700 "$work/read-only-scratch"
-expect "check.sh refuses an unwritable log destination before a check" 2 'infrastructure failure: cannot create and write the check log directory.*JPDEV_LOGDIR.*JPDEV_SCRATCH' "$out" "$s"
-if [ ! -e "$work/preflight-ran" ]; then ok "a log preflight refusal starts no check"; else bad "a log preflight refusal starts no check"; fi
-absent "a log preflight refusal does not imply that logs exist" 'full output of each check:' "$out"
+expect "check.sh reports an unwritable log destination without changing a passing status" 0 'infrastructure failure: cannot persist the completed check log .*sentinel\.log' "$out" "$s"
+expect "an unwritable log destination retains the completed status" 0 'PASS +sentinel' "$out" "$s"
+expect "an unwritable log destination retains the selected output" 0 '^    retained$' "$out" "$s"
+if [ -e "$work/preflight-ran" ]; then ok "an unwritable log destination still runs the check"; else bad "an unwritable log destination still runs the check"; fi
+absent "an unwritable log destination does not imply that logs exist" 'full output of each check:' "$out"
 
 mkdir -p "$work/mid-run-logs"
 cat > "$work/log-persistence.json" <<'JSON'
 {"version": 1, "checks": [
-  {"name": "completed", "run": "echo retained; chmod a-w \"$JPDEV_LOGDIR\""},
+  {"name": "completed", "run": "echo retained; chmod a-w \"$JPDEV_LOGDIR\"; exit 7"},
   {"name": "after-persistence-failure", "run": "touch should-not-run"}
 ]}
 JSON
 out=$(JPDEV_ROOT=$work JPDEV_LOGDIR=$work/mid-run-logs "$kit/templates/check.sh" --manifest "$work/log-persistence.json" --all 2>&1) && s=0 || s=$?
 chmod u+w "$work/mid-run-logs"
-expect "check.sh reports a mid-run log persistence failure as infrastructure" 1 'infrastructure failure: cannot persist the completed check.*completed\.log' "$out" "$s"
-expect "a persistence failure retains the completed step status" 1 'PASS +completed' "$out" "$s"
+expect "check.sh reports a mid-run log persistence failure without adding to a failed status" 1 'infrastructure failure: cannot persist the completed check.*completed\.log' "$out" "$s"
+expect "a persistence failure retains the failed step status" 1 'FAIL +completed +.*exit 7' "$out" "$s"
 expect "a persistence failure marks later checks not run" 1 'NOT RUN +after-persistence-failure' "$out" "$s"
 if [ ! -e "$work/should-not-run" ]; then ok "a persistence failure does not run another check"; else bad "a persistence failure does not run another check"; fi
+
+adopting=$(cat "$kit/docs/adopting.md")
+expect "the adopting guide gives the check log path" 0 '[$]JPDEV_SCRATCH/logs/<repository>-<timestamp>/<step>\.log' "$adopting" 0
+expect "the adopting guide says a log holds the complete step output" 0 'complete step output' "$adopting" 0
+expect "the adopting guide says a persistence failure is separate" 0 'reports the persistence failure separately' "$adopting" 0
+expect "the adopting guide says later steps are not run" 0 'Remaining steps are marked not run' "$adopting" 0
+expect "the adopting guide says infrastructure does not change the status" 0 'infrastructure failure does' "$adopting" 0
 
 out=$(JPDEV_FIXTURE_UNSET=1 "$kit/templates/check.sh" --manifest "$fixture" --only needs-variable 2>/dev/null) && s=0 || s=$?
 expect "check.sh runs a step whose variable is set" 0 'PASS +needs-variable' "$out" "$s"

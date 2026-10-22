@@ -19,6 +19,7 @@ while args:
     else: sys.exit('check.sh: unknown argument ' + a)
 m = json.load(open(opt['manifest'], encoding='utf-8'))
 logdir = os.environ.get('JPDEV_LOGDIR')
+log_probe_error = ''
 if logdir:
     probe = os.path.join(logdir, '.jpdev-write-probe-%d' % os.getpid())
     try:
@@ -28,13 +29,11 @@ if logdir:
         finally: os.close(descriptor)
         os.unlink(probe)
     except OSError as error:
+        log_probe_error = error.strerror or str(error)
         try:
             if os.path.exists(probe): os.unlink(probe)
         except OSError:
             pass
-        print('check.sh: infrastructure failure: cannot create and write the check log directory %s: %s; set JPDEV_LOGDIR or JPDEV_SCRATCH to a writable directory' %
-              (logdir, error.strerror or error), file=sys.stderr)
-        sys.exit(2)
 python = m.get('toolchains', {}).get('python', {})
 venv = python.get('venv')
 run_env = dict(os.environ)
@@ -114,6 +113,7 @@ for c in steps:
         log = '%s/%s.log' % (logdir, n)
         pending = log + '.pending-%d' % os.getpid()
         try:
+            os.makedirs(logdir, exist_ok=True)
             with open(pending, 'w', encoding='utf-8') as handle: handle.write(out)
             os.replace(pending, log)
         except OSError as error:
@@ -121,7 +121,7 @@ for c in steps:
                 if os.path.exists(pending): os.unlink(pending)
             except OSError:
                 pass
-            infrastructure = 'cannot persist the completed check log %s: %s' % (log, error.strerror or error)
+            infrastructure = 'cannot persist the completed check log %s: %s' % (log, error.strerror or log_probe_error or error)
 print('== %s summary (%s) ==' % ('setup' if opt['setup'] else 'check', os.path.basename(opt['manifest'])))
 if not opt['setup'] and 'handover' in m:
     h = m['handover']
@@ -132,5 +132,5 @@ for n, s, head, extra in rows: print('\n'.join(['%-8s %-24s %s' % (s, n, head)] 
 totals = tuple(sum(1 for r in rows if r[1] == k) for k in ('PASS', 'FAIL', 'SKIP', 'NOT RUN'))
 if infrastructure: print('== %d passed, %d failed, %d skipped, %d not run; infrastructure failure ==' % totals)
 else: print('== %d passed, %d failed, %d skipped, %d not run ==' % totals)
-sys.exit(min(failed + bool(infrastructure), 255))
+sys.exit(min(failed, 255))
 PY

@@ -75,6 +75,12 @@ step that invokes `python3`. `jpdev check` uses the vendored copy when it exists
 `JPDEV_WRAP` so that each step runs under its toolchain's cap. `jpdev env` shows the interpreter
 selected for the current repository's manifest.
 
+`jpdev check` stores each step's complete step output (stdout and stderr combined) at
+`$JPDEV_SCRATCH/logs/<repository>-<timestamp>/<step>.log`. If that output cannot be persisted, the
+summary keeps the completed step's result and reports the persistence failure separately, naming
+the intended log target. Remaining steps are marked not run, and the infrastructure failure does
+not change the check-derived exit status. No log path is advertised unless a complete log exists.
+
 ## 3. Add the agent instructions
 
 Copy `templates/AGENTS.md` to the repository root and generate `CLAUDE.md` from it with
