@@ -263,6 +263,11 @@ want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (t
 if [ "$line2" = "$want" ]; then ok "templates/check.sh line 2 names the kit version jpdev --version prints"; else bad "templates/check.sh line 2 names the kit version jpdev --version prints" "line 2: $line2
 wanted: $want"; fi
 if cmp -s "$kit/templates/check.sh" "$kit/scripts/dev/check.sh"; then ok "scripts/dev/check.sh is the template, line 2 included"; else bad "scripts/dev/check.sh is the template, line 2 included"; fi
+handover_line2=$(sed -n 2p "$kit/scripts/dev/handover_check.sh" 2>/dev/null)
+handover_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (lib/handover_check.sh)"
+if [ "$handover_line2" = "$handover_want" ]; then ok "scripts/dev/handover_check.sh line 2 names the kit version and source"; else bad "scripts/dev/handover_check.sh line 2 names the kit version and source" "line 2: $handover_line2
+wanted: $handover_want"; fi
+if cmp -s <(tail -n +2 "$kit/lib/handover_check.sh") <(tail -n +3 "$kit/scripts/dev/handover_check.sh" 2>/dev/null); then ok "scripts/dev/handover_check.sh is the library script after its version line"; else bad "scripts/dev/handover_check.sh is the library script after its version line"; fi
 
 # --- the lock
 lock=$work/test.lock
@@ -318,6 +323,46 @@ print("parsed workflow templates")
 PY
   ) && s=0 || s=$?
   expect "the workflow templates parse as YAML" 0 "parsed workflow templates" "$out" "$s"
+fi
+workflow_templates=$(cat "$kit/templates/ci-check.yml" "$kit/templates/update-branches.yml")
+expect "the branch updater prefers UPDATE_BRANCHES_TOKEN and falls back to GITHUB_TOKEN" 0 'github-token: \$\{\{ secrets\.UPDATE_BRANCHES_TOKEN \|\| secrets\.GITHUB_TOKEN \}\}' "$workflow_templates" 0
+expect "the GITHUB_TOKEN fallback dispatches ci.yml for the pull request branch" 0 "createWorkflowDispatch" "$workflow_templates" 0
+expect "the branch updater dispatches CI only for the GITHUB_TOKEN fallback" 0 "process\.env\.USING_GITHUB_TOKEN === 'true'" "$workflow_templates" 0
+expect "the branch updater waits until the pull request exposes its new head" 0 "updated\.head\.sha !== pull\.head\.sha" "$workflow_templates" 0
+expect "the fallback dispatch targets the updated branch head" 0 "workflow_id: 'ci\.yml', ref: updated\.head\.ref" "$workflow_templates" 0
+expect "the fallback dispatch identifies the pull request" 0 "pull_request: String\(pull\.number\)" "$workflow_templates" 0
+expect "the fallback dispatch carries the updated head SHA" 0 "sha: updated\.head\.sha" "$workflow_templates" 0
+expect "the CI template accepts an explicit dispatch for a pull request" 0 "workflow_dispatch:" "$workflow_templates" 0
+expect "the dispatched CI names its SHA input in the run title" 0 'run-name: .*inputs\.sha' "$workflow_templates" 0
+  # shellcheck disable=SC2016  # the template holds a literal GitHub expression
+sha_checkouts=$(grep -cF 'ref: ${{ inputs.sha }}' "$kit/templates/ci-check.yml")
+if [ "$sha_checkouts" -eq 2 ]; then ok "both dispatched CI jobs check out the SHA input"; else bad "both dispatched CI jobs check out the SHA input" "found $sha_checkouts SHA checkouts"; fi
+expect "the dispatched CI keeps the required check job name" 0 '^    name: check$' "$workflow_templates" 0
+expect "the dispatched CI keeps the required handover job name" 0 '^    name: handover$' "$workflow_templates" 0
+expect "the CI handover job calls the vendored handover check" 0 'run: scripts/dev/handover_check\.sh' "$workflow_templates" 0
+if command -v node > /dev/null; then
+  out=$(node - "$kit/templates/update-branches.yml" <<'JS'
+const yaml = require('fs').readFileSync(process.argv[2], 'utf8'), body = yaml.slice(yaml.indexOf('          script: |') + 20).split('\n').map(x => x.slice(12)).join('\n'), execute = Function('github', 'context', 'process', 'setTimeout', `return (async()=>{${body}})()`), pull = {number: 7, head: {sha: 'old', ref: 'topic', repo: {full_name: 'base/repo'}}};
+async function vector(headRepo, dispatchError) {
+  const calls = {dispatch: [], refs: 0, labels: 0, comments: []}, updated = {...pull, head: {...pull.head, sha: 'new', repo: {full_name: headRepo}}};
+  const rest = {pulls: {list() {}, async updateBranch() {}, async get() { return {data: updated}; }}, repos: {async compareCommitsWithBasehead() { return {data: {status: 'ahead'}}; }},
+    actions: {async createWorkflowDispatch(x) { calls.dispatch.push(x.inputs); if (dispatchError) throw dispatchError; }}, git: {async getRef() { calls.refs++; return {data: {object: {sha: 'new'}}}; }},
+    issues: {async removeLabel() {}, async addLabels() { calls.labels++; }, async createComment(x) { calls.comments.push(x.body); }}};
+  let error; try { await execute({rest, paginate: async () => [pull]}, {repo: {owner: 'base', repo: 'repo'}, sha: 'base', payload: {repository: {default_branch: 'main'}}}, {env: {USING_GITHUB_TOKEN: 'true'}}, resolve => resolve()); } catch (caught) { error = caught; }
+  return {calls, error};
+}
+(async () => {
+  const fork = await vector('fork/repo');
+  if (!fork.error || fork.calls.dispatch.length || fork.calls.labels || fork.calls.comments[0] !== 'Checks must be started by a push from the fork.') throw Error('fork vector failed');
+  const success = await vector('base/repo');
+  if (success.error || success.calls.dispatch[0].sha !== 'new' || success.calls.refs) throw Error('SHA dispatch vector failed');
+  const failure = Object.assign(Error('dispatch refused'), {status: 422}), dispatch = await vector('base/repo', failure);
+  if (dispatch.error !== failure || dispatch.calls.labels || dispatch.calls.comments.length) throw Error('dispatch vector failed');
+  console.log('workflow update mocks passed');
+})().catch(error => { console.error(error); process.exit(1); });
+JS
+  ) && s=0 || s=$?
+  expect "the branch updater handles fork and dispatch-failure API vectors" 0 '^workflow update mocks passed$' "$out" "$s"
 fi
 
 handover_repo=$work/handover-check
@@ -929,10 +974,13 @@ git -C "$seed" -c user.name=test -c user.email=test@example.com commit -q -m see
 git -C "$seed" remote add origin "$origin"
 git -C "$seed" push -q origin main
 git clone -q "$origin" "$work/clone"
+mkdir -p "$work/clone/scripts/dev"
+cp "$kit/templates/check.sh" "$work/clone/scripts/dev/check.sh"
 out=$("$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
 expect "setup makes the branch from the base" 0 'branch +topic at' "$out" "$s"
 expect "setup runs the manifest's setup steps" 0 'PASS +prepare' "$out" "$s"
 expect "setup names the toolchains" 0 'python +Python' "$out" "$s"
+expect "setup names both scripts in its adoption guidance" 0 'vendor scripts/dev/check\.sh and scripts/dev/handover_check\.sh together' "$out" "$s"
 if [ "$(git -C "$work/clone" rev-parse --abbrev-ref HEAD)" = topic ]; then ok "setup leaves the clone on the new branch"; else bad "setup leaves the clone on the new branch"; fi
 out=$("$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
 expect "setup reuses an existing clone and an existing branch" 0 'branch +topic' "$out" "$s"

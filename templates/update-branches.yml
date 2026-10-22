@@ -7,6 +7,7 @@ on:
   workflow_call:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
   issues: write
@@ -18,7 +19,10 @@ jobs:
     steps:
       - name: Update branches that are behind
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          USING_GITHUB_TOKEN: ${{ secrets.UPDATE_BRANCHES_TOKEN == '' }}
         with:
+          github-token: ${{ secrets.UPDATE_BRANCHES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -35,13 +39,6 @@ jobs:
                 await github.rest.pulls.updateBranch({
                   owner, repo, pull_number: pull.number, expected_head_sha: pull.head.sha,
                 });
-                try {
-                  await github.rest.issues.removeLabel({
-                    owner, repo, issue_number: pull.number, name: 'carry needed',
-                  });
-                } catch (error) {
-                  if (error.status !== 404) throw error;
-                }
               } catch (error) {
                 if (error.status !== 409 && error.status !== 422) throw error;
                 await github.rest.issues.addLabels({
@@ -51,5 +48,31 @@ jobs:
                   owner, repo, issue_number: pull.number,
                   body: `Carry needed from base commit ${baseCommit}.`,
                 });
+                continue;
+              }
+              if (process.env.USING_GITHUB_TOKEN === 'true') {
+                let updated = pull;
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                  await new Promise((resolve) => setTimeout(resolve, 1000));
+                  updated = (await github.rest.pulls.get({owner, repo, pull_number: pull.number})).data;
+                  if (updated.head.sha !== pull.head.sha) break;
+                }
+                if (updated.head.sha === pull.head.sha) throw new Error(`Pull request ${pull.number} did not expose its updated head`);
+                if (!updated.head.repo || updated.head.repo.full_name !== `${owner}/${repo}`) {
+                  const message = 'Checks must be started by a push from the fork.';
+                  await github.rest.issues.createComment({owner, repo, issue_number: pull.number, body: message});
+                  throw new Error(message);
+                }
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo, workflow_id: 'ci.yml', ref: updated.head.ref,
+                  inputs: { pull_request: String(pull.number), sha: updated.head.sha },
+                });
+              }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: pull.number, name: 'carry needed',
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
               }
             }

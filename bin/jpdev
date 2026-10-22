@@ -138,6 +138,9 @@ cmd_setup() {
     py_v=$("$py" --version 2>&1)
   fi
   local script=$root/scripts/dev/check.sh
+  if [ ! -x "$script" ] || [ ! -x "$root/scripts/dev/handover_check.sh" ]; then
+    jpdev_log "setup: adopting repositories vendor scripts/dev/check.sh and scripts/dev/handover_check.sh together"
+  fi
   [ -x "$script" ] || script=$kit/templates/check.sh
   JPDEV_LOGDIR=$JPDEV_SCRATCH/logs/$(basename "$root")-setup-$(date +%Y%m%dT%H%M%S)
   export JPDEV_LOGDIR

@@ -44,7 +44,10 @@ the second.
 1. Open a pull request that:
    - sets `JPDEV_VERSION` in `lib/common.sh` to the release's version, and line 2 of
      `templates/check.sh` to `# from judgment-pack-devkit v<version> (templates/check.sh)`, and
-     copies the template to `scripts/dev/check.sh` (a test holds the three together);
+     copies the template to `scripts/dev/check.sh`; sets line 2 of
+     `scripts/dev/handover_check.sh` to
+     `# from judgment-pack-devkit v<version> (lib/handover_check.sh)` and copies the rest from
+     `lib/handover_check.sh` (tests hold both vendored scripts to their sources and version);
    - writes `docs/releases/<tag>.md`: what the release holds and what it does not. It is the text
      the release page carries, and the first line ends with the tag's name, for example
      `# jpdev v0.2.0`.
@@ -85,7 +88,7 @@ Every job works on the commit the run was started for, by its digest, not on the
    [`ci.yml`](../.github/workflows/ci.yml): `lint` and `tests`. A check `main` has gained since that
    commit is not run.
 3. **Packages the kit.** It refuses unless `bin/jpdev --version` prints `jpdev <version>`, line 2 of
-   `templates/check.sh` names `<tag>`, and `scripts/dev/check.sh` is a copy of the template. Then
+   each vendored script names `<tag>`, and both scripts match their sources. Then
    `git archive` of the commit into `judgment-pack-devkit-<version>.tgz`, `checksums.txt` written
    over it and checked, and the unpacked tarball run once (`jpdev --version`, `jpdev env`).
 4. **Attests and drafts.** Only if the tag still names the commit and no release exists under the
