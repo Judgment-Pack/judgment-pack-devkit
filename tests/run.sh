@@ -334,6 +334,7 @@ expect "the fallback dispatch identifies the pull request" 0 "pull_request: Stri
 expect "the fallback dispatch carries the updated head SHA" 0 "sha: updated\.head\.sha" "$workflow_templates" 0
 expect "the CI template accepts an explicit dispatch for a pull request" 0 "workflow_dispatch:" "$workflow_templates" 0
 expect "the dispatched CI names its SHA input in the run title" 0 'run-name: .*inputs\.sha' "$workflow_templates" 0
+  # shellcheck disable=SC2016  # the template holds a literal GitHub expression
 sha_checkouts=$(grep -cF 'ref: ${{ inputs.sha }}' "$kit/templates/ci-check.yml")
 if [ "$sha_checkouts" -eq 2 ]; then ok "both dispatched CI jobs check out the SHA input"; else bad "both dispatched CI jobs check out the SHA input" "found $sha_checkouts SHA checkouts"; fi
 expect "the dispatched CI keeps the required check job name" 0 '^    name: check$' "$workflow_templates" 0
