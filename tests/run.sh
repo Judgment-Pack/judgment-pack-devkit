@@ -750,6 +750,15 @@ expect "check-brief matches regardless of case and ending" 1 'line 2: "EXPLOITAT
 expect "check-brief suggests the neutral phrasing" 1 'describe the input the code receives and the refusal it must produce' "$out" "$s"
 expect "check-brief points at the documented refusal" 1 'describe the documented refusal instead' "$out" "$s"
 absent "check-brief does not flag a word that merely contains a listed one" 'shackle' "$out"
+printf 'Name the `exploitParser` identifier.\n\n## Before you write msg.txt\n' > "$work/backticked-brief.md"
+out=$("$jpdev" codex check-brief "$work/backticked-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief ignores a listed word inside backticks" 0 'no word of the filter list' "$out" "$s"
+printf 'Name the exploitParser identifier.\n\n## Before you write msg.txt\n' > "$work/bare-brief.md"
+out=$("$jpdev" codex check-brief "$work/bare-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief still refuses the same word bare" 1 'line 1: "exploitParser": describe the malformed or unexpected input and the documented refusal' "$out" "$s"
+printf 'Describe the adversarial review.\n\n## Before you write msg.txt\n' > "$work/product-term-brief.md"
+out=$("$jpdev" codex check-brief "$work/product-term-brief.md" 2>&1) && s=0 || s=$?
+expect "check-brief accepts the product term in prose" 0 'no word of the filter list' "$out" "$s"
 n=0
 while IFS= read -r line; do
   case $line in '' | '#'*) continue ;; esac
@@ -823,7 +832,7 @@ git init -q -b main "$cxrepo"
 printf '# Rules\n' > "$cxrepo/AGENTS.md"
 printf 'one\n' > "$cxrepo/file.txt"
 printf '{"version":1,"checks":[{"name":"one","run":"true"}],"handover":{"shared_paths":["file.txt"],"boundary_paths":[]}}\n' > "$cxrepo/dev.json"
-printf 'msg.txt\npr.md\n' > "$cxrepo/.gitignore"
+printf 'ignored.txt\n' > "$cxrepo/.gitignore"
 git -C "$cxrepo" add .gitignore AGENTS.md dev.json file.txt
 git -C "$cxrepo" commit -q -m seed
 git -C "$cxrepo" remote add origin "$cxorigin"
@@ -890,6 +899,21 @@ expect "codex run --add commits a new file named" 0 'committed' "$out" "$s"
 if [ "$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')" = "created.txt file.txt" ]; then ok "--add puts the named file in the commit"; else bad "--add puts the named file in the commit"; fi
 
 cx_reset
+mkdir -p "$cxrepo/bundle"
+printf 'one\n' > "$cxrepo/bundle/one.txt"
+printf 'two\n' > "$cxrepo/bundle/two.txt"
+printf 'ignored\n' > "$cxrepo/bundle/ignored.txt"
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add bundle) && s=0 || s=$?
+expect "codex run --add accepts a directory" 0 'committed' "$out" "$s"
+names=$(git -C "$cxrepo" show --name-only --format= HEAD | sort | paste -sd' ')
+if [ "$names" = "bundle/one.txt bundle/two.txt file.txt" ]; then ok "--add commits every non-ignored new file in a directory"; else bad "--add commits every non-ignored new file in a directory" "$names"; fi
+
+cx_reset
+out=$(STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add .) && s=0 || s=$?
+expect "codex run --add refuses a directory holding only the handover files" 1 'codex run: --add \.: directory holds nothing to add' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "an empty --add directory makes no commit"; else bad "an empty --add directory makes no commit"; fi
+
+cx_reset
 for cache in .jpdev .gocache .npm-cache .xdg-cache; do
   mkdir -p "$cxrepo/$cache"
   printf 'cache\n' > "$cxrepo/$cache/file"
@@ -937,6 +961,14 @@ cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_EXIT=4 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
 expect "codex run does not commit after a failed codex run" 4 'codex exit 4' "$out" "$s"
 if [ "$(git -C "$cxrepo" rev-list --count "$base..HEAD")" = 0 ]; then ok "a failed codex run: no commit"; else bad "a failed codex run: no commit"; fi
+cx_reset
+printf 'tracked message\n' > "$cxrepo/msg.txt"
+git -C "$cxrepo" add -f msg.txt
+git -C "$cxrepo" commit -q -m 'track handover message for refusal probe'
+tracked_base=$(git -C "$cxrepo" rev-parse HEAD)
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run) && s=0 || s=$?
+expect "codex run still refuses a tracked and changed handover file" 1 'msg.txt or pr.md is tracked and changed' "$out" "$s"
+if [ "$(git -C "$cxrepo" rev-parse HEAD)" = "$tracked_base" ]; then ok "a tracked handover refusal makes no commit"; else bad "a tracked handover refusal makes no commit"; fi
 cx_reset
 out=$(STUB_CODEX_EDIT=1 STUB_CODEX_MSG=$work/msg-plain.txt cx_run --add msg.txt) && s=0 || s=$?
 expect "codex run refuses --add msg.txt" 2 'read, never committed' "$out" "$s"

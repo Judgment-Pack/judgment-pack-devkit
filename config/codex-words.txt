@@ -15,7 +15,6 @@ hack => describe the unsupported use and the refusal that documents it
 breach => describe the boundary and the check that must hold at it
 malicious => describe the input as unexpected, unsupported or not allowed
 hostile => describe the input as unexpected, unsupported or not allowed
-adversar => describe the input as unexpected or not allowed, and the refusal
 jailbreak => describe the instruction the model must not follow and the refusal
 prompt injection => describe the untrusted text in the input and the refusal that keeps it from acting as an instruction
 code injection => describe the untrusted text in the input and the refusal
