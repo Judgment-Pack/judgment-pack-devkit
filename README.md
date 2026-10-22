@@ -136,7 +136,8 @@ the same name overrides it. `config/env.example` documents each setting with its
   asked for was done. `--sandbox danger-full-access` is an explicit option only. Worktree runs
   share caches below `BASE/.jpdev-shared`; `--small` enforces the manifest handover paths and line
   bound after the run; `--resume` continues the named thread. Every detected thread id is written
-  to `.jpdev/output/thread`.
+  to `.jpdev/output/thread`. A directory passed to `--add` adds every non-ignored file below it,
+  except the handover files and caches, and is refused with its path when nothing remains to add.
 - `jpdev codex review --brief FILE --model M --effort E --dir CLONE [--pr N | --issue N]
   [--repo OWNER/NAME] [--out FILE] [--sandbox read-only|workspace-write] [--network]`: checks the brief and
   runs `codex exec` with the model, effort and sandbox explicit and stdin closed. It writes the
@@ -150,8 +151,9 @@ the same name overrides it. `config/env.example` documents each setting with its
   `--review` prints the reviewer skeleton with its read-only rules and findings-first report.
 - `jpdev codex check-brief FILE`: exits 1 and names the neutral phrasing for each word of
   [`config/codex-words.txt`](config/codex-words.txt) (and of the file `JPDEV_CODEX_WORDS` names)
-  that the brief holds. `codex run` runs the same check first and does not start the run on a
-  refusal.
+  that the brief holds. A word inside backticks is treated as part of an identifier, path or
+  command and is ignored; the product term “adversarial” is not in the base list. `codex run` runs
+  the same check first and does not start the run on a refusal.
 - `jpdev env`: the effective settings and where each came from.
 
 ## The caps

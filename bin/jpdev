@@ -733,7 +733,7 @@ PY
 codex_publish() {
   local dir=$1 branch=$2 push=$3 pr=$4 repo=$5 base=$6
   shift 6
-  local trailer="Co-Authored-By: Codex <noreply@openai.com>" tmpd
+  local trailer="Co-Authored-By: Codex <noreply@openai.com>" tmpd msg_tracked=0 pr_tracked=0
   cd "$dir" || exit 2
   if [ ! -s msg.txt ]; then
     echo "jpdev codex run: refused: codex wrote no msg.txt (the commit message); nothing was committed" >&2
@@ -743,9 +743,16 @@ codex_publish() {
     echo "jpdev codex run: refused: codex wrote no pr.md (the pull request body); nothing was committed" >&2
     exit 1
   fi
+  git ls-files --error-unmatch -- msg.txt > /dev/null 2>&1 && msg_tracked=1
+  git ls-files --error-unmatch -- pr.md > /dev/null 2>&1 && pr_tracked=1
   git add -u || exit 1
-  local path
+  local path pending add_dirs=()
   for path in "$@"; do
+    if [ -d "$path" ]; then
+      add_dirs+=("$path")
+      pending=$(git status --porcelain --untracked-files=all -- "$path") || exit 1
+      if [ -z "$pending" ]; then continue; fi
+    fi
     git add -- "$path" || { echo "jpdev codex run: --add $path could not be staged" >&2; exit 1; }
   done
   local cache_paths=()
@@ -760,11 +767,46 @@ codex_publish() {
   if git diff --cached --name-only | grep -qE '(^|/)\.(jpdev|jpdev-shared|gocache|npm-cache|xdg-cache)(/|$)'; then
     jpdev_die "codex run: a sandbox cache directory remained staged"
   fi
-  if git diff --cached --name-only | grep -qxE 'msg\.txt|pr\.md'; then
+  local tracked_handover=0 handover_paths=() nested_tracked_handover=() add_path
+  local -A seen_nested_handover=()
+  for add_path in "${add_dirs[@]}"; do
+    while IFS= read -r -d '' path; do
+      case $path in
+        */msg.txt | */pr.md)
+          if [ -n "${seen_nested_handover[$path]:-}" ]; then continue; fi
+          seen_nested_handover[$path]=1
+          if git cat-file -e "HEAD:$path" 2>/dev/null; then
+            nested_tracked_handover+=("$path")
+          else
+            handover_paths+=("$path")
+          fi
+          ;;
+      esac
+    done < <(git diff --cached --name-only -z -- "$add_path")
+  done
+  if ! git diff --cached --quiet -- msg.txt; then
+    if [ "$msg_tracked" -eq 1 ]; then tracked_handover=1; else handover_paths+=(msg.txt); fi
+  fi
+  if ! git diff --cached --quiet -- pr.md; then
+    if [ "$pr_tracked" -eq 1 ]; then tracked_handover=1; else handover_paths+=(pr.md); fi
+  fi
+  if [ "${#handover_paths[@]}" -gt 0 ]; then
+    git rm --cached --quiet --ignore-unmatch -- "${handover_paths[@]}" || exit 1
+  fi
+  if [ "${#nested_tracked_handover[@]}" -gt 0 ]; then
+    git reset -q -- "${nested_tracked_handover[@]}" || exit 1
+  fi
+  if [ "$tracked_handover" -eq 1 ]; then
     git reset -q -- msg.txt pr.md
     echo "jpdev codex run: refused: msg.txt or pr.md is tracked and changed; they are read, never committed" >&2
     exit 1
   fi
+  for path in "${add_dirs[@]}"; do
+    if git diff --cached --quiet -- "$path"; then
+      echo "jpdev codex run: --add $path: directory holds nothing to add" >&2
+      exit 1
+    fi
+  done
   if git diff --cached --quiet; then
     echo "jpdev codex run: nothing to commit: codex made no change to a tracked file" >&2
     exit 1
