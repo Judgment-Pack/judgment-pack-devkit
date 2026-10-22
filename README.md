@@ -138,12 +138,13 @@ the same name overrides it. `config/env.example` documents each setting with its
   bound after the run; `--resume` continues the named thread. Every detected thread id is written
   to `.jpdev/output/thread`.
 - `jpdev codex review --brief FILE --model M --effort E --dir CLONE [--pr N | --issue N]
-  [--repo OWNER/NAME] [--out FILE] [--sandbox read-only|workspace-write]`: checks the brief and
+  [--repo OWNER/NAME] [--out FILE] [--sandbox read-only|workspace-write] [--network]`: checks the brief and
   runs `codex exec` with the model, effort and sandbox explicit and stdin closed. It writes the
   final message to `--out` (default `.jpdev/output/review.md`), refuses the result if HEAD or a
   tracked file changed, and prints the reviewed SHA. The default `workspace-write` sandbox lets
-  review probes use temporary files; the prompt and post-run gate keep the tracked tree read-only.
-  It never commits, pushes or posts. Use `jpdev record post` to post the saved report.
+  review probes use temporary files. It has no network unless the caller passes `--network`, the
+  prompt and post-run gate forbid Git writes, and it never posts. Use `jpdev record post` to post
+  the saved report.
 - `jpdev codex brief-template [--review]`: prints `templates/codex-brief.md`, a brief skeleton that tells
   Codex to write `msg.txt` and `pr.md` and not to commit.
   `--review` prints the reviewer skeleton with its read-only rules and findings-first report.
@@ -162,7 +163,8 @@ the same name overrides it. `config/env.example` documents each setting with its
 | `python` | `ulimit -v` and `timeout` |
 | `shell` | `timeout` only |
 
-When the manifest declares a virtual environment, setup and checks create it when it is missing.
+When the manifest declares a virtual environment, its path must be a non-root relative child of
+the clone with no `..` segment, and setup and checks create it when it is missing.
 They use `python3.X` on PATH first, then the newest `~/.pyenv/versions/3.X.*/bin/python3`, and
 refuse before any step if the declared release is unavailable. Its `bin` is first on PATH for
 every step, whatever the step's toolchain (the toolchain still decides the cap), so a node or Go

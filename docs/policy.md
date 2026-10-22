@@ -93,8 +93,9 @@ normal no-new-pull-request Codex path; a carry with no conflicts is signed and p
 `jpdev codex review` runs a checked review brief with an explicit model and effort, closes stdin,
 and writes the final report to a file without committing, pushing or posting. The default sandbox
 is `workspace-write` because read-only prevents shell probes from making temporary files; the brief
-forbids tracked writes and the command refuses the result if HEAD or a tracked file changed. A
-Codex review of a Codex build is the same vendor (OpenAI), not a cross-vendor claim.
+has no network unless the caller passes `--network`, forbids Git writes, and the command refuses
+the result if HEAD or a tracked file changed. The command itself never posts. A Codex review of a
+Codex build is the same vendor (OpenAI), not a cross-vendor claim.
 
 ## Severity
 

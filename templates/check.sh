@@ -21,8 +21,13 @@ m = json.load(open(opt['manifest'], encoding='utf-8'))
 python = m.get('toolchains', {}).get('python', {})
 venv = python.get('venv')
 run_env = dict(os.environ)
-if venv:
-    target = Path(root, venv)
+if venv is not None:
+    root_path, path = Path(root).resolve(), Path(venv)
+    target = (root_path / path).resolve()
+    if (not venv or path.is_absolute() or '..' in path.parts or target == root_path
+            or root_path not in target.parents):
+        print('check.sh: venv must be a relative child path of the clone', file=sys.stderr)
+        sys.exit(2)
     interpreter = target / 'bin' / 'python3'
     if not interpreter.is_file():
         version = python.get('version')

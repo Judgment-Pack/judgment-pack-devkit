@@ -76,7 +76,7 @@
             "venv": {
               "type": "string",
               "minLength": 1,
-              "description": "a virtual environment in the clone, put first on PATH for every step"
+              "description": "a non-root relative child path of the clone, with no .. segment; its bin is put first on PATH for every step"
             },
             "version": {
               "type": "string",

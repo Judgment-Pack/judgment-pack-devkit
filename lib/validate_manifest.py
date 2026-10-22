@@ -7,6 +7,7 @@ step has a node version to run under. The go version is also held to a release n
 because the fallback without the jsonschema package has no schema. Standard library otherwise. Exit 0 when valid, 1 with one line per problem, 2 on an unreadable file.
 """
 import json
+import os
 import re
 import sys
 
@@ -72,6 +73,11 @@ def main():
         go_version = manifest.get("toolchains", {}).get("go", {}).get("version") if isinstance(manifest.get("toolchains"), dict) and isinstance(manifest["toolchains"].get("go"), dict) else None
         if go_version is not None and not (isinstance(go_version, str) and re.fullmatch(r"[0-9]+\.[0-9]+(\.[0-9]+)?", go_version)):
             problems.append("toolchains/go/version: %r is not a Go release number such as 1.26 or 1.26.5" % (go_version,))
+        python = manifest.get("toolchains", {}).get("python", {}) if isinstance(manifest.get("toolchains"), dict) else {}
+        venv = python.get("venv") if isinstance(python, dict) else None
+        if venv is not None and (not isinstance(venv, str) or not venv or os.path.isabs(venv)
+                                 or ".." in venv.split("/") or os.path.normpath(venv) == "."):
+            problems.append("toolchains/python/venv: venv must be a relative child path of the clone")
         seen = set()
         for step in steps:
             name = step.get("name")

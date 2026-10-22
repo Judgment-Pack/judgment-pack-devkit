@@ -16,4 +16,5 @@ tests and documentation against them.
 Findings first, ordered by severity, with file and line references. Then state the reviewed head,
 the probes run, and any residual risk. End with exactly one of these lines:
 
-merge: yes | after fixes
+merge: yes
+merge: after fixes

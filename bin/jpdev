@@ -41,9 +41,10 @@ usage: jpdev COMMAND [ARGS]
                      changes (msg.txt, signed off), push, and open the pull request (pr.md)
   codex review --brief FILE --model M --effort low|medium|high --dir CLONE
         [--pr N | --issue N] [--repo OWNER/NAME] [--out FILE]
-        [--sandbox read-only|workspace-write]
+        [--sandbox read-only|workspace-write] [--network]
                      run a review with stdin closed, write its final message, refuse tracked
-                     changes after the run, and print the reviewed SHA; never commit, push or post
+                     changes after the run, and print the reviewed SHA; no network unless
+                     --network, and never commit, push or post
   codex brief-template [--review]
                      print the brief skeleton: what Codex writes (msg.txt, pr.md) and does not do
   codex check-brief [--build] FILE
@@ -414,7 +415,7 @@ cmd_codex() {
 # probes need temporary files.
 codex_review() {
   local brief="" model=$JPDEV_CODEX_MODEL_DEFAULT effort="" dir="" sandbox=workspace-write
-  local out="" repo="" pr="" issue="" log=""
+  local out="" repo="" pr="" issue="" log="" network=0 network_state=disabled
   while [ $# -gt 0 ]; do
     case $1 in
       --brief) need_value "$@"; brief=$2; shift 2 ;;
@@ -426,6 +427,7 @@ codex_review() {
       --repo) need_value "$@"; repo=$2; shift 2 ;;
       --pr) need_value "$@"; pr=$2; shift 2 ;;
       --issue) need_value "$@"; issue=$2; shift 2 ;;
+      --network) network=1; network_state=enabled; shift ;;
       -h | --help) usage; exit 0 ;;
       *) jpdev_die "codex review: unknown argument $1" ;;
     esac
@@ -441,21 +443,22 @@ codex_review() {
   [ -f "$dir/AGENTS.md" ] || jpdev_die "codex review: $dir holds no AGENTS.md, which the prompt names as the rules"
   command -v codex > /dev/null || jpdev_die "codex review: codex is not on PATH"
   brief=$(cd "$(dirname "$brief")" && pwd)/$(basename "$brief")
-  codex_check_brief "$brief"
   local sha
   sha=$(git -C "$dir" rev-parse HEAD) || jpdev_die "codex review: cannot read HEAD"
   if [ -z "$out" ]; then out=$dir/.jpdev/output/review.md; fi
   mkdir -p "$(dirname "$out")" "$JPDEV_SCRATCH/logs"
   out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
   log=$JPDEV_SCRATCH/logs/codex-review-$(basename "$dir")-$(date +%Y%m%dT%H%M%S).log
+  jpdev_log "codex review: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log; network $network_state"
+  codex_check_brief "$brief"
   local prompt="The rules are this repository's AGENTS.md; follow them. Act as its reviewer. Do not change tracked files or write git metadata."
+  [ "$network" -eq 1 ] || prompt+=$'\n'"Do not access the network."
   if [ -n "$pr" ]; then prompt+=$'\n'"Review pull request #$pr${repo:+ of $repo} at head $sha."; fi
   if [ -n "$issue" ]; then prompt+=$'\n'"Review issue #$issue${repo:+ of $repo} at head $sha."; fi
   prompt+=$'\n'"$(cat "$brief")"
   local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
-  if [ "$sandbox" = workspace-write ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
+  if [ "$network" -eq 1 ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
   args+=(--json -C "$dir" -o "$out" "$prompt")
-  jpdev_log "codex review: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log"
   (cd "$dir" && codex "${args[@]}" < /dev/null > "$log" 2>&1)
   local status=$?
   [ "$status" -eq 0 ] || { echo "== codex review exit $status (transcript: $log) =="; return "$status"; }

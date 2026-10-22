@@ -13,8 +13,9 @@ Start from `templates/dev.json` and keep what the repository runs. The manifest 
   `jpdev` selects an installed Go that matches it and says when none is installed, and the
   workflow falls back to the `go.mod` version when the manifest names none), `python`
   (`{"version": "3.12", "venv": ".venv"}`; the version and the virtual environment are optional;
-  setup and checks create a missing declared environment with `python3.X` on PATH or the newest
-  matching pyenv version, then put its `bin` first on PATH for every step).
+  the environment path is a non-root relative child of the clone with no `..` segment; setup and
+  checks create a missing declared environment with `python3.X` on PATH or the newest matching
+  pyenv version, then put its `bin` first on PATH for every step).
 - `setup`: steps `jpdev setup` and CI run once after a clone (`npm ci`, the python
   requirements).
 - `checks`: the check list, in the order it should run (cheap checks first).
@@ -126,9 +127,9 @@ jpdev record post --pr NUMBER --repo OWNER/NAME --file .jpdev/output/review.md
 ```
 
 The review command defaults to `workspace-write` so focused probes can create temporary files,
-but its prompt forbids repository writes and it refuses the result if HEAD or a tracked file
-changed. It closes stdin, writes only the final message to the record, prints the reviewed SHA,
-and never commits, pushes or posts.
+with no network access unless the caller passes `--network`. Its prompt forbids Git writes and it
+refuses the result if HEAD or a tracked file changed. It closes stdin, writes only the final
+message to the record, prints the reviewed SHA, and never posts.
 
 ## Worked example: the agent repository
 
