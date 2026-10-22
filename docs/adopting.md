@@ -97,6 +97,10 @@ updated pull request shows the `check` and `handover` CI checks on its new head.
 already has CI jobs keeps their required names and uses the template as the list of steps to move
 into its `ci.yml`.
 
+The fallback cannot dispatch a fork's short branch name in the base repository. For an updated fork
+pull request it comments that checks must be started by a push from the fork, then fails visibly;
+the contributor must push from the fork to start the checks on that head.
+
 ## 5. Check it
 
 ```sh

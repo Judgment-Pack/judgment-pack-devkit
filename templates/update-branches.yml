@@ -39,31 +39,6 @@ jobs:
                 await github.rest.pulls.updateBranch({
                   owner, repo, pull_number: pull.number, expected_head_sha: pull.head.sha,
                 });
-                if (process.env.USING_GITHUB_TOKEN === 'true') {
-                  let updated = pull;
-                  for (let attempt = 0; attempt < 30; attempt += 1) {
-                    await new Promise((resolve) => setTimeout(resolve, 1000));
-                    const response = await github.rest.pulls.get({
-                      owner, repo, pull_number: pull.number,
-                    });
-                    updated = response.data;
-                    if (updated.head.sha !== pull.head.sha) break;
-                  }
-                  if (updated.head.sha === pull.head.sha) {
-                    throw new Error(`Pull request ${pull.number} did not expose its updated head`);
-                  }
-                  await github.rest.actions.createWorkflowDispatch({
-                    owner, repo, workflow_id: 'ci.yml', ref: updated.head.ref,
-                    inputs: { pull_request: String(pull.number) },
-                  });
-                }
-                try {
-                  await github.rest.issues.removeLabel({
-                    owner, repo, issue_number: pull.number, name: 'carry needed',
-                  });
-                } catch (error) {
-                  if (error.status !== 404) throw error;
-                }
               } catch (error) {
                 if (error.status !== 409 && error.status !== 422) throw error;
                 await github.rest.issues.addLabels({
@@ -73,5 +48,33 @@ jobs:
                   owner, repo, issue_number: pull.number,
                   body: `Carry needed from base commit ${baseCommit}.`,
                 });
+                continue;
+              }
+              if (process.env.USING_GITHUB_TOKEN === 'true') {
+                let updated = pull;
+                for (let attempt = 0; attempt < 30; attempt += 1) {
+                  await new Promise((resolve) => setTimeout(resolve, 1000));
+                  updated = (await github.rest.pulls.get({owner, repo, pull_number: pull.number})).data;
+                  if (updated.head.sha !== pull.head.sha) break;
+                }
+                if (updated.head.sha === pull.head.sha) throw new Error(`Pull request ${pull.number} did not expose its updated head`);
+                if (!updated.head.repo || updated.head.repo.full_name !== `${owner}/${repo}`) {
+                  const message = 'Checks must be started by a push from the fork.';
+                  await github.rest.issues.createComment({owner, repo, issue_number: pull.number, body: message});
+                  throw new Error(message);
+                }
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo, workflow_id: 'ci.yml', ref: updated.head.ref,
+                  inputs: { pull_request: String(pull.number) },
+                });
+                const dispatched = await github.rest.git.getRef({owner, repo, ref: `heads/${updated.head.ref}`});
+                if (dispatched.data.object.sha !== updated.head.sha) throw new Error(`Dispatched ref does not name pull request ${pull.number} head ${updated.head.sha}`);
+              }
+              try {
+                await github.rest.issues.removeLabel({
+                  owner, repo, issue_number: pull.number, name: 'carry needed',
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
               }
             }

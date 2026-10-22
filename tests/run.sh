@@ -335,6 +335,28 @@ expect "the CI template accepts an explicit dispatch for a pull request" 0 "work
 expect "the dispatched CI keeps the required check job name" 0 '^    name: check$' "$workflow_templates" 0
 expect "the dispatched CI keeps the required handover job name" 0 '^    name: handover$' "$workflow_templates" 0
 expect "the CI handover job calls the vendored handover check" 0 'run: scripts/dev/handover_check\.sh' "$workflow_templates" 0
+if command -v node > /dev/null; then
+  out=$(node - "$kit/templates/update-branches.yml" <<'JS'
+const yaml = require('fs').readFileSync(process.argv[2], 'utf8'), body = yaml.slice(yaml.indexOf('          script: |') + 20).split('\n').map(x => x.slice(12)).join('\n'), execute = Function('github', 'context', 'process', 'setTimeout', `return (async()=>{${body}})()`), pull = {number: 7, head: {sha: 'old', ref: 'topic', repo: {full_name: 'base/repo'}}};
+async function vector(headRepo, dispatchError) {
+  const calls = {dispatch: 0, labels: 0, comments: []}, updated = {...pull, head: {...pull.head, sha: 'new', repo: {full_name: headRepo}}};
+  const rest = {pulls: {list() {}, async updateBranch() {}, async get() { return {data: updated}; }}, repos: {async compareCommitsWithBasehead() { return {data: {status: 'ahead'}}; }},
+    actions: {async createWorkflowDispatch() { calls.dispatch++; if (dispatchError) throw dispatchError; }}, git: {async getRef() { return {data: {object: {sha: 'new'}}}; }},
+    issues: {async removeLabel() {}, async addLabels() { calls.labels++; }, async createComment(x) { calls.comments.push(x.body); }}};
+  let error; try { await execute({rest, paginate: async () => [pull]}, {repo: {owner: 'base', repo: 'repo'}, sha: 'base', payload: {repository: {default_branch: 'main'}}}, {env: {USING_GITHUB_TOKEN: 'true'}}, resolve => resolve()); } catch (caught) { error = caught; }
+  return {calls, error};
+}
+(async () => {
+  const fork = await vector('fork/repo');
+  if (!fork.error || fork.calls.dispatch || fork.calls.labels || fork.calls.comments[0] !== 'Checks must be started by a push from the fork.') throw Error('fork vector failed');
+  const failure = Object.assign(Error('dispatch refused'), {status: 422}), dispatch = await vector('base/repo', failure);
+  if (dispatch.error !== failure || dispatch.calls.labels || dispatch.calls.comments.length) throw Error('dispatch vector failed');
+  console.log('workflow update mocks passed');
+})().catch(error => { console.error(error); process.exit(1); });
+JS
+  ) && s=0 || s=$?
+  expect "the branch updater handles fork and dispatch-failure API vectors" 0 '^workflow update mocks passed$' "$out" "$s"
+fi
 
 handover_repo=$work/handover-check
 git init -q -b main "$handover_repo"
