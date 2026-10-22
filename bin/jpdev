@@ -82,7 +82,9 @@ cmd_check() {
   export JPDEV_LOGDIR=$logdir
   "$script" --manifest "$manifest" "${passthru[@]}"
   local status=$?
-  jpdev_log "full output of each check: $logdir"
+  if compgen -G "$logdir/*.log" > /dev/null; then
+    jpdev_log "full output of each check: $logdir"
+  fi
   exit "$status"
 }
 
@@ -475,7 +477,7 @@ codex_review() {
 
 # codex_check_brief [--build] FILE: check the build heading and the filter-list words in FILE.
 codex_check_brief() {
-  local file="" build=0
+  local file="" build=0 root manifest
   while [ $# -gt 0 ]; do
     case $1 in
       --build) build=1; shift ;;
@@ -491,6 +493,25 @@ codex_check_brief() {
       exit 1
     fi
     echo "jpdev codex check-brief: warning: $file has no line exactly '## Before you write msg.txt'" >&2
+  fi
+  if [ "$build" -eq 1 ]; then
+    root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    manifest=${root:+$root/dev.json}
+    if [ -n "$manifest" ] && [ -f "$manifest" ] && python3 -I - "$manifest" <<'PY'
+import json, sys
+try:
+    notes = json.load(open(sys.argv[1], encoding='utf-8')).get('notes', [])
+except (OSError, ValueError, AttributeError):
+    notes = []
+if not isinstance(notes, list): notes = []
+sys.exit(0 if notes else 1)
+PY
+    then
+      if ! grep -qxF "## This repository's notes" "$file"; then
+        echo "jpdev codex check-brief: refused: $file has no line exactly '## This repository's notes', required by $manifest" >&2
+        exit 1
+      fi
+    fi
   fi
   local out status
   out=$(python3 -I "$kit/lib/codex_words.py" "$file" "$kit/config/codex-words.txt" "$JPDEV_CODEX_WORDS")
@@ -588,7 +609,7 @@ codex_run() {
     done
   fi
   brief=$(cd "$(dirname "$brief")" && pwd)/$(basename "$brief")
-  codex_check_brief --build "$brief"
+  (cd "$dir" && codex_check_brief --build "$brief") || exit $?
   if [ -z "$log" ]; then
     mkdir -p "$JPDEV_SCRATCH/logs"
     log=$JPDEV_SCRATCH/logs/codex-$(basename "$dir")-$(date +%Y%m%dT%H%M%S).log
@@ -837,7 +858,28 @@ codex_publish() {
 # codex_brief_template prints the brief skeleton a Codex build or review starts from.
 codex_brief_template() {
   case ${1:-} in
-    "") cat "$kit/templates/codex-brief.md" ;;
+    "")
+      cat "$kit/templates/codex-brief.md"
+      local root manifest notes
+      root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+      manifest=${root:+$root/dev.json}
+      if [ -n "$manifest" ] && [ -f "$manifest" ]; then
+        notes=$(python3 -I - "$manifest" <<'PY'
+import json, sys
+try:
+    notes = json.load(open(sys.argv[1], encoding='utf-8')).get('notes', [])
+except (OSError, ValueError, AttributeError):
+    notes = []
+if not isinstance(notes, list): notes = []
+for note in notes:
+    if isinstance(note, str): print('- ' + note)
+PY
+)
+        if [ -n "$notes" ]; then
+          printf "\n## This repository's notes\n\n%s\n" "$notes"
+        fi
+      fi
+      ;;
     --review) [ $# -eq 1 ] || jpdev_die "codex brief-template: --review takes no value"; cat "$kit/templates/codex-review-brief.md" ;;
     *) jpdev_die "codex brief-template: unknown argument $1" ;;
   esac

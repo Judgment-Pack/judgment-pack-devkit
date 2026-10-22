@@ -42,6 +42,14 @@ def main():
                     problems.append("(root): %r is required" % key)
             if manifest.get("version") != 1:
                 problems.append("version: must be 1")
+            if "notes" in manifest:
+                notes = manifest["notes"]
+                if not isinstance(notes, list):
+                    problems.append("notes: not an array")
+                else:
+                    for index, note in enumerate(notes):
+                        if not isinstance(note, str) or not note or len(note) > 240:
+                            problems.append("notes/%d: must be a non-empty string of at most 240 characters" % index)
             for kind in ("setup", "checks"):
                 for index, step in enumerate(manifest.get(kind, [])):
                     if not isinstance(step, dict) or not step.get("name") or not step.get("run"):
