@@ -141,8 +141,8 @@ jobs:
           ref: ${{ github.sha }}
 
       # The kit's version is the tag without its v, or the job refuses: the tarball's name, the
-      # version `jpdev --version` prints and the version line of the runner template
-      # (templates/check.sh, line 2) must agree with the tag.
+      # version `jpdev --version` prints and the version lines of the vendored scripts must agree
+      # with the tag.
       - name: Require the kit's version to equal the tag
         id: version
         shell: bash
@@ -154,6 +154,10 @@ jobs:
           want="# from judgment-pack-devkit ${RELEASE_TAG} (templates/check.sh)"
           [ "${line}" = "${want}" ] || { echo "templates/check.sh line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
           cmp -s templates/check.sh scripts/dev/check.sh || { echo "scripts/dev/check.sh is not a copy of templates/check.sh" >&2; exit 1; }
+          line="$(sed -n 2p scripts/dev/handover_check.sh)"
+          want="# from judgment-pack-devkit ${RELEASE_TAG} (lib/handover_check.sh)"
+          [ "${line}" = "${want}" ] || { echo "scripts/dev/handover_check.sh line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
+          cmp -s <(tail -n +2 lib/handover_check.sh) <(tail -n +3 scripts/dev/handover_check.sh) || { echo "scripts/dev/handover_check.sh is not a versioned copy of lib/handover_check.sh" >&2; exit 1; }
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       # git archive writes the named paths of the commit, with the commit's time and each file's
@@ -184,7 +188,7 @@ jobs:
           kit="${unpack}/judgment-pack-devkit-${VERSION}"
           [ "$("${kit}/bin/jpdev" --version)" = "jpdev ${VERSION}" ] || { echo "the packaged jpdev does not report ${VERSION}" >&2; exit 1; }
           "${kit}/bin/jpdev" env > /dev/null
-          for path in bin/jpdev lib/wrap.sh templates/check.sh templates/dev.schema.json scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
+          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
             test -e "${kit}/${path}" || { echo "the tarball does not hold ${path}" >&2; exit 1; }
           done
 

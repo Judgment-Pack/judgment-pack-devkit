@@ -263,6 +263,11 @@ want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (t
 if [ "$line2" = "$want" ]; then ok "templates/check.sh line 2 names the kit version jpdev --version prints"; else bad "templates/check.sh line 2 names the kit version jpdev --version prints" "line 2: $line2
 wanted: $want"; fi
 if cmp -s "$kit/templates/check.sh" "$kit/scripts/dev/check.sh"; then ok "scripts/dev/check.sh is the template, line 2 included"; else bad "scripts/dev/check.sh is the template, line 2 included"; fi
+handover_line2=$(sed -n 2p "$kit/scripts/dev/handover_check.sh" 2>/dev/null)
+handover_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (lib/handover_check.sh)"
+if [ "$handover_line2" = "$handover_want" ]; then ok "scripts/dev/handover_check.sh line 2 names the kit version and source"; else bad "scripts/dev/handover_check.sh line 2 names the kit version and source" "line 2: $handover_line2
+wanted: $handover_want"; fi
+if cmp -s <(tail -n +2 "$kit/lib/handover_check.sh") <(tail -n +3 "$kit/scripts/dev/handover_check.sh" 2>/dev/null); then ok "scripts/dev/handover_check.sh is the library script after its version line"; else bad "scripts/dev/handover_check.sh is the library script after its version line"; fi
 
 # --- the lock
 lock=$work/test.lock
@@ -319,6 +324,17 @@ PY
   ) && s=0 || s=$?
   expect "the workflow templates parse as YAML" 0 "parsed workflow templates" "$out" "$s"
 fi
+workflow_templates=$(cat "$kit/templates/ci-check.yml" "$kit/templates/update-branches.yml")
+expect "the branch updater prefers UPDATE_BRANCHES_TOKEN and falls back to GITHUB_TOKEN" 0 'github-token: \$\{\{ secrets\.UPDATE_BRANCHES_TOKEN \|\| secrets\.GITHUB_TOKEN \}\}' "$workflow_templates" 0
+expect "the GITHUB_TOKEN fallback dispatches ci.yml for the pull request branch" 0 "createWorkflowDispatch" "$workflow_templates" 0
+expect "the branch updater dispatches CI only for the GITHUB_TOKEN fallback" 0 "process\.env\.USING_GITHUB_TOKEN === 'true'" "$workflow_templates" 0
+expect "the branch updater waits until the pull request exposes its new head" 0 "updated\.head\.sha !== pull\.head\.sha" "$workflow_templates" 0
+expect "the fallback dispatch targets the updated branch head" 0 "workflow_id: 'ci\.yml', ref: updated\.head\.ref" "$workflow_templates" 0
+expect "the fallback dispatch identifies the pull request" 0 "pull_request: String\(pull\.number\)" "$workflow_templates" 0
+expect "the CI template accepts an explicit dispatch for a pull request" 0 "workflow_dispatch:" "$workflow_templates" 0
+expect "the dispatched CI keeps the required check job name" 0 '^    name: check$' "$workflow_templates" 0
+expect "the dispatched CI keeps the required handover job name" 0 '^    name: handover$' "$workflow_templates" 0
+expect "the CI handover job calls the vendored handover check" 0 'run: scripts/dev/handover_check\.sh' "$workflow_templates" 0
 
 handover_repo=$work/handover-check
 git init -q -b main "$handover_repo"
@@ -929,10 +945,13 @@ git -C "$seed" -c user.name=test -c user.email=test@example.com commit -q -m see
 git -C "$seed" remote add origin "$origin"
 git -C "$seed" push -q origin main
 git clone -q "$origin" "$work/clone"
+mkdir -p "$work/clone/scripts/dev"
+cp "$kit/templates/check.sh" "$work/clone/scripts/dev/check.sh"
 out=$("$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
 expect "setup makes the branch from the base" 0 'branch +topic at' "$out" "$s"
 expect "setup runs the manifest's setup steps" 0 'PASS +prepare' "$out" "$s"
 expect "setup names the toolchains" 0 'python +Python' "$out" "$s"
+expect "setup names both scripts in its adoption guidance" 0 'vendor scripts/dev/check\.sh and scripts/dev/handover_check\.sh together' "$out" "$s"
 if [ "$(git -C "$work/clone" rev-parse --abbrev-ref HEAD)" = topic ]; then ok "setup leaves the clone on the new branch"; else bad "setup leaves the clone on the new branch"; fi
 out=$("$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
 expect "setup reuses an existing clone and an existing branch" 0 'branch +topic' "$out" "$s"

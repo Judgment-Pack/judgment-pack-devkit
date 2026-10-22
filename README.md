@@ -162,7 +162,8 @@ script uses the environment's interpreter and packages.
 - `config/env.example`, `config/codex-words.txt`: the settings by example, and the base word list of
   `jpdev codex check-brief`.
 - `templates/dev.json`, `templates/dev.schema.json`: the manifest by example and its JSON Schema.
-- `templates/check.sh`: the public runner a repository vendors as `scripts/dev/check.sh`.
+- `templates/check.sh` and `lib/handover_check.sh`: the public checks a repository vendors as
+  `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`.
 - `templates/codex-brief.md`: the brief skeleton `jpdev codex brief-template` prints.
 - `templates/AGENTS.md`, `templates/CLAUDE.md`: the agent instructions (one text, generated from
   the other by `scripts/sync-agent-docs.sh`).
@@ -171,8 +172,8 @@ script uses the environment's interpreter and packages.
   repository adopts the kit. `examples/judgment-pack-agent.dev.json`: a worked manifest.
 - `tests/run.sh`: the kit's own tests (`tests/fixture/` holds a manifest of shell echoes and one
   deliberate failure).
-- `dev.json`, `scripts/dev/check.sh`, `AGENTS.md`, `CLAUDE.md`: the kit on itself, the list of checks
-  CI runs. `CONTRIBUTING.md`, `SECURITY.md`, `docs/releasing.md`: contributing, reporting and
-  releasing.
+- `dev.json`, `scripts/dev/check.sh`, `scripts/dev/handover_check.sh`, `AGENTS.md`, `CLAUDE.md`: the
+  kit on itself, the list of checks CI runs, and the handover guard. `CONTRIBUTING.md`, `SECURITY.md`,
+  `docs/releasing.md`: contributing, reporting and releasing.
 
 Apache-2.0; see `LICENSE`.

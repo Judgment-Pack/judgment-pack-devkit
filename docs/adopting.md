@@ -1,8 +1,8 @@
 # Adopting the kit in a repository
 
-A repository adopts the kit with five files and one CI workflow. None of them depends on the
-kit being installed: a contributor or CI runs the vendored runner with python3 alone, and a
-machine that has the kit adds the caps and the lock around the same steps.
+A repository adopts the kit with five files and two workflows. None of them depends on the kit
+being installed: a contributor or CI runs the two vendored scripts directly, and a machine that
+has the kit adds the caps and the lock around the same steps.
 
 ## 1. Write `dev.json`
 
@@ -41,16 +41,21 @@ in the summary block; more than three lines are counted and the last one is show
 
 `jpdev check` validates the file against `templates/dev.schema.json` before it runs anything.
 
-## 2. Vendor the runner
+## 2. Vendor the check scripts
 
 ```sh
 mkdir -p scripts/dev
-cp templates/check.sh scripts/dev/check.sh
+devkit=path/to/judgment-pack-devkit
+cp "$devkit/templates/check.sh" scripts/dev/check.sh
+cp "$devkit/scripts/dev/handover_check.sh" scripts/dev/handover_check.sh
 ```
 
 Line 2 of the template, `# from judgment-pack-devkit vX.Y.Z (templates/check.sh)`, records the kit
 release the copy came from. A vendored copy keeps that line, so a later reader can tell which release
-it is behind; when you update the copy, copy the whole file again.
+it is behind. The kit's `scripts/dev/handover_check.sh` similarly vendors `lib/handover_check.sh`
+with its release on line 2. Vendor `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`
+together, and copy both whole files again when updating them. `jpdev setup` names this pair when
+either file is absent.
 
 `scripts/dev/check.sh [--setup] [--only A,B] [--skip A,B] [--all]` runs the manifest with no
 caps and prints the summary block. `jpdev check` uses the vendored copy when it exists and
@@ -74,13 +79,23 @@ regenerates `CLAUDE.md`.
 
 ## 4. Add the CI workflow
 
-Copy `templates/ci-check.yml` to `.github/workflows/dev-check.yml`. It reads the toolchain
+Copy `templates/ci-check.yml` to `.github/workflows/ci.yml`. It reads the toolchain
 versions from `dev.json`, sets the toolchains up, and runs `scripts/dev/check.sh --setup` and
 `scripts/dev/check.sh --all`. Its handover job rejects removals from boundary paths unless the pull
-request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present. Copy
+request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present through
+the vendored `scripts/dev/handover_check.sh`. Copy
 `templates/update-branches.yml` to `.github/workflows/update-branches.yml` to update open branches
-after a default-branch push and label conflict cases `carry needed`. A repository that already has
-CI jobs keeps them and uses the workflow as the list of steps to move its checks into.
+after a default-branch push and label conflict cases `carry needed`.
+
+Set the optional `UPDATE_BRANCHES_TOKEN` secret to a fine-grained personal access token or GitHub
+App installation token with repository contents and pull-requests write access. An update made with
+that token starts CI through the resulting push. When the secret is absent, the workflow uses its
+`GITHUB_TOKEN` and explicitly dispatches `ci.yml` for the updated pull-request branch, passing the
+pull-request number so the `handover` job can read its base and body. The workflow's `actions: write`
+permission permits that fallback dispatch. After adopting the workflows, check that an automatically
+updated pull request shows the `check` and `handover` CI checks on its new head. A repository that
+already has CI jobs keeps their required names and uses the template as the list of steps to move
+into its `ci.yml`.
 
 ## 5. Check it
 
