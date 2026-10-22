@@ -86,8 +86,10 @@ the same name overrides it. `config/env.example` documents each setting with its
 
 - `jpdev setup DIR [--repo OWNER/NAME] [--branch NAME] [--base origin/main] [--manifest FILE]`:
   clones with `gh repo clone` (or reuses `DIR`), makes the branch from the base, selects the
-  manifest's toolchains (node by nvm version, go by its version when the manifest names one, python and its virtual environment), runs the
-  setup steps under the caps and prints one summary block.
+  manifest's toolchains (node by nvm version, go by its version when the manifest names one,
+  and Python by `python3.X` on PATH or the newest matching pyenv version), creates the declared
+  Python virtual environment, runs the setup steps in it under the caps, and prints one summary
+  block. `jpdev check` creates a missing declared environment before it runs checks too.
 - `jpdev check [--only NAME,...] [--skip NAME,...] [--all] [--manifest FILE]`: runs the checks in
   order, each under its toolchain's cap, and stops at the first failure unless `--all`. The
   block names each check, pass or fail, the lines its `summary` regex matched, and the first 40
@@ -135,8 +137,16 @@ the same name overrides it. `config/env.example` documents each setting with its
   share caches below `BASE/.jpdev-shared`; `--small` enforces the manifest handover paths and line
   bound after the run; `--resume` continues the named thread. Every detected thread id is written
   to `.jpdev/output/thread`.
-- `jpdev codex brief-template`: prints `templates/codex-brief.md`, a brief skeleton that tells
+- `jpdev codex review --brief FILE --model M --effort E --dir CLONE [--pr N | --issue N]
+  [--repo OWNER/NAME] [--out FILE] [--sandbox read-only|workspace-write]`: checks the brief and
+  runs `codex exec` with the model, effort and sandbox explicit and stdin closed. It writes the
+  final message to `--out` (default `.jpdev/output/review.md`), refuses the result if HEAD or a
+  tracked file changed, and prints the reviewed SHA. The default `workspace-write` sandbox lets
+  review probes use temporary files; the prompt and post-run gate keep the tracked tree read-only.
+  It never commits, pushes or posts. Use `jpdev record post` to post the saved report.
+- `jpdev codex brief-template [--review]`: prints `templates/codex-brief.md`, a brief skeleton that tells
   Codex to write `msg.txt` and `pr.md` and not to commit.
+  `--review` prints the reviewer skeleton with its read-only rules and findings-first report.
 - `jpdev codex check-brief FILE`: exits 1 and names the neutral phrasing for each word of
   [`config/codex-words.txt`](config/codex-words.txt) (and of the file `JPDEV_CODEX_WORDS` names)
   that the brief holds. `codex run` runs the same check first and does not start the run on a
@@ -152,9 +162,12 @@ the same name overrides it. `config/env.example` documents each setting with its
 | `python` | `ulimit -v` and `timeout` |
 | `shell` | `timeout` only |
 
-When the manifest declares a virtual environment, its `bin` is first on PATH for every step, whatever
-the step's toolchain (the toolchain still decides the cap), so a node or Go step that runs a python
-script uses the environment's interpreter and packages.
+When the manifest declares a virtual environment, setup and checks create it when it is missing.
+They use `python3.X` on PATH first, then the newest `~/.pyenv/versions/3.X.*/bin/python3`, and
+refuse before any step if the declared release is unavailable. Its `bin` is first on PATH for
+every step, whatever the step's toolchain (the toolchain still decides the cap), so a node or Go
+step that runs a Python script uses the environment's interpreter and packages. Summary rows for
+Python steps, and for other steps that invoke `python3`, name the interpreter used.
 
 ## What is here
 
@@ -164,7 +177,8 @@ script uses the environment's interpreter and packages.
 - `templates/dev.json`, `templates/dev.schema.json`: the manifest by example and its JSON Schema.
 - `templates/check.sh` and `lib/handover_check.sh`: the public checks a repository vendors as
   `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`.
-- `templates/codex-brief.md`: the brief skeleton `jpdev codex brief-template` prints.
+- `templates/codex-brief.md`, `templates/codex-review-brief.md`: the build and review brief
+  skeletons `jpdev codex brief-template` prints.
 - `templates/AGENTS.md`, `templates/CLAUDE.md`: the agent instructions (one text, generated from
   the other by `scripts/sync-agent-docs.sh`).
 - `templates/ci-check.yml`: the CI step list.

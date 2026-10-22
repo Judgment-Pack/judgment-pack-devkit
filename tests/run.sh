@@ -12,6 +12,7 @@ unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_U
 unset JPDEV_ROOT JPDEV_WRAP JPDEV_NODE_BIN JPDEV_GO_BIN JPDEV_LOGDIR JPDEV_STEP_TIMEOUT
 jpdev=$kit/bin/jpdev
 fixture=$kit/tests/fixture/dev.json
+system_python=$(command -v python3)
 pass=0 fail=0
 
 ok() { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
@@ -167,6 +168,30 @@ cat > "$vclone/dev.json" <<'JSON'
 JSON
 out=$(cd "$vclone" && "$jpdev" check 2>/dev/null) && s=0 || s=$?
 expect "the python step runs in the virtual environment the manifest names" 0 'from-the-venv' "$out" "$s"
+
+# a missing declared environment is made with the declared interpreter before a check runs
+madeclone=$work/madeclone
+mkdir -p "$madeclone" "$work/pythonbin"
+git init -q -b main "$madeclone"
+python_release=$($system_python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+ln -s "$system_python" "$work/pythonbin/python$python_release"
+cat > "$madeclone/dev.json" <<JSON
+{"version": 1, "toolchains": {"python": {"version": "$python_release", "venv": "made-venv"}}, "checks": [{"name": "python-version", "run": "python3 -c 'import sys; print(sys.executable)'", "toolchain": "python", "summary": "made-venv"}]}
+JSON
+out=$(cd "$madeclone" && PATH=$work/pythonbin:$PATH "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check makes a missing declared virtual environment" 0 'PASS +python-version' "$out" "$s"
+if [ -x "$madeclone/made-venv/bin/python3" ]; then ok "the declared virtual environment holds python3"; else bad "the declared virtual environment holds python3"; fi
+expect "a python step summary names its interpreter" 0 'python-version +.*python .*made-venv/bin/python' "$out" "$s"
+rm -rf "$madeclone/made-venv"
+out=$(cd "$madeclone" && JPDEV_ROOT=$madeclone PATH=$work/pythonbin:$PATH "$kit/templates/check.sh" --manifest "$madeclone/dev.json" 2>&1) && s=0 || s=$?
+expect "the vendored runner makes a missing declared virtual environment" 0 'PASS +python-version' "$out" "$s"
+
+cat > "$madeclone/dev.json" <<'JSON'
+{"version": 1, "toolchains": {"python": {"version": "3.99", "venv": "absent-venv"}}, "checks": [{"name": "must-not-run", "run": "touch ran", "toolchain": "python"}]}
+JSON
+out=$(cd "$madeclone" && PATH=$work/pythonbin:$PATH "$jpdev" check 2>&1) && s=0 || s=$?
+expect "jpdev check refuses an unavailable declared Python before a step" 2 'python 3\.99 is not installed.*python3\.99 on PATH, or a pyenv version' "$out" "$s"
+if [ ! -e "$madeclone/ran" ]; then ok "an unavailable declared Python runs no check"; else bad "an unavailable declared Python runs no check"; fi
 
 # the virtual environment is first on PATH for every step, whatever its toolchain
 pyclone=$work/pyclone
@@ -716,7 +741,7 @@ out=$("$jpdev" codex run --no-commit --brief "$work/dirty-brief.md" --model m --
 expect "codex run refuses a brief with a listed word" 1 'refused: .* holds words the content filter trips on' "$out" "$s"
 if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused brief did not start codex"; else ok "a refused brief did not start codex"; fi
 out=$("$jpdev" codex 2>&1) && s=0 || s=$?
-expect "codex needs a subcommand" 2 'the subcommands are run, check-brief and brief-template' "$out" "$s"
+expect "codex needs a subcommand" 2 'the subcommands are run, review, check-brief and brief-template' "$out" "$s"
 # the git part: commit, push, pull request, from the msg.txt and pr.md codex wrote
 export STUB_GIT_ARGS=$work/git-args
 mkdir -p "$work/ghbin"
@@ -876,6 +901,33 @@ printf 'stale\n' > "$cxrepo/msg.txt"
 out=$(STUB_CODEX_EDIT=1 cx_run --no-push) && s=0 || s=$?
 expect "a msg.txt left by an earlier run is not used" 1 'wrote no msg.txt' "$out" "$s"
 
+# codex review: a checked brief, explicit model/effort, a final-message record and no git writes
+reviewrepo=$work/reviewrepo
+mkdir -p "$reviewrepo"
+git init -q -b review "$reviewrepo"
+printf '# Rules\n' > "$reviewrepo/AGENTS.md"
+printf 'unchanged\n' > "$reviewrepo/file.txt"
+git -C "$reviewrepo" add .
+git -C "$reviewrepo" commit -q -m base
+printf 'Review the change and report findings first.\n' > "$work/review-brief.md"
+review_sha=$(git -C "$reviewrepo" rev-parse HEAD)
+codex_args
+out=$(echo junk | "$jpdev" codex review --brief "$work/review-brief.md" --model review-model --effort high \
+  --dir "$reviewrepo" --pr 23 --repo Example/repo --out "$work/review.md" 2>&1) && s=0 || s=$?
+expect "codex review prints the reviewed SHA" 0 "reviewed $review_sha" "$out" "$s"
+if [ "$(cat "$work/review.md")" = 'stub final message' ]; then ok "codex review writes the final message to --out"; else bad "codex review writes the final message to --out" "$(cat "$work/review.md" 2>/dev/null)"; fi
+for a in exec -m review-model 'model_reasoning_effort=high' --sandbox workspace-write -C "$reviewrepo" -o "$work/review.md"; do
+  if has_arg "$a"; then ok "codex review passes $a"; else bad "codex review passes $a" "$(tr '\0' ' ' < "$STUB_CODEX_ARGS")"; fi
+done
+if [ -f "$STUB_CODEX_STDIN" ] && [ ! -s "$STUB_CODEX_STDIN" ]; then ok "codex review closes stdin"; else bad "codex review closes stdin"; fi
+
+codex_args
+out=$(STUB_CODEX_EDIT=1 STUB_CODEX_EDIT_FILE=file.txt "$jpdev" codex review --brief "$work/review-brief.md" \
+  --model review-model --effort low --dir "$reviewrepo" --sandbox read-only 2>&1) && s=0 || s=$?
+expect "codex review refuses tracked changes made during the review" 1 'refused: the review changed tracked files' "$out" "$s"
+if has_arg read-only; then ok "codex review accepts and passes the read-only sandbox"; else bad "codex review accepts and passes the read-only sandbox"; fi
+git -C "$reviewrepo" restore file.txt
+
 # carry: a clean merge is signed and pushed; a conflict uses the generated Codex brief
 mkdir -p "$work/carrybin"
 cat > "$work/carrybin/gh" <<'STUB'
@@ -949,6 +1001,11 @@ expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
 expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
 out=$("$jpdev" codex check-brief --build "$kit/templates/codex-brief.md" 2>&1) && s=0 || s=$?
 expect "the brief template passes check-brief --build" 0 'no word of the filter list' "$out" "$s"
+out=$("$jpdev" codex brief-template --review 2>&1) && s=0 || s=$?
+expect "the review brief template names the reviewer role" 0 '^# Review brief:' "$out" "$s"
+expect "the review brief template requires findings first" 0 'Findings first' "$out" "$s"
+expect "the review brief template forbids repository writes" 0 'Do not change tracked files' "$out" "$s"
+expect "the review brief template carries the merge line" 0 '^merge: yes \| after fixes$' "$out" "$s"
 unset STUB_GIT_ARGS STUB_GH_CALLS STUB_GH_ARGS STUB_GH_BODY GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 PATH=$oldpath
 unset STUB_CODEX_ARGS STUB_CODEX_CWD STUB_CODEX_STDIN STUB_CODEX_ENV
@@ -968,7 +1025,11 @@ origin=$work/origin.git
 seed=$work/seed
 git init -q --bare -b main "$origin"
 git init -q -b main "$seed"
-cp "$fixture" "$seed/dev.json"
+mkdir -p "$work/setup-pythonbin"
+ln -s "$system_python" "$work/setup-pythonbin/python$python_release"
+cat > "$seed/dev.json" <<JSON
+{"version": 1, "toolchains": {"python": {"version": "$python_release", "venv": "setup-venv"}}, "setup": [{"name": "prepare", "run": "python3 -c 'import pathlib, sys; pathlib.Path(\"prepared-by\").write_text(sys.executable)'", "toolchain": "python"}], "checks": [{"name": "first", "run": "true"}]}
+JSON
 git -C "$seed" add dev.json
 git -C "$seed" -c user.name=test -c user.email=test@example.com commit -q -m seed
 git -C "$seed" remote add origin "$origin"
@@ -976,13 +1037,14 @@ git -C "$seed" push -q origin main
 git clone -q "$origin" "$work/clone"
 mkdir -p "$work/clone/scripts/dev"
 cp "$kit/templates/check.sh" "$work/clone/scripts/dev/check.sh"
-out=$("$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
+out=$(PATH=$work/setup-pythonbin:$PATH "$jpdev" setup "$work/clone" --repo Example/repo --branch topic --base origin/main 2>&1) && s=0 || s=$?
 expect "setup makes the branch from the base" 0 'branch +topic at' "$out" "$s"
 expect "setup runs the manifest's setup steps" 0 'PASS +prepare' "$out" "$s"
 expect "setup names the toolchains" 0 'python +Python' "$out" "$s"
 expect "setup names both scripts in its adoption guidance" 0 'vendor scripts/dev/check\.sh and scripts/dev/handover_check\.sh together' "$out" "$s"
+expect "setup makes the declared virtual environment before its steps" 0 '/setup-venv/bin/python' "$(cat "$work/clone/prepared-by" 2>/dev/null)" "$s"
 if [ "$(git -C "$work/clone" rev-parse --abbrev-ref HEAD)" = topic ]; then ok "setup leaves the clone on the new branch"; else bad "setup leaves the clone on the new branch"; fi
-out=$("$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
+out=$(PATH=$work/setup-pythonbin:$PATH "$jpdev" setup "$work/clone" --branch topic 2>&1) && s=0 || s=$?
 expect "setup reuses an existing clone and an existing branch" 0 'branch +topic' "$out" "$s"
 out=$("$jpdev" setup "$work/not-a-clone" 2>&1) && s=0 || s=$?
 expect "setup asks for --repo when the directory is not a clone" 2 'give --repo' "$out" "$s"

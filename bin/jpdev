@@ -39,7 +39,12 @@ usage: jpdev COMMAND [ARGS]
                      model, effort and sandbox explicit, stdin closed and the transcript in the
                      log; print the final message and the exit code; then commit the tracked
                      changes (msg.txt, signed off), push, and open the pull request (pr.md)
-  codex brief-template
+  codex review --brief FILE --model M --effort low|medium|high --dir CLONE
+        [--pr N | --issue N] [--repo OWNER/NAME] [--out FILE]
+        [--sandbox read-only|workspace-write]
+                     run a review with stdin closed, write its final message, refuse tracked
+                     changes after the run, and print the reviewed SHA; never commit, push or post
+  codex brief-template [--review]
                      print the brief skeleton: what Codex writes (msg.txt, pr.md) and does not do
   codex check-brief [--build] FILE
                      refuse a brief that holds a word of the filter list, and suggest the
@@ -396,11 +401,73 @@ cmd_codex() {
   [ $# -eq 0 ] || shift
   case $sub in
     run) codex_run "$@" ;;
+    review) codex_review "$@" ;;
     check-brief) codex_check_brief "$@" ;;
-    brief-template) codex_brief_template ;;
+    brief-template) codex_brief_template "$@" ;;
     -h | --help | help) usage; exit 0 ;;
-    *) jpdev_die "codex: the subcommands are run, check-brief and brief-template" ;;
+    *) jpdev_die "codex: the subcommands are run, review, check-brief and brief-template" ;;
   esac
+}
+
+# codex_review: run Codex from a review brief and retain only its final report. The prompt and the
+# post-run git gate make the role read-only; workspace-write remains the default because shell
+# probes need temporary files.
+codex_review() {
+  local brief="" model=$JPDEV_CODEX_MODEL_DEFAULT effort="" dir="" sandbox=workspace-write
+  local out="" repo="" pr="" issue="" log=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --brief) need_value "$@"; brief=$2; shift 2 ;;
+      --model) need_value "$@"; model=$2; shift 2 ;;
+      --effort) need_value "$@"; effort=$2; shift 2 ;;
+      --dir) need_value "$@"; dir=$2; shift 2 ;;
+      --sandbox) need_value "$@"; sandbox=$2; shift 2 ;;
+      --out) need_value "$@"; out=$2; shift 2 ;;
+      --repo) need_value "$@"; repo=$2; shift 2 ;;
+      --pr) need_value "$@"; pr=$2; shift 2 ;;
+      --issue) need_value "$@"; issue=$2; shift 2 ;;
+      -h | --help) usage; exit 0 ;;
+      *) jpdev_die "codex review: unknown argument $1" ;;
+    esac
+  done
+  [ -f "$brief" ] || jpdev_die "codex review: --brief must name a file"
+  [ -n "$model" ] || jpdev_die "codex review: --model is needed (the model is always passed; JPDEV_CODEX_MODEL_DEFAULT can name one)"
+  case $effort in low | medium | high) ;; *) jpdev_die "codex review: --effort is low, medium or high" ;; esac
+  case $sandbox in read-only | workspace-write) ;; *) jpdev_die "codex review: --sandbox is read-only or workspace-write" ;; esac
+  [ -n "$dir" ] || jpdev_die "codex review: --dir is needed"
+  [ -d "$dir" ] || jpdev_die "codex review: --dir is not a directory"
+  { [ -z "$pr" ] || [ -z "$issue" ]; } || jpdev_die "codex review: give --pr N or --issue N, not both"
+  dir=$(cd "$dir" && git rev-parse --show-toplevel) || jpdev_die "codex review: --dir is not a git clone"
+  [ -f "$dir/AGENTS.md" ] || jpdev_die "codex review: $dir holds no AGENTS.md, which the prompt names as the rules"
+  command -v codex > /dev/null || jpdev_die "codex review: codex is not on PATH"
+  brief=$(cd "$(dirname "$brief")" && pwd)/$(basename "$brief")
+  codex_check_brief "$brief"
+  local sha
+  sha=$(git -C "$dir" rev-parse HEAD) || jpdev_die "codex review: cannot read HEAD"
+  if [ -z "$out" ]; then out=$dir/.jpdev/output/review.md; fi
+  mkdir -p "$(dirname "$out")" "$JPDEV_SCRATCH/logs"
+  out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
+  log=$JPDEV_SCRATCH/logs/codex-review-$(basename "$dir")-$(date +%Y%m%dT%H%M%S).log
+  local prompt="The rules are this repository's AGENTS.md; follow them. Act as its reviewer. Do not change tracked files or write git metadata."
+  if [ -n "$pr" ]; then prompt+=$'\n'"Review pull request #$pr${repo:+ of $repo} at head $sha."; fi
+  if [ -n "$issue" ]; then prompt+=$'\n'"Review issue #$issue${repo:+ of $repo} at head $sha."; fi
+  prompt+=$'\n'"$(cat "$brief")"
+  local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
+  if [ "$sandbox" = workspace-write ]; then args+=(-c sandbox_workspace_write.network_access=true); fi
+  args+=(--json -C "$dir" -o "$out" "$prompt")
+  jpdev_log "codex review: model $model, effort $effort, sandbox $sandbox, in $dir; transcript $log"
+  (cd "$dir" && codex "${args[@]}" < /dev/null > "$log" 2>&1)
+  local status=$?
+  [ "$status" -eq 0 ] || { echo "== codex review exit $status (transcript: $log) =="; return "$status"; }
+  [ -s "$out" ] || { echo "jpdev codex review: refused: codex wrote no final message" >&2; return 1; }
+  if [ "$(git -C "$dir" rev-parse HEAD)" != "$sha" ] || ! git -C "$dir" diff --quiet || ! git -C "$dir" diff --cached --quiet; then
+    echo "jpdev codex review: refused: the review changed tracked files or HEAD; restore the clone before continuing" >&2
+    return 1
+  fi
+  local verdict
+  verdict=$(grep -E '^(mergeable|not mergeable) — head ' "$out" | tail -n 1)
+  [ -z "$verdict" ] || printf '%s\n' "$verdict"
+  echo "jpdev codex review: reviewed $sha; record $out; transcript $log"
 }
 
 # codex_check_brief [--build] FILE: check the build heading and the filter-list words in FILE.
@@ -722,8 +789,14 @@ codex_publish() {
   exit 0
 }
 
-# codex_brief_template prints the brief skeleton a Codex build starts from.
-codex_brief_template() { cat "$kit/templates/codex-brief.md"; }
+# codex_brief_template prints the brief skeleton a Codex build or review starts from.
+codex_brief_template() {
+  case ${1:-} in
+    "") cat "$kit/templates/codex-brief.md" ;;
+    --review) [ $# -eq 1 ] || jpdev_die "codex brief-template: --review takes no value"; cat "$kit/templates/codex-review-brief.md" ;;
+    *) jpdev_die "codex brief-template: unknown argument $1" ;;
+  esac
+}
 
 # cmd_carry merges the current base into a pull-request branch. Conflicts are handed to the same
 # codex_run path as a normal --no-pr build, using a generated brief.
@@ -805,7 +878,7 @@ PY
 }
 
 cmd_env() {
-  local v cfg
+  local v cfg manifest pyv venv chosen
   cfg=$(jpdev_config_file)
   printf 'jpdev %s\nkit      %s\nconfig   %s (%s)\n\n' "$JPDEV_VERSION" "$kit" "$cfg" "$([ -f "$cfg" ] && echo present || echo absent)"
   for v in "${JPDEV_SETTINGS[@]}"; do printf '%-22s %-48s %s\n' "$v" "${!v}" "${JPDEV_SOURCE[$v]}"; done
@@ -816,6 +889,19 @@ cmd_env() {
   done
   printf '%-10s %s\n' python3.12 "$(jpdev_python_bin 3.12 || echo none)"
   printf '%-10s %s\n' node22 "$(jpdev_node_bin 22 || echo "none under $JPDEV_NVM_DIR")"
+  manifest=${JPDEV_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}/dev.json
+  if [ -f "$manifest" ]; then
+    pyv=$(jpdev_manifest_get "$manifest" toolchains python version)
+    venv=$(jpdev_manifest_get "$manifest" toolchains python venv)
+    if [ -n "$venv" ] && [ -x "${manifest%/dev.json}/$venv/bin/python" ]; then
+      chosen=${manifest%/dev.json}/$venv/bin/python
+    elif [ -n "$pyv" ]; then
+      chosen=$(jpdev_python_bin "$pyv" || echo "not installed")
+    else
+      chosen=$(command -v python3 || echo "not on PATH")
+    fi
+    printf '%-10s %s\n' manifest-python "$chosen${pyv:+ (declared $pyv)}${venv:+ (venv $venv)}"
+  fi
   [ -f "$JPDEV_NAME_PATTERNS" ] || echo "name-pattern file absent: jpdev record post refuses to post without --no-name-check"
 }
 

@@ -7,7 +7,8 @@
 # failure unless the step is marked optional: true. Standard library python3 only. jpdev sets JPDEV_WRAP to add its caps around each step.
 root=${JPDEV_ROOT:-$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)} || exit 2
 exec python3 -I - "$root" "$@" <<'PY'
-import json, os, re, signal, subprocess, sys, time
+import json, os, re, shutil, signal, subprocess, sys, time
+from pathlib import Path
 root, args = sys.argv[1], sys.argv[2:]
 opt = {'only': set(), 'skip': set(), 'all': False, 'setup': False, 'manifest': root + '/dev.json'}
 while args:
@@ -17,6 +18,39 @@ while args:
     elif a in ('--all', '--setup'): opt[a[2:]] = True
     else: sys.exit('check.sh: unknown argument ' + a)
 m = json.load(open(opt['manifest'], encoding='utf-8'))
+python = m.get('toolchains', {}).get('python', {})
+venv = python.get('venv')
+run_env = dict(os.environ)
+if venv:
+    target = Path(root, venv)
+    interpreter = target / 'bin' / 'python3'
+    if not interpreter.is_file():
+        version = python.get('version')
+        creator = None
+        if version:
+            candidate = shutil.which('python' + version)
+            def reports_version(path):
+                probe = subprocess.run([path, '-c', 'import sys; print("%d.%d" % sys.version_info[:2])'],
+                                       text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                return probe.returncode == 0 and probe.stdout.strip() == version
+            if candidate and reports_version(candidate): creator = candidate
+            if not creator:
+                def version_key(path):
+                    return tuple(int(part) if part.isdigit() else part for part in path.parent.parent.name.split('.'))
+                candidates = sorted((path for path in Path.home().glob('.pyenv/versions/' + version + '.*/bin/python3')
+                                     if reports_version(str(path))), key=version_key)
+                if candidates: creator = str(candidates[-1])
+            if not creator:
+                print('check.sh: python %s is not installed (python%s on PATH, or a pyenv version)' %
+                      (version, version), file=sys.stderr)
+                sys.exit(2)
+        else:
+            creator = sys.executable
+        made = subprocess.run([creator, '-m', 'venv', str(target)])
+        if made.returncode:
+            print('check.sh: could not make the virtual environment %s with %s' % (venv, creator), file=sys.stderr)
+            sys.exit(2)
+    run_env['PATH'] = str(target / 'bin') + os.pathsep + run_env.get('PATH', '')
 steps = m.get('setup', []) if opt['setup'] else m['checks'] + ([dict(name='parity', **m['parity'])] if 'parity' in m else [])
 unknown = (opt['only'] | opt['skip']) - set(s['name'] for s in steps)
 if unknown: print('check.sh: no step named ' + ', '.join(sorted(unknown)), file=sys.stderr); sys.exit(2)
@@ -34,11 +68,18 @@ for c in steps:
     if wrap: cmd = [wrap, c.get('toolchain', 'shell'), '--'] + cmd
     tmo = c.get('timeout', 1200)
     t0 = time.time(); print('check: running ' + n, file=sys.stderr, flush=True)
+    step_env = dict(run_env, JPDEV_STEP_TIMEOUT=str(tmo))
     p = subprocess.Popen(cmd, cwd=os.path.join(root, c.get('cwd', '.')), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, text=True, errors='replace', start_new_session=True, env=dict(os.environ, JPDEV_STEP_TIMEOUT=str(tmo)))
+                         stderr=subprocess.STDOUT, text=True, errors='replace', start_new_session=True, env=step_env)
     try: out, _ = p.communicate(timeout=None if wrap else tmo)
     except subprocess.TimeoutExpired: os.killpg(p.pid, signal.SIGKILL); out = p.communicate()[0] + '\ncheck: stopped for time\n'
     lines, took = out.splitlines(), '%ds' % (time.time() - t0)
+    if c.get('toolchain') == 'python' or re.search(r'(^|[^A-Za-z0-9_])python3([^A-Za-z0-9_]|$)', c['run']):
+        executable = str(Path(root, venv, 'bin', 'python3')) if venv else shutil.which('python3', path=step_env.get('PATH'))
+        if executable:
+            found = subprocess.run([executable, '--version'], text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, env=step_env).stdout.strip()
+            took += ', python %s (%s)' % (executable, found)
     if logdir: os.makedirs(logdir, exist_ok=True); open('%s/%s.log' % (logdir, n), 'w').write(out)
     hit = [l.strip() for l in lines if c.get('summary') and re.search(c['summary'], l)]
     note = ['    ' + l for l in (hit if len(hit) <= 3 else ['%d lines matched; last: %s' % (len(hit), hit[-1])])]
