@@ -2,7 +2,9 @@
 
 ## Rules
 Read this repository's AGENTS.md and follow it. Work only in the current directory. Start no
-sub-agents. Never use a pattern kill (`pkill`, `killall`).
+sub-agents. Temporary files belong beneath `$JPDEV_SCRATCH` (including `$TMPDIR`),
+never loose in the system temporary directory. Give temporary directories a session prefix.
+Never use a pattern kill (`pkill`, `killall`).
 
 You cannot write `.git` here, so do not run `git commit`, `git push` or `gh`. Edit the files, run
 the repository's check list once (`scripts/dev/check.sh`, or `jpdev check`), and write the two
