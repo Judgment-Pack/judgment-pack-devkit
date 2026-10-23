@@ -107,12 +107,15 @@ the same name overrides it. `config/env.example` documents each setting with its
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`,
   so the push uses the `gh` login and no stored credential. It refuses `--force`, `-f` and a
   `+` refspec.
-- `jpdev clean [--root DIR]... [--older-than DURATION] [--yes]`: dry-run cleanup of explicit
+- `jpdev clean [--root DIR]... [--older-than DURATION] [--min-transcript-bytes N] [--yes]`: dry-run cleanup of explicit
   session disposal seals; no roots means no deletion. Enroll an empty session root with
   `jpdev clean init --root DIR --session TOKEN`, then attest completed disposable paths with
   `jpdev clean seal --root DIR --session TOKEN --path REL --kind KIND` (worktree, review, scratch,
   transcript or cache). Scratch also needs `--base BASE --removed-worktree OLD`; shared caches need
   `--base BASE`. The default age is seven days (`7d`); durations use integer s/m/h/d/w units.
+  Transcripts require at least 10485760 logical regular-file bytes (10 MiB); use
+  `--min-transcript-bytes N` to change this inclusive, transcript-only floor, or `0` to disable it.
+  Bare or saved Git directories and inherited Git evidence redirection are refused.
   `.jpdev-clean-keep` holds exact relative reserves. JSON Lines reports candidates, sizes, reasons,
   outcomes and totals; refusals exit nonzero. Linux host process visibility, disposal inventory,
   Git/remote/PR evidence and all deletion checks remain mandatory with `--yes`. See
