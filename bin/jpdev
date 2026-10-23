@@ -22,6 +22,12 @@ usage: jpdev COMMAND [ARGS]
                      name-pattern file, then post the file
   push [BRANCH]      push BRANCH (default: the current branch) to origin with the gh credential
                      helper and no stored credential; refuses --force and -f
+  clean [--root DIR]... [--older-than DURATION] [--yes]
+                     inspect explicit session disposal seals; dry run by default
+  clean init --root DIR --session TOKEN
+  clean seal --root DIR --session TOKEN --path REL --kind KIND
+             [--base DIR] [--removed-worktree DIR]
+                     enroll an empty session root, then seal session-created disposable state
   worktree add BASE BRANCH [DIR]
   worktree list BASE
   worktree remove DIR [--force]
@@ -188,13 +194,28 @@ cmd_mutants() {
   copy=$JPDEV_SCRATCH/mutants/$(jpdev_clone_key "$root")-$$
   mkdir -p "$copy"
   trap 'rm -rf -- "${copy:?}"' EXIT
-  rsync -a --exclude .git --exclude node_modules --exclude .venv "$root/" "$copy/" || jpdev_die "mutants: the scratch copy failed"
-  local found rel
+  # A builder's scratch and TMPDIR can be below the clone. Never copy generated state
+  # or the destination back into itself; preserve their parents and ordinary source siblings.
+  local exclude=(--exclude .git --exclude node_modules --exclude .venv) prune=(-path "$root/.git")
+  local generated generated_real escaped rel
+  for generated in "$copy" "$JPDEV_SCRATCH" "${TMPDIR:-}"; do
+    [ -d "$generated" ] || continue
+    generated_real=$(cd "$generated" && pwd -P) || jpdev_die "mutants: cannot resolve generated directory"
+    if [ "$generated_real" != "$root" ] && [[ $generated_real = "$root/"* ]]; then
+      rel=${generated_real#"$root"/}
+      escaped=${rel//\\/\\\\}; escaped=${escaped//\*/\\*}; escaped=${escaped//\?/\\?}; escaped=${escaped//\[/\\[}
+      exclude+=(--exclude "/$escaped/")
+      escaped=${generated_real//\\/\\\\}; escaped=${escaped//\*/\\*}; escaped=${escaped//\?/\\?}; escaped=${escaped//\[/\\[}
+      prune+=(-o -path "$escaped")
+    fi
+  done
+  rsync -a "${exclude[@]}" "$root/" "$copy/" || jpdev_die "mutants: the scratch copy failed"
+  local found
   while IFS= read -r found; do
     rel=${found#"$root"/}
     mkdir -p "$copy/$(dirname "$rel")"
     ln -s "$found" "$copy/$rel"
-  done < <(find "$root" -name node_modules -type d -not -path '*/node_modules/*' -not -path "$root/.git/*" -prune -print)
+  done < <(find "$root" \( "${prune[@]}" \) -prune -o -name node_modules -type d -prune -print)
   local args="" row
   for row in "${rows[@]}"; do args+=$(printf ' --row %q' "$row"); done
   local out=$copy/.jpdev-mutants.out
@@ -654,6 +675,8 @@ codex_run() {
     [ -n "${GOFLAGS:-}" ] || export GOFLAGS=$codex_goflags
     [ -n "${npm_config_cache:-}" ] || export npm_config_cache=$codex_npm_cache
     [ -n "${XDG_CACHE_HOME:-}" ] || export XDG_CACHE_HOME=$codex_xdg_cache
+    export TMPDIR=$codex_scratch/tmp
+    mkdir -p "$TMPDIR" || exit 2
     codex "${args[@]}" < /dev/null > "$log" 2>&1
   )
   local status=$?
@@ -998,6 +1021,7 @@ case ${1:-} in
   mutants) shift; cmd_mutants "$@" ;;
   record) shift; cmd_record "$@" ;;
   push) shift; cmd_push "$@" ;;
+  clean) shift; exec python3 -I "$kit/lib/clean.py" "$@" ;;
   worktree) shift; cmd_worktree "$@" ;;
   carry) shift; cmd_carry "$@" ;;
   codex) shift; cmd_codex "$@" ;;

@@ -50,7 +50,8 @@ Before handover, a builder runs the self-checks in AGENTS.md on its own head. It
 touched check steps while iterating and runs the whole check list exactly once at the end. CI must
 be green before any review begins. `jpdev codex run` gives Codex clone-local scratch, lock, Go and
 npm caches and an XDG cache when those variables are empty, and creates their directories under
-the clone.
+the clone. Builder `TMPDIR` is always created under its effective scratch, including when an
+external temporary directory was inherited.
 
 After a fix round that closed only MEDIUM findings, the review re-read may use the cheaper tier.
 After a HIGH finding, the re-read uses the same tier as the review of record. A HIGH is fixed in the
@@ -135,3 +136,105 @@ verified before the release is announced.
 Tracked files, commit messages, pull request bodies and issue comments carry no
 machine-local paths and no personal names. A person is referred to by role or by handle where
 a reference is needed. Plain, factual wording: what changed, what was checked, what was not.
+
+## Scratch and cleanup
+
+A session removes only state it created. Use `jpdev clean` after the pull request it built or
+reviewed merges, after release, and when disk use exceeds 85%. Never remove another session's
+data, a live checkout, or an operator reserve. Operator approval authorizes one narrow
+`jpdev clean --root DIR --older-than DURATION --yes` invocation; all tool checks still apply.
+Inspect the dry run first. Approval does not transfer ownership of existing state.
+
+Before creating disposable state, initialize an empty, session-created root with
+`jpdev clean init --root DIR --session TOKEN`. TOKEN is 8–80 letters, digits, underscores or
+hyphens, beginning with a letter or digit; choose a unique session prefix. Init creates DIR
+if its parent exists, and refuses a nonempty directory. Put the session's clone, worktrees,
+review rooms, logs and scratch beneath it. Configure `JPDEV_SCRATCH` and other output locations
+there as needed. The wrapper creates builder `TMPDIR` beneath its effective scratch, replacing
+an inherited temporary directory. Temporary files stay in scratch, never loose in the system
+temporary directory; temporary directories carry the session prefix.
+
+After the session finishes writing a disposable path, explicitly attest its ownership and
+contents with `jpdev clean seal --root DIR --session TOKEN --path REL --kind KIND`. This is an
+operator/session assertion that every included file, including untracked, ignored and review
+evidence, was created by this session and is disposable at the requested milestone. Never seal
+someone else's files. Sealing historical unmarked directories is forbidden; init cannot adopt
+their nonempty root. Tools do not automatically seal or infer ownership from a name or UID.
+A changed path needs a new explicit seal after its evidence has been assessed.
+
+Kinds are `worktree`, `review` (including reviewer clones), `transcript` (a log directory
+or an individual regular log/transcript file), `scratch`, and `cache`. Scratch for a removed
+worktree also requires `--base BASE --removed-worktree OLD`; shared base caches require
+`--base BASE`. BASE and OLD are absolute in the stored seal; supply all relevant roots explicitly
+to cleanup. A whole worktree seal may include its own scratch, locks and caches. Seal separate
+scratch/lock/cache directories with `scratch` when they outlive that worktree. Base
+`.jpdev-shared` contents are eligible only once no linked worktree directory remains. Unknown,
+inaccessible, symlinked or out-of-root worktree registration evidence causes refusal. Stale Git
+registration entries for verified absent paths beneath authorized, traversable parents are
+retained and do not count as active users. Cleanup does not prune Git administrative records or
+remove branch refs: a broad prune could affect another session.
+
+`jpdev clean [--root DIR]... [--older-than DURATION] [--yes]` discovers only disposal seals,
+never recursively guesses candidates from directory names. There are no implicit roots; no flags
+means no deletion. Missing roots are reported safely. It defaults to a dry run and seven days;
+DURATION is a nonnegative integer followed by `s`, `m`, `h`, `d` or `w`. Age is measured from the
+newest seal timestamp, candidate directory/file mtime and inventoried content mtime. Thus a new
+seal must age even if its logs are old. There is no size cutoff: sessions can seal large logs
+individually. Paths are root-relative, exact, and cannot contain empty, dot or parent components.
+Overlapping candidate seals are refused. The ownership metadata and keep file are protected.
+
+Place exact root-relative reserves in `DIR/.jpdev-clean-keep`, one per line; blank lines and
+`#` comments are allowed. A reserve protects itself, descendants, and any candidate containing it.
+Invalid or symlinked keep files cause refusal. Roots, the invoking checkout, home, base checkouts
+and any candidate containing an explicitly authorized root are protected. Keep all live checkouts
+and operator reserves in this file even when their names look disposable.
+
+Cleanup requires the recorded inode identities and complete SHA-256/stat inventory to match,
+including all ignored and untracked files. A clean tracked diff is insufficient. Git worktrees
+must have no tracked or staged changes and no unpublished commits reachable from HEAD or any
+local ref, including tags, stashes and other branches. Git metadata must lie beneath an explicitly
+authorized root. Publication is checked against current `git ls-remote --refs origin`, without
+fetching. Locally unavailable remote objects cause refusal. Attached branches require a verified
+origin upstream containing HEAD and a GitHub PR with matching branch and HEAD in CLOSED or
+MERGED state. Detached worktrees and detached reviewer clones use verified remote reachability
+without a PR. Reviewer clones with attached branches use the same upstream and PR checks.
+A reviewer clone with any registered linked worktree remains protected. Git, remote and PR
+evidence must remain available; an unavailable tool, network or
+authentication causes refusal. `gh` is needed only for attached branches.
+
+Deletion requires Linux procfs with the initial host PID namespace (Linux initial namespace inode
+4026531836), the host mount namespace and root view, and readable process evidence for every
+visible process. Processes in another mount namespace or root view cause refusal because path
+aliases cannot establish inactivity. A container, sandbox, PID namespace, hidden process view or permission restriction
+cannot establish host inactivity and is refused. Process cwd, root, executable, open descriptors,
+mappings, command arguments and declared scratch/cache environment paths are checked. Live
+processes are reported by PID and never stopped. Symlinks, special files, nested repositories,
+mount crossings and changed ownership are refused. The tool requires directory descriptors,
+`O_NOFOLLOW` and POSIX locking; unsupported platforms fail closed.
+
+Before removal the tool repeats inspection, moves the candidate to a private sibling quarantine
+name, and rechecks its full inventory, Git state, keeps, root and parent identities and process
+activity. Removal uses directory descriptors, never recursive path-following deletion. Each
+entry's identity and inventory is checked during removal. External linked-worktree refs, HEAD
+and index are rechecked during removal as well. Changes or failures stop that candidate;
+remaining content is restored to its original name when vacant, otherwise retained under
+`.jpdev-clean-removing-<token>` for operator inspection. A refusal can leave a partially removed
+candidate; the remaining evidence is retained and requires assessment before another seal.
+These checks address ordinary concurrent activity; they do not isolate a malicious process with
+the same user identity, which can edit the tool or its ownership records.
+
+Cleanup prints JSON Lines: candidate records contain `root`, root-relative `path`, logical `bytes`,
+`reason` and `outcome`; `--yes` adds per-path `removed` or `refused` outcomes. The final record gives
+`candidates`, logical `bytes`, `removed`, `refused` and `mode`. Totals count inspected candidates,
+including candidates later refused during removal; they do not estimate physical reclaimed space.
+No candidate or root failure is silently skipped. Exit 0 means no refusal (including a no-op or
+absent root), 1 means cleanup reported a refusal/removal failure, and 2 means invalid arguments or
+init/seal refusal. Init and seal print a short confirmation, rather than cleanup JSON Lines.
+
+On-disk metadata is version 1 JSON in `DIR/.jpdev-clean`: `owner.json` records session token and
+root device/inode; each seal is named by SHA-256 of its relative path and records version, session,
+path, kind, candidate device/inode, seal time, content inventory, and optional base/removed paths.
+Inventory keys are relative paths (empty for a standalone transcript file); values hold device,
+inode, mode, logical size, nanosecond mtime/ctime, and SHA-256 for regular files. Records must be
+regular, session-user-owned files, not writable by group/other, and at most 16 MiB. Root ownership
+records and reserves are retained. They are local session evidence, never repository content.

@@ -7,6 +7,9 @@ work=$(mktemp -d)
 trap 'rm -rf -- "${work:?}"' EXIT
 export JPDEV_SCRATCH=$work/scratch XDG_CONFIG_HOME=$work/config HOME=$work/home
 mkdir -p "$HOME" "$XDG_CONFIG_HOME"
+# A clone-local TMPDIR must not make an outside-repository fixture discover the kit.
+GIT_CEILING_DIRECTORIES="$(dirname "$work")${GIT_CEILING_DIRECTORIES:+:$GIT_CEILING_DIRECTORIES}"
+export GIT_CEILING_DIRECTORIES
 unset CI JPDEV_VENV JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB JPDEV_GO_TIMEOUT_S JPDEV_PY_ULIMIT_KB JPDEV_NVM_DIR JPDEV_GO_SDK_DIR JPDEV_NAME_PATTERNS JPDEV_CODEX_MODEL_DEFAULT JPDEV_CODEX_SANDBOX JPDEV_CODEX_WORDS JPDEV_FIXTURE_UNSET
 # What jpdev check exports to its steps: a run of these tests under it must not inherit it.
 unset JPDEV_ROOT JPDEV_WRAP JPDEV_NODE_BIN JPDEV_GO_BIN JPDEV_LOGDIR JPDEV_STEP_TIMEOUT
@@ -538,6 +541,22 @@ if [ -e "$kit/tests/fixture/.mutated" ]; then bad "jpdev mutants leaves the clon
 if [ -e "$kit/.mutated" ]; then bad "jpdev mutants ran in the clone itself"; rm -f "$kit/.mutated"; else ok "jpdev mutants ran in a scratch copy"; fi
 if ls "$JPDEV_SCRATCH"/mutants/* > /dev/null 2>&1; then bad "jpdev mutants removes its scratch copy"; else ok "jpdev mutants removes its scratch copy"; fi
 
+# Explicit clone-local scratch/TMPDIR fixture: source siblings survive; generated trees do not.
+nested_mutants=$work/nested-mutants
+mkdir -p "$nested_mutants/state/tmp/node_modules" "$nested_mutants/state/scratch"
+printf 'source sibling\n' > "$nested_mutants/state/keep"
+git init -q -b main "$nested_mutants"
+cat > "$nested_mutants/dev.json" <<'JSON'
+{"version":1,"checks":[],"mutants":{"run":"bash probe.sh {rows}","toolchain":"shell"}}
+JSON
+cat > "$nested_mutants/probe.sh" <<'SH'
+#!/usr/bin/env bash
+[ -f state/keep ] && [ ! -e state/tmp ] && [ ! -e state/scratch ] || exit 6
+printf '| nested scratch | fixture | caught: generated paths excluded |\n'
+SH
+out=$(cd "$nested_mutants" && TMPDIR=$nested_mutants/state/tmp JPDEV_SCRATCH=$nested_mutants/state/scratch "$jpdev" mutants --row 'nested scratch' 2>&1) && s=0 || s=$?
+expect "mutants excludes nested scratch and TMPDIR while keeping source siblings" 0 'caught +nested scratch' "$out" "$s"
+
 # --- the record gate
 mkdir -p "$work/home" "$XDG_CONFIG_HOME/jpdev"
 printf '%s\n' 'unlikely-name-xyz' > "$XDG_CONFIG_HOME/jpdev/name-patterns"
@@ -657,7 +676,8 @@ cat > "$work/codexbin/codex" <<'STUB'
 printf '%s\0' "$@" > "$STUB_CODEX_ARGS"
 pwd > "$STUB_CODEX_CWD"
 printf '%s\n' "JPDEV_SCRATCH=$JPDEV_SCRATCH" "JPDEV_LOCK=$JPDEV_LOCK" "GOCACHE=${GOCACHE:-}" \
-  "GOFLAGS=${GOFLAGS:-}" "npm_config_cache=${npm_config_cache:-}" "XDG_CACHE_HOME=${XDG_CACHE_HOME:-}" > "$STUB_CODEX_ENV"
+  "GOFLAGS=${GOFLAGS:-}" "npm_config_cache=${npm_config_cache:-}" "XDG_CACHE_HOME=${XDG_CACHE_HOME:-}" \
+  "TMPDIR=${TMPDIR:-}" > "$STUB_CODEX_ENV"
 timeout 2 cat > "$STUB_CODEX_STDIN"
 while [ $# -gt 0 ]; do
   case $1 in -o) printf 'stub final message\n' > "$2" ;; esac
@@ -749,6 +769,23 @@ mkdir -p "$work/norules"
 out=$("$jpdev" codex run --brief "$work/brief.md" --model m --effort low --dir "$work/norules" 2>&1) && s=0 || s=$?
 expect "codex run refuses a directory with no AGENTS.md" 2 'holds no AGENTS.md' "$out" "$s"
 if [ -e "$STUB_CODEX_ARGS" ]; then bad "a refused run did not start codex"; else ok "a refused run did not start codex"; fi
+
+mkdir -p "$work/inherited-outside-temp"
+out=$(TMPDIR=$work/inherited-outside-temp "$jpdev" codex run --no-commit --brief "$work/brief.md" --model model-x --effort low --dir "$work/codexclone" --log "$work/codex-tmpdir.log" 2>&1) && s=0 || s=$?
+expect "codex run sets builder TMPDIR beneath scratch despite an inherited value" 0 "codex exit 0" "$out" "$s"
+if grep -qxF "TMPDIR=$JPDEV_SCRATCH/tmp" "$STUB_CODEX_ENV" && [ -d "$JPDEV_SCRATCH/tmp" ]; then ok "builder TMPDIR is created beneath scratch"; else bad "builder TMPDIR is created beneath scratch" "$(cat "$STUB_CODEX_ENV")"; fi
+out=$("$jpdev" clean 2>&1) && s=0 || s=$?
+expect "clean without roots deletes nothing" 0 '"candidates": 0.*"removed": 0' "$out" "$s"
+out=$("$jpdev" clean --root "$work/absent-clean-root" --yes 2>&1) && s=0 || s=$?
+expect "clean safely reports an absent root" 0 '"outcome": "absent"' "$out" "$s"
+out=$("$jpdev" clean init --root "$work/cleanup-session" --session session-test 2>&1) && s=0 || s=$?
+expect "clean init enrolls a new empty session root" 0 'initialized session cleanup root' "$out" "$s"
+mkdir "$work/cleanup-session/review"
+printf 'session report\n' > "$work/cleanup-session/review/report"
+out=$("$jpdev" clean seal --root "$work/cleanup-session" --session session-test --path review --kind review 2>&1) && s=0 || s=$?
+expect "clean seal records explicit session disposal evidence" 0 'sealed explicit session disposal inventory' "$out" "$s"
+out=$(python3 -I "$kit/tests/clean_test.py" 2>&1) && s=0 || s=$?
+expect "clean deletion boundaries hold in disposable fixtures" 0 '^OK$' "$out" "$s"
 
 # worktrees: creation, linked dependencies, shared caches and guarded removal
 wtorigin=$work/wtorigin.git

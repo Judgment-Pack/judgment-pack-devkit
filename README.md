@@ -96,7 +96,8 @@ the same name overrides it. `config/env.example` documents each setting with its
   lines of a failure. The exit status is the number of failures.
 - `jpdev mutants --row TEXT [--row TEXT]...`: runs the manifest's `mutants` command on a scratch
   copy of the clone (`.git` left out, `node_modules` linked) and prints caught or not caught per
-  row.
+  row. Clone-local scratch, temporary storage and the copy destination are excluded; their source
+  parents and siblings are retained.
 - `jpdev record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run]`: reduces
   the scratch and home paths to `<scratch>` and `<home>`, refuses to post when any local path
   remains, a line matches the name patterns, or the name-pattern file is missing or holds a
@@ -106,6 +107,16 @@ the same name overrides it. `config/env.example` documents each setting with its
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push -u origin BRANCH`,
   so the push uses the `gh` login and no stored credential. It refuses `--force`, `-f` and a
   `+` refspec.
+- `jpdev clean [--root DIR]... [--older-than DURATION] [--yes]`: dry-run cleanup of explicit
+  session disposal seals; no roots means no deletion. Enroll an empty session root with
+  `jpdev clean init --root DIR --session TOKEN`, then attest completed disposable paths with
+  `jpdev clean seal --root DIR --session TOKEN --path REL --kind KIND` (worktree, review, scratch,
+  transcript or cache). Scratch also needs `--base BASE --removed-worktree OLD`; shared caches need
+  `--base BASE`. The default age is seven days (`7d`); durations use integer s/m/h/d/w units.
+  `.jpdev-clean-keep` holds exact relative reserves. JSON Lines reports candidates, sizes, reasons,
+  outcomes and totals; refusals exit nonzero. Linux host process visibility, disposal inventory,
+  Git/remote/PR evidence and all deletion checks remain mandatory with `--yes`. See
+  [Scratch and cleanup](docs/policy.md#scratch-and-cleanup) for setup, formats and limitations.
 - `jpdev worktree add BASE BRANCH [DIR]`, `jpdev worktree list BASE`, and `jpdev worktree remove
   DIR [--force]`: manage sibling worktrees. Removal refuses dirty or unpushed work unless forced.
 - `jpdev carry --pr N --model M --effort low|medium|high [--dir CLONE] [--worktree BASE]`: clone
@@ -136,7 +147,8 @@ the same name overrides it. `config/env.example` documents each setting with its
   asked for was done. `--sandbox danger-full-access` is an explicit option only. Worktree runs
   share caches below `BASE/.jpdev-shared`; `--small` enforces the manifest handover paths and line
   bound after the run; `--resume` continues the named thread. Every detected thread id is written
-  to `.jpdev/output/thread`. A directory passed to `--add` adds every non-ignored file below it,
+  to `.jpdev/output/thread`. The builder always receives an existing `TMPDIR` beneath its effective
+  `JPDEV_SCRATCH`, replacing any inherited temporary directory. A directory passed to `--add` adds every non-ignored file below it,
   except the handover files and caches, and is refused with its path when nothing remains to add.
 - `jpdev codex review --brief FILE --model M --effort E --dir CLONE [--pr N | --issue N]
   [--repo OWNER/NAME] [--out FILE] [--sandbox read-only|workspace-write] [--network]`: checks the brief and
