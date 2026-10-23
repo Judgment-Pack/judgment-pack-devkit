@@ -16,6 +16,7 @@ import uuid
 
 META = '.jpdev-clean'
 KINDS = ('worktree', 'review', 'scratch', 'transcript', 'cache')
+MIN_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -133,10 +134,17 @@ def inventory(fd, prefix=''):
 
 
 def run(args, cwd):
+    # Explicit --git-dir/--work-tree do not override index, object or config redirection.
+    allowed = {'GIT_OPTIONAL_LOCKS', 'GIT_TERMINAL_PROMPT', 'GIT_CEILING_DIRECTORIES', 'GIT_PAGER'}
+    redirected = sorted(key for key in os.environ if key.startswith('GIT_') and key not in allowed)
+    require(not redirected, 'inherited Git evidence settings: ' + ', '.join(redirected))
     try:
         completed = subprocess.run(args, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                                    text=True, timeout=30, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0',
-                                                            'GIT_TERMINAL_PROMPT': '0'})
+                                                            'GIT_TERMINAL_PROMPT': '0',
+                                                            'GIT_CONFIG_NOSYSTEM': '1',
+                                                            'GIT_CONFIG_GLOBAL': os.devnull,
+                                                            'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_PAGER': 'cat'})
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Refusal('verification unavailable: ' + args[0]) from exc
     require(completed.returncode == 0, 'verification failed: ' + ' '.join(args[:3]))
@@ -278,8 +286,11 @@ def git_check(path, roots, kind):
             other = item[9:]
             require(common != gitdir or other == path, 'base still has registered worktrees')
             require(not (other != path and other.startswith(path + '/')), 'nested worktree: ' + other)
-    require(not gitrun(['diff', '--name-only', 'HEAD', '--']), 'tracked changes')
-    require(not gitrun(['diff', '--cached', '--name-only', '--']), 'tracked index changes')
+    flags = gitrun(['ls-files', '-v', '-z']).split('\0')
+    require(all(not item or (not item[0].islower() and item[0] != 'S') for item in flags),
+            'unsupported Git index flags: assume-unchanged or skip-worktree')
+    require(not gitrun(['diff', '--no-ext-diff', '--no-textconv', '--name-only', 'HEAD', '--']), 'tracked changes')
+    require(not gitrun(['diff', '--no-ext-diff', '--no-textconv', '--cached', '--name-only', '--']), 'tracked index changes')
     # The explicit inventory seal is the disposal evidence for untracked and ignored files.
     gitrun(['status', '--porcelain=v1', '--untracked-files=all', '--ignored'])
     remote = gitrun(['ls-remote', '--refs', 'origin'])
@@ -338,40 +349,23 @@ class Root:
                 yield name, read_json(self.meta, name)
 
 
-def inspect(root, record, roots, age, processes=process_check):
-    root.recheck()
-    path = record.get('path')
-    parts = relative(path)
-    require(record.get('version') == 1 and record.get('session') == root.owner['session'] and
-            record.get('kind') in KINDS, 'ownership/disposal record unavailable')
-    seal_name = hashlib.sha256(path.encode()).hexdigest() + '.json'
-    require(read_json(root.meta, seal_name) == record, 'disposal seal changed')
-    keep_check(root.fd, path)
-    full = root.path + '/' + path
-    mount_check(full)
-    require(not within(os.getcwd(), [full]) and full != os.path.expanduser('~') and
-            not any(r == full or r.startswith(full + '/') for r in roots), 'protected live checkout or root')
-    with descend(root.fd, parts[:-1]) as parent:
-        st = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
-        require(identity(st) == record.get('identity'), 'candidate replaced')
-        require(st.st_uid == os.getuid(), 'candidate ownership changed')
-        require(stat.S_ISDIR(st.st_mode) or (record['kind'] == 'transcript' and stat.S_ISREG(st.st_mode)), 'candidate must be a real directory or transcript file')
-        if stat.S_ISDIR(st.st_mode):
-            with descend(parent, parts[-1:]) as child:
-                contents = inventory(child)
-        else:
-            contents = {'': file_snapshot(parent, parts[-1])}
-    require(contents == record.get('inventory'), 'content changed or lacks explicit disposal evidence')
-    newest = max([record.get('sealed', time.time()), st.st_mtime] + [v[4] / 1e9 for v in contents.values()])
-    require(time.time() - newest >= age, 'younger than age threshold')
-    # A repository marker is allowed only at the candidate root, and only for Git-aware classes.
-    is_git = '.git' in contents
-    git = None
-    if record['kind'] in ('worktree', 'review') and is_git:
-        git = git_check(full, roots, record['kind'])
-    else:
-        require(not any(PurePosixPath(p).name == '.git' for p in contents), 'nested worktree or repository')
-        require(record['kind'] != 'worktree', 'worktree evidence missing')
+def logical_bytes(contents):
+    return sum(value[3] for value in contents.values() if stat.S_ISREG(value[2]))
+
+
+def reject_saved_git(contents, verified_git):
+    children = {}
+    for path in contents:
+        parent, _, name = path.rpartition('/')
+        children.setdefault(parent, set()).add(name)
+    for parent, names in children.items():
+        signature = (('HEAD' in names and bool(names & {'objects', 'index', 'commondir', 'gitdir'})) or
+                     ('objects' in names and bool(names & {'refs', 'packed-refs'})))
+        require(not signature or (verified_git and parent == '.git'),
+                'unsupported bare or saved Git directory: ' + (parent or '.'))
+
+
+def worktree_eligibility(record, roots):
     if record['kind'] in ('scratch', 'cache'):
         base = record.get('base')
         require(isinstance(base, str) and within(base, roots), 'base evidence outside authorized roots or missing')
@@ -408,6 +402,46 @@ def inspect(root, record, roots, age, processes=process_check):
                 except FileNotFoundError:
                     absent = True
             require(absent and removed not in users, 'associated worktree is not removed')
+
+
+def inspect(root, record, roots, age, processes=process_check, min_transcript_bytes=MIN_TRANSCRIPT_BYTES):
+    root.recheck()
+    path = record.get('path')
+    parts = relative(path)
+    require(record.get('version') == 1 and record.get('session') == root.owner['session'] and
+            record.get('kind') in KINDS, 'ownership/disposal record unavailable')
+    seal_name = hashlib.sha256(path.encode()).hexdigest() + '.json'
+    require(read_json(root.meta, seal_name) == record, 'disposal seal changed')
+    keep_check(root.fd, path)
+    full = root.path + '/' + path
+    mount_check(full)
+    require(not within(os.getcwd(), [full]) and full != os.path.expanduser('~') and
+            not any(r == full or r.startswith(full + '/') for r in roots), 'protected live checkout or root')
+    with descend(root.fd, parts[:-1]) as parent:
+        st = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        require(identity(st) == record.get('identity'), 'candidate replaced')
+        require(st.st_uid == os.getuid(), 'candidate ownership changed')
+        require(stat.S_ISDIR(st.st_mode) or (record['kind'] == 'transcript' and stat.S_ISREG(st.st_mode)), 'candidate must be a real directory or transcript file')
+        if stat.S_ISDIR(st.st_mode):
+            with descend(parent, parts[-1:]) as child:
+                contents = inventory(child)
+        else:
+            contents = {'': file_snapshot(parent, parts[-1])}
+    require(contents == record.get('inventory'), 'content changed or lacks explicit disposal evidence')
+    newest = max([record.get('sealed', time.time()), st.st_mtime] + [v[4] / 1e9 for v in contents.values()])
+    require(time.time() - newest >= age, 'younger than age threshold')
+    # A repository marker is allowed only at the candidate root, and only for Git-aware classes.
+    is_git = '.git' in contents
+    git = None
+    if record['kind'] in ('worktree', 'review') and is_git:
+        git = git_check(full, roots, record['kind'])
+    else:
+        require(not any(PurePosixPath(p).name == '.git' for p in contents), 'nested worktree or repository')
+        require(record['kind'] != 'worktree', 'worktree evidence missing')
+    reject_saved_git(contents, git is not None)
+    require(record['kind'] != 'transcript' or logical_bytes(contents) >= min_transcript_bytes,
+            'transcript below minimum logical bytes')
+    worktree_eligibility(record, roots)
     processes([full] + ([git['gitdir']] if git else []))
     return contents, git
 
@@ -433,8 +467,8 @@ def erase(fd, expected, prefix='', before_unlink=None):
             os.unlink(name, dir_fd=fd)
 
 
-def remove(root, record, roots, age, processes=process_check):
-    contents, git = inspect(root, record, roots, age, processes)
+def remove(root, record, roots, age, processes=process_check, min_transcript_bytes=MIN_TRANSCRIPT_BYTES):
+    contents, git = inspect(root, record, roots, age, processes, min_transcript_bytes=min_transcript_bytes)
     parts = relative(record['path'])
     token = '.jpdev-clean-removing-' + uuid.uuid4().hex
     with descend(root.fd, parts[:-1]) as parent:
@@ -471,6 +505,7 @@ def remove(root, record, roots, age, processes=process_check):
                 root.recheck()
                 def check():
                     root.recheck()
+                    worktree_eligibility(record, roots)
                     mount_check(moved)
                     if git and not within(after['gitdir'], [moved]):
                         require(git_metadata(after['gitdir']) == after['metadata'] and
@@ -484,6 +519,7 @@ def remove(root, record, roots, age, processes=process_check):
                     processes([moved, root.path + '/' + record['path']] + ([git['gitdir']] if git else []))
                 check()
                 erase(child, contents, before_unlink=check)
+            check()
             require(identity(os.stat(token, dir_fd=parent, follow_symlinks=False)) == record['identity'], 'quarantine replaced')
             os.rmdir(token, dir_fd=parent)
         except BaseException:
@@ -498,6 +534,12 @@ def duration(text):
     if not match:
         raise argparse.ArgumentTypeError('duration must be an integer followed by s, m, h, d or w')
     return int(match[1]) * dict(s=1, m=60, h=3600, d=86400, w=604800)[match[2]]
+
+
+def byte_count(text):
+    if not re.fullmatch(r'[0-9]+', text):
+        raise argparse.ArgumentTypeError('byte count must be a nonnegative integer')
+    return int(text)
 
 
 def initialize(path, session):
@@ -543,6 +585,8 @@ def parser():
     result.add_argument('action', nargs='?', choices=('init', 'seal'))
     result.add_argument('--root', action='append', default=[], help='explicit root; repeat to authorize Git evidence roots')
     result.add_argument('--older-than', type=duration, default=7 * 86400, metavar='DURATION')
+    result.add_argument('--min-transcript-bytes', type=byte_count, default=MIN_TRANSCRIPT_BYTES, metavar='N',
+                        help='transcript-only minimum logical regular-file bytes, inclusive (default: 10485760; 0 disables)')
     result.add_argument('--yes', action='store_true', help='remove verified candidates (default: dry run)')
     result.add_argument('--session')
     result.add_argument('--path')
@@ -585,14 +629,14 @@ def main(argv=None):
                     records = list(root.records())
                     for name, record in records:
                         try:
-                            contents, _ = inspect(root, record, roots, args.older_than)
-                            bytes_used = sum(v[3] for v in contents.values() if stat.S_ISREG(v[2]))
+                            contents, _ = inspect(root, record, roots, args.older_than, min_transcript_bytes=args.min_transcript_bytes)
+                            bytes_used = logical_bytes(contents)
                             total += 1
                             size += bytes_used
                             print(json.dumps({'root': path, 'path': record['path'], 'bytes': bytes_used,
                                               'reason': 'sealed ' + record['kind'], 'outcome': 'candidate'}), flush=True)
                             if args.yes:
-                                remove(root, record, roots, args.older_than)
+                                remove(root, record, roots, args.older_than, min_transcript_bytes=args.min_transcript_bytes)
                                 os.unlink(name, dir_fd=root.meta)
                                 removed += 1
                                 print(json.dumps({'root': path, 'path': record['path'], 'outcome': 'removed'}), flush=True)

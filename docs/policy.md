@@ -174,13 +174,16 @@ registration entries for verified absent paths beneath authorized, traversable p
 retained and do not count as active users. Cleanup does not prune Git administrative records or
 remove branch refs: a broad prune could affect another session.
 
-`jpdev clean [--root DIR]... [--older-than DURATION] [--yes]` discovers only disposal seals,
+`jpdev clean [--root DIR]... [--older-than DURATION] [--min-transcript-bytes N] [--yes]` discovers only disposal seals,
 never recursively guesses candidates from directory names. There are no implicit roots; no flags
 means no deletion. Missing roots are reported safely. It defaults to a dry run and seven days;
 DURATION is a nonnegative integer followed by `s`, `m`, `h`, `d` or `w`. Age is measured from the
 newest seal timestamp, candidate directory/file mtime and inventoried content mtime. Thus a new
-seal must age even if its logs are old. There is no size cutoff: sessions can seal large logs
-individually. Paths are root-relative, exact, and cannot contain empty, dot or parent components.
+seal must age even if its logs are old. Transcripts/logs require at least 10485760 bytes (10 MiB)
+by default. `--min-transcript-bytes N` sets an inclusive, nonnegative integer floor; `0` disables
+it. The floor applies only to the `transcript` kind and counts logical regular-file bytes,
+summing all regular files for a directory; directory sizes do not count. Other kinds are unaffected.
+Paths are root-relative, exact, and cannot contain empty, dot or parent components.
 Overlapping candidate seals are refused. The ownership metadata and keep file are protected.
 
 Place exact root-relative reserves in `DIR/.jpdev-clean-keep`, one per line; blank lines and
@@ -198,7 +201,19 @@ fetching. Locally unavailable remote objects cause refusal. Attached branches re
 origin upstream containing HEAD and a GitHub PR with matching branch and HEAD in CLOSED or
 MERGED state. Detached worktrees and detached reviewer clones use verified remote reachability
 without a PR. Reviewer clones with attached branches use the same upstream and PR checks.
-A reviewer clone with any registered linked worktree remains protected. Git, remote and PR
+A reviewer clone with any registered linked worktree remains protected. Bare repositories and
+saved Git metadata directories at the candidate root or nested within it are unsupported and
+refused, including partial HEAD/index/commondir layouts. Only a verified candidate's canonical
+`.git` metadata directory is allowed. Assume-unchanged and skip-worktree index flags are refused,
+even with an explicit disposal seal: they can hide changed tracked contents.
+
+Inherited `GIT_*` settings are refused except `GIT_OPTIONAL_LOCKS`, `GIT_TERMINAL_PROMPT`,
+`GIT_PAGER` and `GIT_CEILING_DIRECTORIES`. Cleanup forces noninteractive, read-only Git commands
+and disables the pager; the ceiling only bounds discovery. Index, repository, object, namespace,
+shallow-history, executable and config redirection are therefore refused, including unknown
+Git settings. System/global Git config and replacement objects are disabled for verification;
+external diff and text conversion are disabled for tracked-diff evidence. Authentication that
+depends on ambient Git config can consequently be unavailable and cause refusal. Git, remote and PR
 evidence must remain available; an unavailable tool, network or
 authentication causes refusal. `gh` is needed only for attached branches.
 
@@ -214,7 +229,9 @@ mount crossings and changed ownership are refused. The tool requires directory d
 
 Before removal the tool repeats inspection, moves the candidate to a private sibling quarantine
 name, and rechecks its full inventory, Git state, keeps, root and parent identities and process
-activity. Removal uses directory descriptors, never recursive path-following deletion. Each
+activity. Cache worktree users and scratch associated-worktree absence are rechecked after
+quarantine and before each removal, including the candidate directory itself. Removal uses directory
+descriptors, never recursive path-following deletion. Each
 entry's identity and inventory is checked during removal. External linked-worktree refs, HEAD
 and index are rechecked during removal as well. Changes or failures stop that candidate;
 remaining content is restored to its original name when vacant, otherwise retained under

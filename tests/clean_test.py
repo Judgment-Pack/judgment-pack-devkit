@@ -5,6 +5,7 @@ import importlib.util
 import io
 import hashlib
 import stat
+import shutil
 import json
 import os
 from pathlib import Path
@@ -60,7 +61,7 @@ class Cleanup(unittest.TestCase):
         return folder, record
 
     def remove(self, record, processes=lambda paths: None):
-        clean.remove(self.owner, record, self.roots, 0, processes)
+        clean.remove(self.owner, record, self.roots, 0, processes, min_transcript_bytes=0)
 
     def refused(self, record, reason, processes=lambda paths: None):
         with self.assertRaisesRegex((clean.Refusal, OSError), reason):
@@ -149,7 +150,7 @@ class Cleanup(unittest.TestCase):
         folder, record = self.candidate()
         with patch.object(clean, 'process_check', lambda paths: None), contextlib.redirect_stdout(io.StringIO()) as output:
             # Defaults bind at definition, so replace only the live evidence seam here.
-            with patch.object(clean, 'inspect', lambda *a: (record['inventory'], None)):
+            with patch.object(clean, 'inspect', lambda *a, **kw: (record['inventory'], None)):
                 self.assertEqual(clean.main(['--root', str(self.root), '--older-than', '0s']), 0)
         self.assertTrue(folder.exists())
         self.assertIn('"bytes":', output.getvalue())
@@ -368,10 +369,10 @@ class Cleanup(unittest.TestCase):
     def test_main_removal_and_error_status(self):
         folder, record = self.candidate()
         inspect, remove = clean.inspect, clean.remove
-        def inspect_fixture(*args):
-            return inspect(*args[:4], processes=lambda paths: None)
-        def remove_fixture(*args):
-            return remove(*args, processes=lambda paths: None)
+        def inspect_fixture(*args, **kwargs):
+            return inspect(*args[:4], processes=lambda paths: None, **kwargs)
+        def remove_fixture(*args, **kwargs):
+            return remove(*args, processes=lambda paths: None, **kwargs)
         with patch.object(clean, 'inspect', inspect_fixture), patch.object(clean, 'remove', remove_fixture):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(clean.main(['--root', str(self.root), '--older-than', '0s', '--yes']), 0)
@@ -563,8 +564,8 @@ class Cleanup(unittest.TestCase):
         folder, record = self.candidate()
         inspect, remove = clean.inspect, clean.remove
         clean.fcntl.flock(self.owner.meta, clean.fcntl.LOCK_EX | clean.fcntl.LOCK_NB)
-        with patch.object(clean, 'inspect', lambda *args: inspect(*args[:4], processes=lambda paths: None)), \
-             patch.object(clean, 'remove', lambda *args: remove(*args, processes=lambda paths: None)):
+        with patch.object(clean, 'inspect', lambda *args, **kw: inspect(*args[:4], processes=lambda paths: None, **kw)), \
+             patch.object(clean, 'remove', lambda *args, **kw: remove(*args, processes=lambda paths: None, **kw)):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(clean.main(['--root', str(self.root), '--older-than', '0s', '--yes']), 1)
         self.assertTrue(folder.exists())
@@ -682,6 +683,193 @@ class Cleanup(unittest.TestCase):
         _, record = self.candidate()
         with patch.object(clean.os, 'unlink', side_effect=PermissionError('removal denied')):
             self.refused(record, 'removal denied')
+
+    def test_bare_git_refused(self):
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                path = 'nested-review' if nested else 'private.git'
+                repo = self.root / path / 'saved.git' if nested else self.root / path
+                repo.parent.mkdir(parents=True, exist_ok=True)
+                self.git('init', '--bare', str(repo))
+                tree = self.git('--git-dir=' + str(repo), 'mktree')
+                commit = self.git('--git-dir=' + str(repo), 'commit-tree', tree, '-m', 'unpublished')
+                self.git('--git-dir=' + str(repo), 'update-ref', 'refs/heads/private', commit)
+                _, record = self.candidate(path=path)
+                self.refused(record, 'bare or saved Git directory')
+                self.assertEqual(self.git('--git-dir=' + str(repo), 'rev-parse', 'refs/heads/private'), commit)
+
+    def test_saved_git_refused(self):
+        folder, _, _ = self.repository(review=True)
+        (folder / 'file').write_text('private commit')
+        self.git('commit', '-am', 'unpublished', cwd=folder)
+        for nested in (False, True):
+            with self.subTest(nested=nested):
+                path = 'saved-nested' if nested else 'saved-root'
+                target = self.root / path
+                if nested:
+                    target.mkdir()
+                    target = target / 'metadata'
+                # Copy only disposable fixture metadata; no repository is adopted.
+                shutil.copytree(folder / '.git', target)
+                _, record = self.candidate(path=path)
+                self.refused(record, 'bare or saved Git directory')
+                self.assertTrue((target / 'objects').exists())
+
+    def test_inherited_alternate_index_refused(self):
+        folder, _, _ = self.repository(review=True)
+        alternate = self.home / 'published.index'
+        alternate.write_bytes((folder / '.git/index').read_bytes())
+        (folder / 'file').write_text('private staged contents')
+        self.git('add', 'file', cwd=folder)
+        (folder / 'file').write_text('published')
+        self.assertEqual(self.git('diff', '--cached', '--name-only', cwd=folder), 'file')
+        _, record = self.candidate()
+        with patch.dict(os.environ, {'GIT_INDEX_FILE': str(alternate)}):
+            self.refused(record, 'inherited Git evidence settings')
+        self.assertEqual(self.git('diff', '--cached', '--name-only', cwd=folder), 'file')
+
+    def test_inherited_git_indirection_refused(self):
+        self.repository(review=True)
+        _, record = self.candidate()
+        for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY',
+                     'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_COUNT',
+                     'GIT_CONFIG_PARAMETERS', 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE', 'GIT_EXEC_PATH',
+                     'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_UNKNOWN_SETTING'):
+            with self.subTest(name=name), patch.dict(os.environ, {name: 'fixture-value'}):
+                self.refused(record, 'inherited Git evidence settings: ' + name)
+
+    def hidden_index_flag(self, flag):
+        folder, _, _ = self.repository(review=True)
+        self.git('update-index', '--' + flag, 'file', cwd=folder)
+        (folder / 'file').write_text('private hidden tracked contents')
+        self.assertEqual(self.git('diff', '--name-only', 'HEAD', cwd=folder), '')
+        _, record = self.candidate()
+        self.refused(record, 'unsupported Git index flags')
+        self.assertEqual((folder / 'file').read_text(), 'private hidden tracked contents')
+
+    def test_assume_unchanged_refused(self):
+        self.hidden_index_flag('assume-unchanged')
+
+    def test_skip_worktree_refused(self):
+        self.hidden_index_flag('skip-worktree')
+
+    def eligibility_race(self, kind, during_erase):
+        old, base, _ = self.repository(branch=False)
+        self.git('worktree', 'remove', str(old), cwd=base)
+        path = 'base/.jpdev-shared' if kind == 'cache' else 'builder-scratch'
+        folder, record = self.candidate(kind, path=path, base=str(base), removed=str(old))
+        recreated = self.root / 'new-worktree' if kind == 'cache' else old
+        if during_erase:
+            (folder / 'a-first').write_text('disposable first entry')
+            _, record = self.candidate(kind, path=path, base=str(base), removed=str(old))
+        original = clean.os.unlink if during_erase else clean.os.rename
+        fired = False
+        def create():
+            nonlocal fired
+            if not fired:
+                fired = True
+                self.git('worktree', 'add', '--detach', str(recreated), cwd=base)
+        def rename(src, dst, *args, **kwargs):
+            result = original(src, dst, *args, **kwargs)
+            if os.fspath(dst).startswith('.jpdev-clean-removing-'):
+                create()
+            return result
+        def unlink(name, *args, **kwargs):
+            result = original(name, *args, **kwargs)
+            if name == 'a-first':
+                create()
+            return result
+        with patch.object(clean.os, 'unlink', unlink) if during_erase else patch.object(clean.os, 'rename', rename):
+            self.refused(record, 'worktree users|not removed')
+        self.assertTrue(fired)
+        self.assertTrue(recreated.exists())
+        self.assertEqual((folder / 'report').read_text(), 'session-created evidence')
+
+    def test_cache_quarantine_race(self):
+        self.eligibility_race('cache', False)
+
+    def test_cache_erase_race(self):
+        self.eligibility_race('cache', True)
+
+    def test_scratch_quarantine_race(self):
+        self.eligibility_race('scratch', False)
+
+    def test_scratch_erase_race(self):
+        self.eligibility_race('scratch', True)
+
+    def test_ambient_global_git_config_isolated(self):
+        folder, _, _ = self.repository(review=True)
+        _, record = self.candidate()
+        (self.home / '.gitconfig').write_text('invalid config syntax\n')
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            self.remove(record)
+        self.assertFalse(folder.exists())
+
+    def test_saved_partial_git_metadata_refused(self):
+        folder, _ = self.candidate(path='saved-admin')
+        (folder / 'HEAD').write_text('')
+        (folder / 'index').write_text('')
+        _, record = self.candidate(path='saved-admin')
+        self.refused(record, 'bare or saved Git directory')
+
+    def test_transcript_threshold_cli(self):
+        folder, record = self.candidate('transcript', path='logs')
+        inspect, remove = clean.inspect, clean.remove
+        def inspect_fixture(*args, **kwargs):
+            return inspect(*args[:4], processes=lambda paths: None, **kwargs)
+        def remove_fixture(*args, **kwargs):
+            return remove(*args, processes=lambda paths: None, **kwargs)
+        with patch.object(clean, 'inspect', inspect_fixture), patch.object(clean, 'remove', remove_fixture):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(clean.main(['--root', str(self.root), '--older-than', '0s']), 1)
+            self.assertIn('transcript below minimum', output.getvalue())
+            self.assertTrue(folder.exists())
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(clean.main(['--root', str(self.root), '--older-than', '0s',
+                                             '--min-transcript-bytes', '0', '--yes']), 0)
+            self.assertIn('"outcome": "removed"', output.getvalue())
+            self.assertFalse(folder.exists())
+
+    def test_transcript_threshold(self):
+        self.assertEqual(clean.parser().parse_args([]).min_transcript_bytes, 10485760)
+        for value in ('-1', '1.5', '10MiB', '', 'nan'):
+            with self.subTest(invalid=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                clean.parser().parse_args(['--min-transcript-bytes', value])
+        self.assertEqual(clean.parser().parse_args(['--min-transcript-bytes', '0']).min_transcript_bytes, 0)
+        for size, floor in ((0, 0), (0, 4), (3, 4), (4, 4), (5, 4), (4, 10485760)):
+            with self.subTest(size=size, floor=floor):
+                path = 'log-%s-%s' % (size, floor)
+                log = self.root / path
+                log.write_bytes(b'x' * size)
+                args = clean.parser().parse_args(['seal', '--root', str(self.root), '--session', 'session-test',
+                                                 '--path', path, '--kind', 'transcript'])
+                clean.seal(self.owner, args)
+                record = next(r for _, r in self.owner.records() if r['path'] == path)
+                if size < floor:
+                    with self.assertRaisesRegex(clean.Refusal, 'transcript below minimum'):
+                        clean.remove(self.owner, record, self.roots, 0, lambda paths: None, floor)
+                    self.assertTrue(log.exists())
+                else:
+                    clean.remove(self.owner, record, self.roots, 0, lambda paths: None, floor)
+                    self.assertFalse(log.exists())
+
+    def test_transcript_directory_threshold_and_other_kinds(self):
+        folder, _ = self.candidate('transcript', path='logs')
+        (folder / 'report').write_bytes(b'xx')
+        (folder / 'nested').mkdir()
+        (folder / 'nested' / 'log').write_bytes(b'xx')
+        args = clean.parser().parse_args(['seal', '--root', str(self.root), '--session', 'session-test',
+                                         '--path', 'logs', '--kind', 'transcript'])
+        clean.seal(self.owner, args)
+        record = next(r for _, r in self.owner.records() if r['path'] == 'logs')
+        with self.assertRaisesRegex(clean.Refusal, 'transcript below minimum'):
+            clean.remove(self.owner, record, self.roots, 0, lambda paths: None, 5)
+        self.assertTrue(folder.exists())
+        clean.remove(self.owner, record, self.roots, 0, lambda paths: None, 4)
+        self.assertFalse(folder.exists())
+        folder, record = self.candidate('review', path='small-review')
+        clean.remove(self.owner, record, self.roots, 0, lambda paths: None, 10485760)
+        self.assertFalse(folder.exists())
 
 
 if __name__ == '__main__':

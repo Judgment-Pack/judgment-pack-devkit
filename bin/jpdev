@@ -22,8 +22,9 @@ usage: jpdev COMMAND [ARGS]
                      name-pattern file, then post the file
   push [BRANCH]      push BRANCH (default: the current branch) to origin with the gh credential
                      helper and no stored credential; refuses --force and -f
-  clean [--root DIR]... [--older-than DURATION] [--yes]
+  clean [--root DIR]... [--older-than DURATION] [--min-transcript-bytes N] [--yes]
                      inspect explicit session disposal seals; dry run by default
+                     transcripts default to at least 10485760 logical bytes; 0 disables the floor
   clean init --root DIR --session TOKEN
   clean seal --root DIR --session TOKEN --path REL --kind KIND
              [--base DIR] [--removed-worktree DIR]
