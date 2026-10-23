@@ -18,9 +18,18 @@ fixture=$kit/tests/fixture/dev.json
 system_python=$(python3 -c 'import sys; print(sys.executable)')
 system_git=$(command -v git)
 pass=0 fail=0
+failed_cases=()
 
 ok() { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
-bad() { fail=$((fail + 1)); printf 'FAIL  %s\n' "$1"; [ -z "${2:-}" ] || printf '%s\n' "$2" | head -n 20 | sed 's/^/      /'; }
+bad() { fail=$((fail + 1)); failed_cases+=("$1"); printf 'FAIL  %s\n' "$1"; [ -z "${2:-}" ] || printf '%s\n' "$2" | head -n 20 | sed 's/^/      /'; }
+report_results() {
+  if [ "$fail" -ne 0 ]; then
+    printf 'Failed cases:'
+    printf ' <%s>' "${failed_cases[@]}"
+    printf '\n'
+  fi
+  printf '\n%d passed, %d failed\n' "$pass" "$fail"
+}
 # expect NAME STATUS PATTERN OUTPUT STATUS-GOT
 expect() {
   local name=$1 want=$2 pattern=$3 out=$4 got=$5
@@ -1312,5 +1321,5 @@ if [ ! -e "$work/setup-outside" ] && [ ! -e "$work/clone/ran" ]; then ok "setup 
 out=$("$jpdev" setup "$work/not-a-clone" 2>&1) && s=0 || s=$?
 expect "setup asks for --repo when the directory is not a clone" 2 'give --repo' "$out" "$s"
 
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
+report_results
 [ "$fail" -eq 0 ]

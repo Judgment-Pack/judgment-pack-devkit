@@ -323,15 +323,22 @@ class Cleanup(unittest.TestCase):
         proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], cwd=folder)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.terminate)
-        # Keep real /proc data while substituting only initial-namespace visibility evidence.
-        readlink = os.readlink
+        # Supply a complete fixture host view without reading protected PID 1 or unrelated
+        # processes. The child PID and its cwd, descriptors and mappings remain real evidence.
+        readlink, stat_path, listdir = os.readlink, os.stat, os.listdir
+        mount = readlink('/proc/self/ns/mnt')
         def host(path, *args, **kwargs):
             if path in ('/proc/self/ns/pid', '/proc/1/ns/pid'):
                 return 'pid:[4026531836]'
-            if path == '/proc/self/ns/mnt':
-                return readlink('/proc/1/ns/mnt')
+            if path in ('/proc/self/ns/mnt', '/proc/1/ns/mnt'):
+                return mount
             return readlink(path, *args, **kwargs)
-        with patch.object(clean.os, 'readlink', host):
+        def host_stat(path, *args, **kwargs):
+            return stat_path('/' if path == '/proc/1/root' else path, *args, **kwargs)
+        def host_pids(path):
+            return [str(proc.pid)] if path == '/proc' else listdir(path)
+        with patch.object(clean.os, 'readlink', host), patch.object(clean.os, 'stat', host_stat), \
+             patch.object(clean.os, 'listdir', host_pids):
             self.refused(record, 'live PID ' + str(proc.pid), clean.process_check)
         with patch.object(clean.os, 'readlink', side_effect=PermissionError('fixture')):
             self.refused(record, 'process visibility unavailable', clean.process_check)
@@ -573,6 +580,8 @@ class Cleanup(unittest.TestCase):
                 return 'pid:[4026531836]'
             if path == '/proc/self/ns/mnt':
                 return 'mnt:[isolated]'
+            if path == '/proc/1/ns/mnt':
+                return 'mnt:[fixture-host]'
             return original(path, *args, **kwargs)
         def processes(paths):
             with patch.object(clean.os, 'readlink', isolated), patch.object(clean.os, 'listdir', return_value=[]):
