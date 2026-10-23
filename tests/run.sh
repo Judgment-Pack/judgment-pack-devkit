@@ -556,7 +556,7 @@ mkdir -p "$nested_mutants/state/tmp/node_modules" "$nested_mutants/state/scratch
 printf 'source sibling\n' > "$nested_mutants/state/keep"
 git init -q -b main "$nested_mutants"
 cat > "$nested_mutants/dev.json" <<'JSON'
-{"version":1,"checks":[],"mutants":{"run":"bash probe.sh {rows}","toolchain":"shell"}}
+{"version":1,"checks":[{"name":"fixture","run":"true"}],"mutants":{"run":"bash probe.sh {rows}","toolchain":"shell"}}
 JSON
 cat > "$nested_mutants/probe.sh" <<'SH'
 #!/usr/bin/env bash

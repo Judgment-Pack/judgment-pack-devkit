@@ -518,7 +518,7 @@ class Cleanup(unittest.TestCase):
         rename = clean.os.rename
         def changed(src, dst, **kwargs):
             rename(src, dst, **kwargs)
-            if dst.startswith('.jpdev-clean-removing-'):
+            if os.fspath(dst).startswith('.jpdev-clean-removing-'):
                 (self.root / 'parent').rename(self.root / 'saved-parent')
                 (self.root / 'parent').mkdir()
         with patch.object(clean.os, 'rename', changed):
