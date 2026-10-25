@@ -16,8 +16,9 @@ usage: jpdev COMMAND [ARGS]
   check [--only A,B | --changed [BASE]] [--skip A,B] [--all] [--manifest FILE]
                      run the manifest's checks in order under the caps; exit status = failures;
                      --changed runs only the steps jpdev.json maps the paths changed since the
-                     merge base of BASE (default: the default branch) and HEAD to, and the whole
-                     list when a changed path is unmapped
+                     merge base of BASE (default: the default branch) and HEAD to; the whole list
+                     runs when a changed path is unmapped, when jpdev.json, the manifest or
+                     scripts/dev/check.sh changed, when nothing changed, or with no mapping
   mutants --row TEXT [--row TEXT]...
                      run the manifest's mutants command on a scratch copy of the clone
   record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run] [--no-name-check]

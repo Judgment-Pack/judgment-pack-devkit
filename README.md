@@ -97,13 +97,13 @@ the same name overrides it. `config/env.example` documents each setting with its
 - `jpdev check --changed [BASE] [--skip NAME,...] [--all] [--manifest FILE]`: runs only the checks
   that the `changed` rules of `jpdev.json` map the changed paths to (see
   [changed-path check selection](docs/adopting.md#changed-path-check-selection)). The changed paths
-  differ between the merge base of `BASE` and `HEAD` and the working tree (committed, staged,
-  unstaged and deleted paths, and both sides of a rename), or are untracked and not ignored. `BASE`
-  defaults to the default branch: `origin/HEAD`, else `origin/main`, else `origin/master`. The
-  whole list runs when a changed path matches no rule, when `jpdev.json`, the manifest or
-  `scripts/dev/check.sh` changed, when nothing changed, or when there is no mapping. A block before
-  the summary names each check selected with the globs that selected it and each check not
-  selected, or why the whole list runs. An invalid mapping, a `BASE` that names no commit, a missing
+  are those that differ from the merge base of `BASE` and `HEAD` in `HEAD`, in the index or in the
+  working tree (deletions, both sides of a rename, and submodules whatever their `ignore` setting),
+  plus untracked files that are not ignored. `BASE` defaults to the default branch: `origin/HEAD`,
+  else `origin/main`, else `origin/master`. The whole list runs when a changed path matches no rule,
+  when `jpdev.json`, the manifest or `scripts/dev/check.sh` changed, when nothing changed, or when
+  there is no mapping. A block before the summary names each check selected with the globs that
+  selected it and each check not selected, or why the whole list runs. An invalid mapping, a `BASE` that names no commit, a missing
   default branch or merge base, and `--changed` with `--only` are refused with exit 2 before any
   check runs.
 - `jpdev mutants --row TEXT [--row TEXT]...`: runs the manifest's `mutants` command on a scratch

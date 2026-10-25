@@ -110,6 +110,12 @@ class ChangedCheckTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
+    def commit_base(self, message):
+        """Commit everything on the topic branch and return the commit, a BASE for --changed."""
+        git(self.clone, 'add', '-A')
+        git(self.clone, 'commit', '-q', '-m', message)
+        return git(self.clone, 'rev-parse', 'HEAD').stdout.decode().strip()
+
     def mapping(self, change):
         value = json.loads((FIXTURE / 'changed-jpdev.json').read_text())
         change(value)
@@ -188,6 +194,84 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertEqual(status, 0, out + err)
         self.assertIn('selection input changed: dev.json: whole list', out)
         self.assertEqual(self.ran(out), ALL, out)
+
+    def test_a_change_to_the_vendored_runner_runs_the_whole_list(self):
+        runner = self.clone / 'scripts' / 'dev' / 'check.sh'
+        runner.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(ROOT / 'templates' / 'check.sh'), str(runner))
+        self.mapping(lambda value: value['changed'].append({'paths': ['scripts/dev/**'], 'checks': ['whitespace']}))
+        base = self.commit_base('vendored runner')
+        with runner.open('a') as handle:
+            handle.write('# a line after the runner\n')
+        status, out, err = self.check('--changed', base)
+        self.assertEqual(status, 0, out + err)
+        self.assertIn('selection input changed: scripts/dev/check.sh: whole list', out)
+        self.assertEqual(self.ran(out), ALL, out)
+
+    def test_a_symlinked_manifest_retargeted_runs_the_whole_list(self):
+        manifest = json.loads((FIXTURE / 'changed-dev.json').read_text())
+        self.write('manifests/a.json', json.dumps(manifest))
+        manifest['checks'][0]['run'] = "echo 'docs-lint ran from b'"
+        self.write('manifests/b.json', json.dumps(manifest))
+        (self.clone / 'dev.json').unlink()
+        os.symlink('manifests/a.json', str(self.clone / 'dev.json'))
+        self.mapping(lambda value: value['changed'].append({'paths': ['*.json'], 'checks': ['whitespace']}))
+        base = self.commit_base('linked manifest')
+        (self.clone / 'dev.json').unlink()
+        os.symlink('manifests/b.json', str(self.clone / 'dev.json'))
+        status, out, err = self.check('--changed', base)
+        self.assertEqual(status, 0, out + err)
+        self.assertIn('selection input changed: dev.json: whole list', out)
+        self.assertEqual(self.ran(out), ALL, out)
+
+    def test_a_staged_change_the_worktree_reverted_still_counts(self):
+        self.write('cmd/tool/main.go', 'package main\n\nfunc main() {}\n')
+        git(self.clone, 'add', 'cmd/tool/main.go')
+        self.write('cmd/tool/main.go', 'package main\n')
+        self.write('docs/guide.md', 'guide, edited\n')
+        status, out, err = self.check('--changed')
+        self.assertEqual(status, 0, out + err)
+        self.assertEqual(self.ran(out), {'docs-lint', 'go-vet', 'go-test', 'whitespace'}, out)
+
+    def test_a_commit_the_index_and_worktree_reverted_still_counts(self):
+        self.write('cmd/tool/main.go', 'package main\n\nfunc main() {}\n')
+        git(self.clone, 'commit', '-q', '-am', 'go change')
+        self.write('cmd/tool/main.go', 'package main\n')
+        git(self.clone, 'add', 'cmd/tool/main.go')
+        self.write('docs/guide.md', 'guide, edited\n')
+        status, out, err = self.check('--changed')
+        self.assertEqual(status, 0, out + err)
+        self.assertEqual(self.ran(out), {'docs-lint', 'go-vet', 'go-test', 'whitespace'}, out)
+
+    def test_a_submodule_change_counts_whatever_its_ignore_setting(self):
+        sub = self.work / 'sub'
+        git(self.work, 'init', '-q', '-b', 'main', str(sub))
+        (sub / 'lib.txt').write_text('one\n')
+        git(sub, 'add', 'lib.txt')
+        git(sub, 'commit', '-q', '-m', 'one')
+        git(self.clone, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(sub), 'third_party/lib')
+        git(self.clone, 'config', '-f', '.gitmodules', 'submodule.third_party/lib.ignore', 'all')
+        base = self.commit_base('submodule ignored by .gitmodules')
+        (sub / 'lib.txt').write_text('two\n')
+        git(sub, 'commit', '-q', '-am', 'two')
+        bumped = git(sub, 'rev-parse', 'HEAD').stdout.decode().strip()
+        with self.subTest(case='ignore = all in .gitmodules, a committed pointer bump'):
+            git(self.clone, 'update-index', '--cacheinfo', '160000,%s,third_party/lib' % bumped)
+            git(self.clone, 'commit', '-q', '-m', 'bump')
+            self.write('docs/guide.md', 'guide, edited\n')
+            status, out, err = self.check('--changed', base)
+            self.assertEqual(status, 0, out + err)
+            self.assertIn('unmapped path third_party/lib: whole list', out)
+            self.assertEqual(self.ran(out), ALL, out)
+        git(self.clone, 'reset', '-q', '--hard', base)
+        with self.subTest(case='ignore = dirty in the clone configuration, a changed file in the submodule'):
+            git(self.clone, 'config', 'submodule.third_party/lib.ignore', 'dirty')
+            (self.clone / 'third_party' / 'lib' / 'lib.txt').write_text('edited\n')
+            self.write('docs/guide.md', 'guide, edited\n')
+            status, out, err = self.check('--changed', base)
+            self.assertEqual(status, 0, out + err)
+            self.assertIn('unmapped path third_party/lib: whole list', out)
+            self.assertEqual(self.ran(out), ALL, out)
 
     def test_no_mapping_runs_the_whole_list(self):
         self.write('jpdev.json', json.dumps({'version': 1, 'generators': [
@@ -284,6 +368,55 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertIn('--changed and --only both choose the steps; give one', err)
 
 
+SCHEMA_KEYWORDS = {'$schema', 'title', 'description', 'type', 'const', 'required', 'anyOf', 'properties',
+                   'additionalProperties', 'items', 'minItems', 'uniqueItems', 'minLength', 'minimum',
+                   'maximum', 'pattern'}
+SCHEMA_TYPES = {'object': dict, 'array': list, 'string': str}
+
+
+def schema_errors(schema, value, where='$'):
+    """The JSON Schema keywords templates/jpdev.schema.json uses, with the standard library alone.
+
+    A keyword outside that set fails the test, so the schema cannot outgrow this reader unseen.
+    """
+    unknown = set(schema) - SCHEMA_KEYWORDS
+    if unknown:
+        raise AssertionError('the stdlib schema reader does not know %s' % sorted(unknown))
+    kind = schema.get('type')
+    if kind == 'integer' and not (type(value) is int):
+        return ['%s: not an integer' % where]
+    if kind in SCHEMA_TYPES and not isinstance(value, SCHEMA_TYPES[kind]):
+        return ['%s: not %s' % (where, kind)]
+    errors = []
+    if 'const' in schema and (value != schema['const'] or isinstance(value, bool) != isinstance(schema['const'], bool)):
+        errors.append('%s: not %r' % (where, schema['const']))
+    if 'anyOf' in schema and all(schema_errors(option, value, where) for option in schema['anyOf']):
+        errors.append('%s: matches no anyOf option' % where)
+    if isinstance(value, dict):
+        errors += ['%s: %s is required' % (where, key) for key in schema.get('required', []) if key not in value]
+        for key, item in value.items():
+            if key in schema.get('properties', {}):
+                errors += schema_errors(schema['properties'][key], item, '%s.%s' % (where, key))
+            elif schema.get('additionalProperties') is False:
+                errors.append('%s: %s is not allowed' % (where, key))
+    if isinstance(value, list):
+        if len(value) < schema.get('minItems', 0):
+            errors.append('%s: fewer than %d items' % (where, schema['minItems']))
+        if schema.get('uniqueItems') and len({json.dumps(i, sort_keys=True) for i in value}) != len(value):
+            errors.append('%s: repeated items' % where)
+        for index, item in enumerate(value):
+            if 'items' in schema:
+                errors += schema_errors(schema['items'], item, '%s[%d]' % (where, index))
+    if isinstance(value, str):
+        if len(value) < schema.get('minLength', 0):
+            errors.append('%s: too short' % where)
+        if 'pattern' in schema and not re.search(schema['pattern'], value):
+            errors.append('%s: does not match the pattern' % where)
+    if type(value) is int and not schema.get('minimum', value) <= value <= schema.get('maximum', value):
+        errors.append('%s: out of range' % where)
+    return errors
+
+
 class DeclarationTests(unittest.TestCase):
     def test_shipped_mappings_name_steps_of_their_manifests(self):
         for config, manifest in ((ROOT / 'templates' / 'jpdev.json', ROOT / 'templates' / 'dev.json'),
@@ -296,16 +429,21 @@ class DeclarationTests(unittest.TestCase):
                 self.assertTrue(rules)
 
     def test_the_schema_holds_the_shape_the_command_reads(self):
+        # The standard-library reader always runs, so the test never skips; the jsonschema package,
+        # where it is installed, reads the same vectors too.
+        schema = json.loads((ROOT / 'templates' / 'jpdev.schema.json').read_text())
+        readers = [('stdlib', lambda value: schema_errors(schema, value))]
         try:
             import jsonschema
+            validator = jsonschema.Draft202012Validator(schema)
+            readers.append(('jsonschema', lambda value: list(validator.iter_errors(value))))
         except ImportError:
-            self.skipTest('the jsonschema package is not installed')
-        schema = json.loads((ROOT / 'templates' / 'jpdev.schema.json').read_text())
-        validator = jsonschema.Draft202012Validator(schema)
+            pass
         good = json.loads((FIXTURE / 'changed-jpdev.json').read_text())
-        for value in (good, json.loads((ROOT / 'templates' / 'jpdev.json').read_text()),
-                      json.loads((ROOT / 'jpdev.json').read_text())):
-            self.assertEqual(list(validator.iter_errors(value)), [])
+        for reader, errors in readers:
+            for value in (good, json.loads((ROOT / 'templates' / 'jpdev.json').read_text()),
+                          json.loads((ROOT / 'jpdev.json').read_text())):
+                self.assertEqual(errors(value), [], reader)
         bad = {
             'no declaration': lambda v: v.pop('changed'),
             'empty mapping': lambda v: v.update(changed=[]),
@@ -325,11 +463,12 @@ class DeclarationTests(unittest.TestCase):
             'brace': lambda v: v['changed'][0].update(paths=['{docs,site}/**']),
             'check name': lambda v: v['changed'][0].update(checks=['docs lint']),
         }
-        for label, change in bad.items():
-            with self.subTest(case=label):
-                value = copy.deepcopy(good)
-                change(value)
-                self.assertNotEqual(list(validator.iter_errors(value)), [], label)
+        for reader, errors in readers:
+            for label, change in bad.items():
+                with self.subTest(reader=reader, case=label):
+                    value = copy.deepcopy(good)
+                    change(value)
+                    self.assertNotEqual(errors(value), [], label)
 
 
 if __name__ == '__main__':

@@ -2,10 +2,12 @@
 """changed_checks.py --root ROOT --manifest MANIFEST [--base BASE]
 
 Selects the check-list steps that the changed paths of a clone can affect, for
-`jpdev check --changed [BASE]`. The changed paths are those that differ between the merge base of
-BASE and HEAD and the working tree (committed, staged and unstaged changes, deletions, and both
-sides of a rename), plus untracked files that are not ignored. BASE defaults to the default
-branch: origin/HEAD, else origin/main, else origin/master.
+`jpdev check --changed [BASE]`. The changed paths are those that differ from the merge base of
+BASE and HEAD in HEAD, in the index or in the working tree (deletions, both sides of a rename, and
+submodules whatever their ignore setting), plus untracked files that are not ignored. BASE
+defaults to the default branch: origin/HEAD, else origin/main, else origin/master. Only what git
+reports is seen: an edit hidden by assume-unchanged or skip-worktree, an ignored file and a path
+outside the clone are not.
 
 The mapping is the `changed` member of jpdev.json at the root: rules of path globs and the check
 names they select. A glob is matched against the whole repository-relative path; `*` and
@@ -26,6 +28,9 @@ import subprocess
 import sys
 
 CONFIG = 'jpdev.json'
+# Every diff names paths from the top, counts both sides of a rename, runs no external diff, and
+# reports a submodule whatever its ignore setting in .gitmodules or the git configuration.
+DIFF = ('diff', '--name-only', '-z', '--no-renames', '--no-relative', '--no-ext-diff', '--ignore-submodules=none')
 MEMBERS = {'version', 'generators', 'changed'}
 RULE_MEMBERS = {'paths', 'checks'}
 UNSUPPORTED = '\\[]{}'
@@ -151,23 +156,33 @@ def resolve_base(root, base):
 
 
 def changed_paths(root, merge_base):
-    status, diff = git(root, 'diff', '--name-only', '-z', '--no-renames', '--no-relative', '--no-ext-diff',
-                       merge_base, '--')
-    if status:
-        raise Refused('git diff against the merge base %s failed' % merge_base[:12])
+    """The paths HEAD, the index or the working tree changed since the merge base, and untracked."""
+    raw = set()
+    for side, args in (('the working tree', (merge_base,)), ('the index', ('--cached', merge_base)),
+                       ('HEAD', (merge_base, 'HEAD'))):
+        status, diff = git(root, *(DIFF + args + ('--',)))
+        if status:
+            raise Refused('git diff of %s against the merge base %s failed' % (side, merge_base[:12]))
+        raw |= set(diff.split(b'\0'))
     status, untracked = git(root, 'ls-files', '--others', '--exclude-standard', '--full-name', '-z')
     if status:
         raise Refused('git ls-files of the untracked files failed')
-    raw = set(diff.split(b'\0')) | set(untracked.split(b'\0'))
+    raw |= set(untracked.split(b'\0'))
     return sorted(p.decode('utf-8', 'replace') for p in raw - {b''})
 
 
 def selection_inputs(root, manifest):
     """The repository paths whose change changes the selection itself."""
     inputs = [CONFIG, 'scripts/dev/check.sh']
-    relative = os.path.relpath(os.path.realpath(manifest), os.path.realpath(str(root)))
-    if relative != os.pardir and not relative.startswith(os.pardir + os.sep) and not os.path.isabs(relative):
-        inputs.append(relative.replace(os.sep, '/'))
+    # The manifest as named (a symlink retargeted changes the link) and as resolved.
+    for path in (os.path.abspath(manifest), os.path.realpath(manifest)):
+        for top in (str(root), os.path.realpath(str(root))):
+            relative = os.path.relpath(path, top)
+            if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+                continue
+            relative = relative.replace(os.sep, '/')
+            if relative not in inputs:
+                inputs.append(relative)
     return inputs
 
 

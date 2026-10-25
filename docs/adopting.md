@@ -178,9 +178,12 @@ and generator regression checks remain useful and should be preserved.
 
 ## Changed-path check selection
 
-`jpdev check --changed [BASE]` runs only the checks a change can affect. The repository says which
-in the `changed` member of `jpdev.json`, the version1 file that also declares generated documents
-(`generators` may be left out when `changed` is present):
+`jpdev check --changed [BASE]` runs only the checks a change can affect. The changed paths are those
+that differ from the merge base of `BASE` (default: the default branch) and `HEAD` in `HEAD`, in the
+index or in the working tree, submodules included whatever their `ignore` setting, plus untracked
+files that are not ignored. The repository says which checks they affect in the `changed` member of
+`jpdev.json`, the version1 file that also declares generated documents (`generators` may be left
+out when `changed` is present):
 
 ```json
 {
@@ -195,14 +198,18 @@ in the `changed` member of `jpdev.json`, the version1 file that also declares ge
 A rule names path globs and the `dev.json` checks (`parity` included) that a changed path matching
 one of them selects; a path that matches several rules selects the checks of each. A glob matches
 the whole repository-relative path: `*` and `?` stay within one path segment, a `**` segment matches
-any number of segments (`docs/**`, `**/*.go`), and every other character is literal. A glob holding
+any number of segments (`docs/**`, `**/*.go`), and every other character is literal; `*` also
+matches a name that starts with a dot (`*.yml` matches `.golangci.yml`). A glob holding
 `[`, `]`, `{`, `}` or `\`, a glob that starts with `/` or has an empty, `.` or `..` segment, a check
 the manifest does not list, an empty or repeated list and an unknown member are refused, with a
 message that names the member or rule at fault, before any check runs.
 `templates/jpdev.schema.json` documents the same shape and `templates/jpdev.json` holds an example.
 
-A changed path that no rule covers runs the whole list, and so does a change to `jpdev.json`, to the
-manifest or to `scripts/dev/check.sh`. Map only paths whose effect on the checks is known, and put
-the checks that read every file (whitespace, path and name checks) in every rule. The
-[policy](policy.md#testing) says where a scoped run is allowed and where the full list is
-required.
+The whole list runs when a changed path matches no rule, when `jpdev.json`, the manifest (as named
+or as a symlink resolves) or `scripts/dev/check.sh` changed, when nothing changed, and when there is
+no mapping (no `jpdev.json`, or one without `changed`). Map only paths whose effect on the checks is
+known, and put the checks that read every file (whitespace, path and name checks) in every rule.
+Selection sees only what git reports in this clone: an edit hidden by assume-unchanged or
+skip-worktree, an ignored file and a path outside the clone are not seen, and the full list remains
+the guard for them. The [policy](policy.md#testing) says where a scoped run is allowed and where the
+full list is required.
