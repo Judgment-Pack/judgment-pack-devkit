@@ -487,8 +487,9 @@ class Configuration(Fixture):
         self.assertEqual((result.returncode, result.stderr), (2, 'duplication: refused: jpdev.json: an object is required\n'))
 
     def test_the_shipped_declarations_are_read(self):
-        template = json.loads((ROOT / 'templates' / 'jpdev.json').read_text())
-        self.assertIsNotNone(d.settings(template), 'templates/jpdev.json shows the duplication member')
+        for name in ('templates/jpdev.json', 'jpdev.json'):
+            with self.subTest(declaration=name):
+                self.assertIsNotNone(d.settings(json.loads((ROOT / name).read_text())), name + ' declares the member')
 
 
 class Schema(unittest.TestCase):
@@ -509,21 +510,29 @@ class Schema(unittest.TestCase):
             self.assertEqual((limits['type'], limits['minimum'], limits['maximum']), ('integer',) + bounds)
 
     def test_the_schema_and_the_command_agree_on_every_vector(self):
+        # The standard-library reader of tests/changed_checks_test.py always runs, so the test never
+        # skips; the jsonschema package, where it is installed, reads the same vectors too.
+        spec = importlib.util.spec_from_file_location('changed_checks_test', str(ROOT / 'tests' / 'changed_checks_test.py'))
+        reader = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reader)
+        readers = [('stdlib', lambda value: reader.schema_errors(self.schema, value))]
         try:
             import jsonschema
+            validator = jsonschema.Draft202012Validator(self.schema)
+            readers.append(('jsonschema', lambda value: list(validator.iter_errors(value))))
         except ImportError:
-            self.skipTest('the jsonschema package is not installed')
-        validator = jsonschema.Draft202012Validator(self.schema)
+            pass
         good = {'version': 1, 'duplication': copy.deepcopy(GOOD)}
-        self.assertEqual(list(validator.iter_errors(good)), [])
-        self.assertEqual(list(validator.iter_errors({'version': 1, 'duplication': dict(PYTHON)})), [],
-                         'a declaration of duplication alone is valid')
-        self.assertEqual(list(validator.iter_errors(json.loads((ROOT / 'templates' / 'jpdev.json').read_text()))), [])
-        for name, change, _ in REFUSED:
-            value = copy.deepcopy(good)
-            change(value)
-            with self.subTest(case=name):
-                self.assertTrue(list(validator.iter_errors(value)), 'the schema accepts what the command refuses')
+        shipped = [json.loads((ROOT / name).read_text()) for name in ('templates/jpdev.json', 'jpdev.json')]
+        for name, errors in readers:
+            with self.subTest(reader=name):
+                for value in [good, {'version': 1, 'duplication': dict(PYTHON)}] + shipped:
+                    self.assertEqual(errors(value), [], 'the schema refuses what the command reads')
+            for case, change, _ in REFUSED:
+                value = copy.deepcopy(good)
+                change(value)
+                with self.subTest(reader=name, case=case):
+                    self.assertTrue(errors(value), 'the schema accepts what the command refuses')
 
 
 if __name__ == '__main__':

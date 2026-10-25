@@ -224,6 +224,11 @@ duplication: 1 duplicate pair (at least 70 tokens over at least 6 lines, 214 fil
   internal/audit/receipt.go:18-50 and internal/export/receipt.go:40-72: 131 tokens
 ```
 
+The kit runs the check on itself with `python3 lib/duplication.py`, over its Python and shell
+files at 100 tokens and 10 lines, and leaves out `scripts/dev/**`: those files are the vendored
+copies of `templates/check.sh`, `lib/generated_docs.py` and `lib/handover_check.sh`, kept the
+same on purpose.
+
 The exit status is 0 when nothing is found or the check is off, 1 when a pair or an ignore marker
 problem is found, and 2 when the declaration is refused. A refusal names the member, for example
 `duplication: refused: jpdev.json duplication.min_tokens: an integer from 10 to 10000 is required
@@ -267,8 +272,8 @@ Python steps, and for other steps that invoke `python3`, name the interpreter us
 - `tests/run.sh`: the kit's own tests (`tests/fixture/` holds a manifest of shell echoes and one
   deliberate failure, and the manifest and mapping of the `jpdev check --changed` fixture clones).
 - `dev.json`, `jpdev.json`, `scripts/dev/check.sh`, `scripts/dev/handover_check.sh`, `AGENTS.md`,
-  `CLAUDE.md`: the kit on itself, the list of checks CI runs, its changed-path mapping, and the
-  handover guard. `CONTRIBUTING.md`, `SECURITY.md`, `docs/releasing.md`: contributing, reporting
+  `CLAUDE.md`: the kit on itself, the list of checks CI runs, its changed-path mapping and
+  duplication thresholds, and the handover guard. `CONTRIBUTING.md`, `SECURITY.md`, `docs/releasing.md`: contributing, reporting
   and releasing.
 
 Apache-2.0; see `LICENSE`.

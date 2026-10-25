@@ -1,5 +1,11 @@
 {
   "version": 1,
+  "duplication": {
+    "languages": ["python", "shell"],
+    "exclude": ["scripts/dev/**"],
+    "min_tokens": 100,
+    "min_lines": 10
+  },
   "changed": [
     {
       "paths": ["docs/**", "*.md", "LICENSE", "NOTICE", ".github/PULL_REQUEST_TEMPLATE.md"],
