@@ -58,21 +58,29 @@ what actually ran and what remains required by current CI/release gates.
 
 ## Who builds and who reviews
 
-- **Codex builds non-boundary issues** from accepted designs and briefs, and Claude reviews
-  them.
-- **Claude builds boundary decisions** (the architecture decision records that set a security
-  boundary), and Codex reviews them when its quota allows.
-- A Codex build runs from a brief with `jpdev codex run`: the model and the effort are always
-  passed, the sandbox is `workspace-write` with network access, stdin is closed, and the prompt
-  names the repository's `AGENTS.md` as the rules. Codex cannot write `.git` in that sandbox, so
-  it does not commit: it writes `msg.txt` and `pr.md` (the brief skeleton from
+- **A build or a review runs on the model the operator selects by use case**, never by habit:
+  the most capable model available at the effort the task needs is the default for building
+  and for clean-room reviewing; a cheaper tier is chosen only when the operator says so for a
+  narrow, well-specified task (mechanical rows, test-only changes, scans), and never for a
+  review of record. The cost that counts is the cost per completed task: a cheaper run that
+  needs another round is dearer than one run that finishes.
+- **The reviewer is never the builder's own session and never a weaker tier than the builder's.**
+  A review record names the vendor and model that reviewed; a same-vendor review says so and
+  does not claim to be cross-vendor.
+- **Boundary decisions** (the architecture decision records that set a security boundary) are
+  built and reviewed at the highest tier the operator has.
+- **Codex is one way to run a build**, chosen by the operator per run, not the default. A Codex
+  build runs from a brief with `jpdev codex run`: the model and the effort are always passed,
+  the sandbox is `workspace-write` with network access, stdin is closed, and the prompt names
+  the repository's `AGENTS.md` as the rules. Codex cannot write `.git` in that sandbox, so it
+  does not commit: it writes `msg.txt` and `pr.md` (the brief skeleton from
   `jpdev codex brief-template` says so), and `jpdev codex run` commits the tracked changes with
-  a sign-off, pushes through the `gh` credential helper and opens the pull request from those two
-  files. `danger-full-access` is chosen explicitly or not at all.
+  a sign-off, pushes through the `gh` credential helper and opens the pull request from those
+  two files. `danger-full-access` is chosen explicitly or not at all.
 - A brief describes the documented refusal the code must produce (the input, and the exact
-  refusal), not the attack the refusal answers: the content filter of the Codex service can
-  refuse a brief that names attacks as verbs or nouns. `jpdev codex check-brief` refuses such a
-  brief before the run, and `jpdev codex run` runs the same check first.
+  refusal), not the attack the refusal answers: a provider's content filter can refuse a brief
+  that names attacks as verbs or nouns. `jpdev codex check-brief` refuses such a brief before
+  the run, and `jpdev codex run` runs the same check first.
 
 ## Turnaround
 
