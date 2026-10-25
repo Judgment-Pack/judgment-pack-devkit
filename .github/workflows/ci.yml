@@ -24,12 +24,13 @@ jobs:
         with:
           persist-credentials: false
       # Whitespace; no machine-local path in tracked text; CLAUDE.md is AGENTS.md and the root
-      # copy starts with the template; every script parses; the JSON documents parse; shellcheck
-      # (the program the runner image carries).
+      # copy starts with the template; every script parses; no block of code is duplicated over the
+      # thresholds of jpdev.json; the JSON documents parse; shellcheck (the program the runner image
+      # carries).
       - name: The lint steps of dev.json
         run: |
           set -o pipefail
-          scripts/dev/check.sh --all --only diff-check,local-paths,agent-docs,bash-n,json,shellcheck | tee "${{ runner.temp }}/checks.log"
+          scripts/dev/check.sh --all --only diff-check,local-paths,agent-docs,bash-n,duplication,json,shellcheck | tee "${{ runner.temp }}/checks.log"
 
       - name: Record exact CI inputs and coverage
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

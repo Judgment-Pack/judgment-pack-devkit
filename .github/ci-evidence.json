@@ -8,6 +8,8 @@
     "lib/ci_evidence.py",
     "templates/check.sh",
     "lib/generated_docs.py",
+    "lib/duplication.py",
+    "jpdev.json",
     "scripts/dev/generated_docs.py",
     "tests/generated_docs_test.py",
     "tests/run.sh",
@@ -60,6 +62,7 @@
             "local-paths",
             "agent-docs",
             "bash-n",
+            "duplication",
             "json",
             "shellcheck"
           ]

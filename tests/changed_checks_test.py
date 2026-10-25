@@ -368,9 +368,9 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertIn('--changed and --only both choose the steps; give one', err)
 
 
-SCHEMA_KEYWORDS = {'$schema', 'title', 'description', 'type', 'const', 'required', 'anyOf', 'properties',
+SCHEMA_KEYWORDS = {'$schema', 'title', 'description', 'type', 'const', 'enum', 'required', 'anyOf', 'properties',
                    'additionalProperties', 'items', 'minItems', 'uniqueItems', 'minLength', 'minimum',
-                   'maximum', 'pattern'}
+                   'maximum', 'multipleOf', 'pattern'}
 SCHEMA_TYPES = {'object': dict, 'array': list, 'string': str}
 
 
@@ -390,6 +390,8 @@ def schema_errors(schema, value, where='$'):
     errors = []
     if 'const' in schema and (value != schema['const'] or isinstance(value, bool) != isinstance(schema['const'], bool)):
         errors.append('%s: not %r' % (where, schema['const']))
+    if 'enum' in schema and not any(value == option and type(value) is type(option) for option in schema['enum']):
+        errors.append('%s: not one of %r' % (where, schema['enum']))
     if 'anyOf' in schema and all(schema_errors(option, value, where) for option in schema['anyOf']):
         errors.append('%s: matches no anyOf option' % where)
     if isinstance(value, dict):
@@ -414,6 +416,8 @@ def schema_errors(schema, value, where='$'):
             errors.append('%s: does not match the pattern' % where)
     if type(value) is int and not schema.get('minimum', value) <= value <= schema.get('maximum', value):
         errors.append('%s: out of range' % where)
+    if type(value) in (int, float) and 'multipleOf' in schema and value % schema['multipleOf']:
+        errors.append('%s: not a multiple of %r' % (where, schema['multipleOf']))
     return errors
 
 

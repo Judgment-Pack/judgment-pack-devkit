@@ -45,6 +45,11 @@ absent() {
 out=$(python3 "$kit/tests/ci_evidence_test.py" 2>&1) && s=0 || s=$?
 expect "trusted CI evidence admission and collector fixtures" 0 'OK' "$out" "$s"
 
+# The duplication check: handwritten fixture repositories through its command line and the
+# template manifest's step; the schema and the command agree on every declaration vector.
+out=$(python3 "$kit/tests/duplication_test.py" 2>&1) && s=0 || s=$?
+expect "duplication check fixtures: pairs, thresholds, ignore blocks, refused declarations" 0 'OK' "$out" "$s"
+
 # Generated documents: actual fresh/stale fixture repository CLI invocations.
 out=$(python3 "$kit/tests/generated_docs_test.py" 2>&1) && s=0 || s=$?
 expect "generated document scratch regeneration fixtures" 0 'OK' "$out" "$s"

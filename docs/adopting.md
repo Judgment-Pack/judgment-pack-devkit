@@ -167,6 +167,19 @@ JPDEV_DESK=path/to/desk-checkout jpdev check --all --manifest path/to/devkit/exa
 
 Copy the example to the repository as `dev.json` when it adopts the kit.
 
+## Duplication check
+
+The `duplication` step is opt-in. Vendor `lib/duplication.py` as `scripts/dev/duplication.py`, keep
+the `duplication` step of `templates/dev.json` in the check list, and declare the repository's
+languages and its token and line thresholds in the `duplication` member of `jpdev.json`
+(`generators` may be left out when `duplication` is present). Until the member is present the step
+passes and its summary line says `duplication: off`. Choose thresholds the current tree passes, or
+remove or mark the copies the first run names. When `jpdev.json` also maps changed paths
+(`changed`), list `duplication` in every rule whose globs can match a file of a declared language,
+or `jpdev check --changed` does not run the step for those changes.
+[The duplication check](../README.md#the-duplication-check) describes the member, the ignore block
+and the report.
+
 ## Generated reference documents
 
 Keep `dev.json` as the checklist manifest. Repositories with checked-in generated documents add

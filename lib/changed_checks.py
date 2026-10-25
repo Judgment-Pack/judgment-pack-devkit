@@ -31,7 +31,8 @@ CONFIG = 'jpdev.json'
 # Every diff names paths from the top, counts both sides of a rename, runs no external diff, and
 # reports a submodule whatever its ignore setting in .gitmodules or the git configuration.
 DIFF = ('diff', '--name-only', '-z', '--no-renames', '--no-relative', '--no-ext-diff', '--ignore-submodules=none')
-MEMBERS = {'version', 'generators', 'changed'}
+# `generators` is read by lib/generated_docs.py and `duplication` by lib/duplication.py; this reads `changed`.
+MEMBERS = {'version', 'generators', 'changed', 'duplication'}
 RULE_MEMBERS = {'paths', 'checks'}
 UNSUPPORTED = '\\[]{}'
 SHOWN = 20

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "jpdev repository declarations: generated documents and changed-path check selection",
+  "title": "jpdev repository declarations: generated documents, changed-path check selection and the duplication check",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,11 +16,84 @@
       "required": [
         "changed"
       ]
+    },
+    {
+      "required": [
+        "duplication"
+      ]
     }
   ],
   "properties": {
     "version": {
       "const": 1
+    },
+    "duplication": {
+      "description": "the duplication check (lib/duplication.py, vendored as scripts/dev/duplication.py): off unless this member is present; a pair of places sharing at least min_tokens tokens, each over at least min_lines lines, fails it",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "languages",
+        "min_tokens",
+        "min_lines"
+      ],
+      "properties": {
+        "languages": {
+          "description": "the languages read; each names its file extensions and comment syntax",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "go",
+              "javascript",
+              "python",
+              "shell",
+              "typescript"
+            ]
+          }
+        },
+        "paths": {
+          "description": "repository-relative globs of the files read (* and ? within one segment, ** as a whole segment); default **",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+)(?:/(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+))*$"
+          }
+        },
+        "exclude": {
+          "description": "repository-relative globs of files not read",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+)(?:/(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+))*$"
+          }
+        },
+        "min_tokens": {
+          "description": "the fewest shared tokens reported",
+          "type": "integer",
+          "multipleOf": 1,
+          "minimum": 10,
+          "maximum": 10000
+        },
+        "min_lines": {
+          "description": "the fewest lines each place of a reported pair spans",
+          "type": "integer",
+          "multipleOf": 1,
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_file_bytes": {
+          "description": "a file larger than this is not read, and is named; default 1048576",
+          "type": "integer",
+          "multipleOf": 1,
+          "minimum": 1024,
+          "maximum": 104857600
+        }
+      }
     },
     "generators": {
       "type": "array",
