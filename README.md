@@ -94,6 +94,18 @@ the same name overrides it. `config/env.example` documents each setting with its
   order, each under its toolchain's cap, and stops at the first failure unless `--all`. The
   block names each check, pass or fail, the lines its `summary` regex matched, and the first 40
   lines of a failure. The exit status is the number of failures.
+- `jpdev check --changed [BASE] [--skip NAME,...] [--all] [--manifest FILE]`: runs only the checks
+  that the `changed` rules of `jpdev.json` map the changed paths to (see
+  [changed-path check selection](docs/adopting.md#changed-path-check-selection)). The changed paths
+  are those that differ from the merge base of `BASE` and `HEAD` in `HEAD`, in the index or in the
+  working tree (deletions, both sides of a rename, and submodules whatever their `ignore` setting),
+  plus untracked files that are not ignored. `BASE` defaults to the default branch: `origin/HEAD`,
+  else `origin/main`, else `origin/master`. The whole list runs when a changed path matches no rule,
+  when `jpdev.json`, the manifest or `scripts/dev/check.sh` changed, when nothing changed, or when
+  there is no mapping. A block before the summary names each check selected with the globs that
+  selected it and each check not selected, or why the whole list runs. An invalid mapping, a `BASE` that names no commit, a missing
+  default branch or merge base, and `--changed` with `--only` are refused with exit 2 before any
+  check runs.
 - `jpdev mutants --row TEXT [--row TEXT]...`: runs the manifest's `mutants` command on a scratch
   copy of the clone (`.git` left out, `node_modules` linked) and prints caught or not caught per
   row. Clone-local scratch, temporary storage and the copy destination are excluded; their source
@@ -190,10 +202,13 @@ Python steps, and for other steps that invoke `python3`, name the interpreter us
 
 ## What is here
 
-- `bin/jpdev`, `lib/`: the command, the caps, the manifest check, the brief check.
+- `bin/jpdev`, `lib/`: the command, the caps, the manifest check, the brief check, the changed-path
+  check selection.
 - `config/env.example`, `config/codex-words.txt`: the settings by example, and the base word list of
   `jpdev codex check-brief`.
 - `templates/dev.json`, `templates/dev.schema.json`: the manifest by example and its JSON Schema.
+- `templates/jpdev.json`, `templates/jpdev.schema.json`: the generated-document declaration and the
+  changed-path mapping by example, and their JSON Schema.
 - `templates/check.sh` and `lib/handover_check.sh`: the public checks a repository vendors as
   `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`.
 - `templates/codex-brief.md`, `templates/codex-review-brief.md`: the build and review brief
@@ -204,9 +219,10 @@ Python steps, and for other steps that invoke `python3`, name the interpreter us
 - `docs/policy.md`: how agent work on these repositories is run. `docs/adopting.md`: how a
   repository adopts the kit. `examples/judgment-pack-agent.dev.json`: a worked manifest.
 - `tests/run.sh`: the kit's own tests (`tests/fixture/` holds a manifest of shell echoes and one
-  deliberate failure).
-- `dev.json`, `scripts/dev/check.sh`, `scripts/dev/handover_check.sh`, `AGENTS.md`, `CLAUDE.md`: the
-  kit on itself, the list of checks CI runs, and the handover guard. `CONTRIBUTING.md`, `SECURITY.md`,
-  `docs/releasing.md`: contributing, reporting and releasing.
+  deliberate failure, and the manifest and mapping of the `jpdev check --changed` fixture clones).
+- `dev.json`, `jpdev.json`, `scripts/dev/check.sh`, `scripts/dev/handover_check.sh`, `AGENTS.md`,
+  `CLAUDE.md`: the kit on itself, the list of checks CI runs, its changed-path mapping, and the
+  handover guard. `CONTRIBUTING.md`, `SECURITY.md`, `docs/releasing.md`: contributing, reporting
+  and releasing.
 
 Apache-2.0; see `LICENSE`.

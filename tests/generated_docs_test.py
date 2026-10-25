@@ -50,6 +50,8 @@ class GeneratedDocsTests(unittest.TestCase):
         good = {'version':1,'generators':[self.item]}
         cases = {
             'version': dict(good,version=2),
+            'declaration-members': dict(good,unexpected=True),
+            'mapping-without-generators': {'version':1,'changed':[{'paths':['docs/**'],'checks':['docs']}]},
             'nonempty': dict(good,generators=[]),
             'members': dict(good,generators=[dict(self.item,unexpected=True)]),
             'name': dict(good,generators=[dict(self.item,name='bad name')]),
@@ -67,6 +69,19 @@ class GeneratedDocsTests(unittest.TestCase):
                 continue
             with self.subTest(guard=name), self.assertRaises(g.Invalid):
                 g.config(value)
+
+    def test_change_mapping_member_is_left_to_jpdev_check(self):
+        changed = [{'paths':['docs/**'], 'checks':['generated-docs']}]
+        try:
+            generators = g.config({'version':1, 'generators':[self.item], 'changed':changed})
+        except g.Invalid as error:
+            self.fail('a declaration with a change mapping was refused: %s' % error)
+        self.assertEqual(generators, [self.item])
+        self.write('jpdev.json', json.dumps({'version':1, 'generators':[self.item], 'changed':changed}))
+        result = subprocess.run([sys.executable, str(HELPER), '--root', str(self.root)],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('reference current', result.stdout)
 
     def test_relative_shape_guard(self):
         with self.assertRaises(g.Invalid):

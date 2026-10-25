@@ -1,11 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "jpdev generated document declarations",
+  "title": "jpdev repository declarations: generated documents and changed-path check selection",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version",
-    "generators"
+    "version"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "generators"
+      ]
+    },
+    {
+      "required": [
+        "changed"
+      ]
+    }
   ],
   "properties": {
     "version": {
@@ -51,6 +62,39 @@
             "items": {
               "type": "string",
               "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "changed": {
+      "description": "jpdev check --changed: rules of repository-relative path globs (* and ? within one segment, ** as a whole segment) and the dev.json check names a changed path they match selects",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "paths",
+          "checks"
+        ],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+)(?:/(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+))*$"
+            }
+          },
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
             }
           }
         }

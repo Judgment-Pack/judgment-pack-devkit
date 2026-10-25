@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "checks": [
+    {"name": "docs-lint", "run": "echo 'docs-lint ran'", "toolchain": "shell", "summary": " ran$"},
+    {"name": "go-vet", "run": "echo 'go-vet ran'", "toolchain": "shell", "summary": " ran$"},
+    {"name": "go-test", "run": "echo 'go-test ran'", "toolchain": "shell", "summary": " ran$"},
+    {"name": "python-tests", "run": "echo 'python-tests ran'", "toolchain": "shell", "summary": " ran$"},
+    {"name": "whitespace", "run": "echo 'whitespace ran'", "toolchain": "shell", "summary": " ran$"}
+  ]
+}

@@ -13,8 +13,12 @@ usage: jpdev COMMAND [ARGS]
   setup DIR [--repo OWNER/NAME] [--branch NAME] [--base origin/main] [--manifest FILE]
                      clone (or reuse) a repository, make the branch, select the toolchains
                      the manifest names, and run its setup steps under the caps
-  check [--only A,B] [--skip A,B] [--all] [--manifest FILE]
-                     run the manifest's checks in order under the caps; exit status = failures
+  check [--only A,B | --changed [BASE]] [--skip A,B] [--all] [--manifest FILE]
+                     run the manifest's checks in order under the caps; exit status = failures;
+                     --changed runs only the steps jpdev.json maps the paths changed since the
+                     merge base of BASE (default: the default branch) and HEAD to; the whole list
+                     runs when a changed path is unmapped, when jpdev.json, the manifest or
+                     scripts/dev/check.sh changed, when nothing changed, or with no mapping
   mutants --row TEXT [--row TEXT]...
                      run the manifest's mutants command on a scratch copy of the clone
   record post (--pr N | --issue N) --file FILE [--repo OWNER/NAME] [--dry-run] [--no-name-check]
@@ -69,19 +73,37 @@ repo_root() {
 }
 
 cmd_check() {
-  local root manifest="" passthru=()
+  local root manifest="" passthru=() changed=0 only=0 base_args=()
   while [ $# -gt 0 ]; do
     case $1 in
       --manifest) need_value "$@"; manifest=$2; shift 2 ;;
-      --only | --skip) need_value "$@"; passthru+=("$1" "$2"); shift 2 ;;
+      --only) need_value "$@"; passthru+=("$1" "$2"); only=1; shift 2 ;;
+      --skip) need_value "$@"; passthru+=("$1" "$2"); shift 2 ;;
       --all) passthru+=(--all); shift ;;
+      --changed)
+        changed=1; shift
+        if [ $# -gt 0 ] && [[ $1 != -* ]]; then base_args=(--base "$1"); shift; fi
+        ;;
       -h | --help) usage; exit 0 ;;
       *) jpdev_die "check: unknown argument $1" ;;
     esac
   done
+  [ "$changed" -eq 0 ] || [ "$only" -eq 0 ] || jpdev_die "check: --changed and --only both choose the steps; give one"
   root=$(repo_root)
   : "${manifest:=$root/dev.json}"
   jpdev_prepare_run "$root" "$manifest"
+  if [ "$changed" -eq 1 ]; then
+    # The first line is the selection (whole, or only NAME,NAME); the rest is the report.
+    local selection first
+    selection=$(python3 -I "$kit/lib/changed_checks.py" --root "$root" --manifest "$manifest" "${base_args[@]}") || exit 2
+    first=${selection%%$'\n'*}
+    printf '%s\n' "${selection#*$'\n'}"
+    case $first in
+      whole) ;;
+      "only "?*) passthru+=(--only "${first#only }") ;;
+      *) jpdev_die "check --changed: the selection could not be read" ;;
+    esac
+  fi
   local script=$root/scripts/dev/check.sh
   [ -x "$script" ] || script=$kit/templates/check.sh
   local logdir
