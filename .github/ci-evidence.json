@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "repository": "Judgment-Pack/judgment-pack-devkit",
+  "max_age_hours": 48,
+  "inputs": [
+    "dev.json",
+    "scripts/dev/check.sh",
+    "lib/ci_evidence.py",
+    "templates/check.sh",
+    "lib/generated_docs.py",
+    "scripts/dev/generated_docs.py",
+    "tests/generated_docs_test.py",
+    "tests/run.sh",
+    "templates/jpdev.json",
+    "templates/jpdev.schema.json",
+    "templates/dev.json"
+  ],
+  "profiles": {
+    "kit": {
+      "bash": [
+        "bash",
+        "--version"
+      ],
+      "git": [
+        "git",
+        "--version"
+      ],
+      "python": [
+        "python3",
+        "--version"
+      ],
+      "go": [
+        "go",
+        "version"
+      ],
+      "shellcheck": [
+        "shellcheck",
+        "--version"
+      ],
+      "rsync": [
+        "rsync",
+        "--version"
+      ]
+    }
+  },
+  "workflows": {
+    "ci": {
+      "path": ".github/workflows/ci.yml",
+      "events": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "jobs": {
+        "lint": {
+          "name": "lint",
+          "job_id": "lint",
+          "profile": "kit",
+          "checks": [
+            "diff-check",
+            "local-paths",
+            "agent-docs",
+            "bash-n",
+            "json",
+            "shellcheck"
+          ]
+        },
+        "tests": {
+          "name": "tests",
+          "job_id": "tests",
+          "profile": "kit",
+          "checks": [
+            "tests"
+          ]
+        }
+      }
+    }
+  }
+}
