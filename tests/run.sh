@@ -49,6 +49,11 @@ expect "trusted CI evidence admission and collector fixtures" 0 'OK' "$out" "$s"
 out=$(python3 "$kit/tests/generated_docs_test.py" 2>&1) && s=0 || s=$?
 expect "generated document scratch regeneration fixtures" 0 'OK' "$out" "$s"
 
+# jpdev check --changed: handwritten mapping fixtures (tests/fixture/changed-*.json) in fixture
+# clones, through bin/jpdev.
+out=$(python3 "$kit/tests/changed_checks_test.py" 2>&1) && s=0 || s=$?
+expect "jpdev check --changed selects the mapped checks of fixture clones" 0 'OK' "$out" "$s"
+
 # --- the public runner, with no caps
 out=$("$kit/templates/check.sh" --manifest "$fixture" 2>/dev/null) && s=0 || s=$?
 # JPDEV_ROOT is unset: the template's own location is the kit, whose git root is this repository.

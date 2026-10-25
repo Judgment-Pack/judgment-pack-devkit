@@ -175,3 +175,34 @@ an explicit version1 `jpdev.json` generator declaration and vendor `lib/generate
 runs locally and in existing CI. See [generated documents](generated-docs.md) for the declaration,
 scratch copy/dependency rules, output validation and stale-document diagnostics. Existing reference
 and generator regression checks remain useful and should be preserved.
+
+## Changed-path check selection
+
+`jpdev check --changed [BASE]` runs only the checks a change can affect. The repository says which
+in the `changed` member of `jpdev.json`, the version1 file that also declares generated documents
+(`generators` may be left out when `changed` is present):
+
+```json
+{
+  "version": 1,
+  "changed": [
+    {"paths": ["docs/**", "*.md"], "checks": ["docs-lint", "diff-check"]},
+    {"paths": ["**/*.go", "go.mod", "go.sum"], "checks": ["go-vet", "go-test", "diff-check"]}
+  ]
+}
+```
+
+A rule names path globs and the `dev.json` checks (`parity` included) that a changed path matching
+one of them selects; a path that matches several rules selects the checks of each. A glob matches
+the whole repository-relative path: `*` and `?` stay within one path segment, a `**` segment matches
+any number of segments (`docs/**`, `**/*.go`), and every other character is literal. A glob holding
+`[`, `]`, `{`, `}` or `\`, a glob that starts with `/` or has an empty, `.` or `..` segment, a check
+the manifest does not list, an empty or repeated list and an unknown member are refused, with a
+message that names the member or rule at fault, before any check runs.
+`templates/jpdev.schema.json` documents the same shape and `templates/jpdev.json` holds an example.
+
+A changed path that no rule covers runs the whole list, and so does a change to `jpdev.json`, to the
+manifest or to `scripts/dev/check.sh`. Map only paths whose effect on the checks is known, and put
+the checks that read every file (whitespace, path and name checks) in every rule. The
+[policy](policy.md#testing) says where a scoped run is allowed and where the full list is
+required.

@@ -1,8 +1,11 @@
 # Checked-in generated documents
 
 `dev.json` remains the check runner manifest. `jpdev.json` version1 declares generators; it is
-not another check runner or an alias for `dev.json`. Copy `lib/generated_docs.py` to
-`scripts/dev/generated_docs.py` when adopting this check. The checker uses Python's standard
+not another check runner or an alias for `dev.json`. Its optional `changed` member is the path
+mapping of `jpdev check --changed`
+([changed-path check selection](adopting.md#changed-path-check-selection)); this checker accepts
+that member and does not read it. Copy `lib/generated_docs.py` to `scripts/dev/generated_docs.py`
+when adopting this check. The checker uses Python's standard
 library and validates the complete declaration before running repository-owned build commands.
 `templates/jpdev.schema.json` documents the same shape; the checker also rejects duplicate names,
 escaping, symlinked, ambiguous and overlapping output paths without requiring a schema package.
