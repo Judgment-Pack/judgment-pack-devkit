@@ -10,16 +10,51 @@ are the ones a brief does not repeat.
 - **CI owns everything deterministic.** Formatting, builds, unit tests, schema checks,
   certification suites, whitespace and path checks run in CI on every pull request. A session
   does not re-run them to reassure itself and does not watch CI run.
-- **A builder runs the repository's check list once locally before pushing.** `jpdev check`, or
-  `scripts/dev/check.sh` where the kit is not installed. The summary block goes in the pull
-  request body. If a check fails: fix, re-run the one check, then the whole list once. A builder
-  starts no CI watch: it pushes, opens the pull request, reports once and stops.
-- **A reviewer builds once and runs probes and mutants only.** The reviewer does not re-run the
-  suites CI runs. It reads the diff, builds the change once, runs the probes it writes to test
-  a claim, and breaks each safeguard the change adds (`jpdev mutants`) to see that a test
-  notices. A safeguard whose test passes with the safeguard removed is a finding.
+- **Define and implement a dependency-ordered coherent batch first.** Name the related issues,
+  dependency order and acceptance criteria; write acceptance and regression fixtures by hand
+  alongside code. During development, run useful focused checks of changed paths, affected
+  contracts, both-language readers and relevant interactions (`jpdev check --only NAME[,NAME]`
+  or `scripts/dev/check.sh --only NAME[,NAME]`). Do not run a full suite or CI cycle merely per
+  completed issue, intermediate commit or handoff.
+- **Run the required full checklist once for the stable integrated candidate before CI.** Use
+  `jpdev check` or `scripts/dev/check.sh`. Record scope, exact candidate identity (head and any
+  uncommitted diff), commands, actual summary and CI ownership. An intermediate handoff identifies
+  who owns the pending stable-batch gate; it does not trigger another full run. A skipped or unrun
+  check is not a pass. After failures, group related fixes and rerun affected checks. Repeat broad
+  validation only for actual repository requirements, substantive changes or unresolved evidence,
+  including unknown affected coverage or changed runner/check-selection semantics.
+- **Keep automatic CI enabled.** Every merge candidate still requires its own exact-head checks.
+  Full deterministic CI remains required for the integrated candidate, default branch and release
+  under the repository's actual gates. Push, report once and stop; do not watch CI.
+- **Reviewers reuse verified evidence and the existing candidate build.** Review begins only
+  after green exact-head CI. Build once only if the required build is unavailable or invalid for
+  that candidate, then run probes of uncovered contracts and meaningful safeguard-removal checks
+  (`jpdev mutants` where applicable). Do not repeat suites that CI already verified.
 - **Each commit is signed off, no history is rewritten.** Pushes are never forced, and go
   through the `gh` credential helper (`jpdev push`), never a stored credential.
+
+## Testing
+
+- **Verify the world, not the self-report.** Check claims against artifacts: the candidate head
+  and diff, files actually included, working directory, executed commands, output and assertions.
+  A builder's report alone does not establish that files exist or that a suite ran.
+- **Prefer real implementations over mocks.** Use a mock for a dependency that cannot run in CI
+  and document that limitation. Test the command, endpoint or exported entry a consumer uses,
+  rather than an internal shortcut that bypasses the contract.
+- **Resolve the product under test explicitly.** Use the candidate's source/build path and verify
+  its identity. Never launch an installed product by a bare name that could silently select a
+  different build. Model CLIs and toolchains used as dependencies are allowed; record their
+  identity where relevant. This rule prevents testing the wrong product, not using tools.
+- **Handwrite acceptance and regression fixtures.** Do not record expected vectors from the
+  implementation under test.
+- **Break each safeguard once.** Remove the fix or safeguard in scratch and verify that the
+  regression test fails at its intended assertion. A setup error, compilation failure or timeout
+  does not count. Preserve the failing assertion and restored passing evidence.
+
+Evidence reuse applies only where an actual repository gate implements and validates equivalence.
+This policy does not introduce automatic changed-check selection or release-evidence reuse:
+Devkit #33 (`--changed`), Devkit #37 and Agent #213 remain separate work. Keep the summary of
+what actually ran and what remains required by current CI/release gates.
 
 ## Who builds and who reviews
 
@@ -46,9 +81,10 @@ additive. Builders append to the manifest's `handover.shared_paths`; they do not
 those files, and they never fetch, rebase or merge. The coordinator carries `main` into each branch
 after its push.
 
-Before handover, a builder runs the self-checks in AGENTS.md on its own head. It uses `--only` for
-touched check steps while iterating and runs the whole check list exactly once at the end. CI must
-be green before any review begins. `jpdev codex run` gives Codex clone-local scratch, lock, Go and
+Before handover, a builder applies the self-checks in AGENTS.md to its own candidate and records
+what ran locally and any pending stable-batch checklist/CI ownership at an intermediate handoff.
+Run the full checklist on the stable integrated candidate before CI as described above; serialize heavy checks under the repository lock. CI must be green on the exact
+reviewed head before review begins. `jpdev codex run` gives Codex clone-local scratch, lock, Go and
 npm caches and an XDG cache when those variables are empty, and creates their directories under
 the clone. Builder `TMPDIR` is always created under its effective scratch, including when an
 external temporary directory was inherited.
@@ -61,8 +97,8 @@ MEDIUM found only on re-read goes to the pre-release batch, and LOW rides.
 `jpdev codex run --small` is for a bounded fix on an existing branch. It tells the builder to run
 only the touched check-list steps; CI runs the whole list. The wrapper refuses the result after the
 run if it changed a manifest `handover.shared_paths` or `handover.boundary_paths` entry, or if its
-added and removed lines exceed `JPDEV_SMALL_MAX_LINES` (80 by default). A red CI run costs a resume,
-not another cold build.
+added and removed lines exceed `JPDEV_SMALL_MAX_LINES` (80 by default). The size/path guard is
+unchanged by the batch workflow. A relevant CI failure gets a focused fix and rerun; reuse the builder unless the safeguard-stop rule below requires a fresh session.
 
 Use `jpdev codex run --resume THREAD` only for the fix round after review on the same branch. Every
 thread id the CLI reports is recorded in `.jpdev/output/thread`. Never resume a builder that a safeguard stopped;
@@ -88,8 +124,10 @@ normal no-new-pull-request Codex path; a carry with no conflicts is signed and p
 - Before a tag, one release review reads the whole diff since the previous tag. After a batch
   of fixes to its findings, the same reviewer re-reads the fixes; a new reviewer starts over
   and is not asked to.
-- One round per pull request. A finding small enough to fix is fixed in the pull request with
-  its test; a second round is not opened for it.
+- One independent review per material pull request, with depth matched to risk. Reuse the builder
+  for corrections and the original reviewer for finding-specific confirmation after green
+  exact-head CI. Do not restart a broad review without substantive change or new evidence; the
+  whole-release review remains required.
 
 `jpdev codex review` runs a checked review brief with an explicit model and effort, closes stdin,
 and writes the final report to a file without committing, pushing or posting. The default sandbox

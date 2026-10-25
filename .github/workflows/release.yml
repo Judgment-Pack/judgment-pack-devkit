@@ -113,14 +113,24 @@ jobs:
             || { echo "The release environment could not be read; create it with a required reviewer (docs/releasing.md)" >&2; exit 1; }
           [ "${reviewers}" -ge 1 ] || { echo "The release environment requires no reviewer" >&2; exit 1; }
 
-  # The tagged commit's own ci.yml, called, so release.yml carries no second copy of the `lint`
-  # and `tests` jobs. A check main has gained since that commit is not run.
+  # Reuse only complete trusted-main evidence; tag-sensitive/package/publication gates stay fresh.
   verify:
     name: CI at the tag
     needs: admit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-    uses: ./.github/workflows/ci.yml
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Require complete exact-source CI evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 lib/ci_evidence.py verify
 
   package:
     name: Package

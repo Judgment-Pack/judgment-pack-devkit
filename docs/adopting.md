@@ -166,3 +166,12 @@ JPDEV_DESK=path/to/desk-checkout jpdev check --all --manifest path/to/devkit/exa
 ```
 
 Copy the example to the repository as `dev.json` when it adopts the kit.
+
+## Generated reference documents
+
+Keep `dev.json` as the checklist manifest. Repositories with checked-in generated documents add
+an explicit version1 `jpdev.json` generator declaration and vendor `lib/generated_docs.py` as
+`scripts/dev/generated_docs.py`. Add the `generated-docs` check to `dev.json`; the same check then
+runs locally and in existing CI. See [generated documents](generated-docs.md) for the declaration,
+scratch copy/dependency rules, output validation and stale-document diagnostics. Existing reference
+and generator regression checks remain useful and should be preserved.

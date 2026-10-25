@@ -41,6 +41,14 @@ absent() {
   if grep -qE -- "$2" <<< "$3"; then bad "$1 (unexpected line matching: $2)" "$3"; else ok "$1"; fi
 }
 
+# The shared CI evidence CLI: handwritten API fixtures, never live-service evidence.
+out=$(python3 "$kit/tests/ci_evidence_test.py" 2>&1) && s=0 || s=$?
+expect "trusted CI evidence admission and collector fixtures" 0 'OK' "$out" "$s"
+
+# Generated documents: actual fresh/stale fixture repository CLI invocations.
+out=$(python3 "$kit/tests/generated_docs_test.py" 2>&1) && s=0 || s=$?
+expect "generated document scratch regeneration fixtures" 0 'OK' "$out" "$s"
+
 # --- the public runner, with no caps
 out=$("$kit/templates/check.sh" --manifest "$fixture" 2>/dev/null) && s=0 || s=$?
 # JPDEV_ROOT is unset: the template's own location is the kit, whose git root is this repository.
@@ -1249,6 +1257,9 @@ if [ "$out" = "$(cat "$kit/templates/codex-brief.md")" ]; then ok "brief-templat
 expect "the brief template tells codex to write msg.txt" 0 'msg\.txt' "$out" "$s"
 expect "the brief template tells codex to write pr.md" 0 'pr\.md' "$out" "$s"
 expect "the brief template tells codex not to commit" 0 'do not run .git commit.' "$out" "$s"
+expect "the brief template links the testing policy" 0 'docs/policy[.]md#testing' "$out" "$s"
+expect "the brief template requires one full stable-batch checklist" 0 'Run the required full checklist once' "$out" "$s"
+expect "the brief template requires stable-batch validation before CI" 0 'for the stable integrated candidate before CI' "$out" "$s"
 notesrepo=$work/notesrepo
 mkdir -p "$notesrepo"
 git init -q -b main "$notesrepo"
@@ -1268,6 +1279,9 @@ expect "the brief template passes check-brief --build" 0 'no word of the filter 
 out=$("$jpdev" codex brief-template --review 2>&1) && s=0 || s=$?
 expect "the review brief template names the reviewer role" 0 '^# Review brief:' "$out" "$s"
 expect "the review brief template requires findings first" 0 'Findings first' "$out" "$s"
+expect "the review brief template links the testing policy" 0 'docs/policy[.]md#testing' "$out" "$s"
+expect "the review brief template confirms the full checklist before CI" 0 'passed its required full checklist before CI' "$out" "$s"
+expect "the review brief template waits for exact-head CI" 0 'green CI on the exact reviewed head' "$out" "$s"
 expect "the review brief template forbids repository writes" 0 'Do not change tracked files' "$out" "$s"
 expect "the review brief template carries the merge yes line" 0 '^merge: yes$' "$out" "$s"
 expect "the review brief template carries the merge after-fixes line" 0 '^merge: after fixes$' "$out" "$s"

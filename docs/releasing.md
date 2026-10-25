@@ -84,9 +84,15 @@ Every job works on the commit the run was started for, by its digest, not on the
 1. **Admits the tag.** It is in the grammar; it is an annotated tag; it names the commit the run
    was started for; that commit is on `main`; `docs/releases/<tag>.md` exists, is not empty and ends
    its first line with the tag; and the `release` environment has a reviewer rule.
-2. **Runs CI at that commit.** The release calls the commit's own
-   [`ci.yml`](../.github/workflows/ci.yml): `lint` and `tests`. A check `main` has gained since that
-   commit is not run.
+2. **Verifies trusted CI evidence at that commit.** The release uses the shared
+   [exact-source evidence gate](ci-evidence.md) for `lint` and `tests`, with independently
+   resolved workflow, source, runner, tool and check identities. The latest applicable main
+   run and its complete latest attempt must be successful and no more than 48 hours old.
+   Missing, inaccessible, changed or partial evidence refuses; a newer failed/canceled/running
+   run cannot be bypassed. One explicit full CI dispatch on main and one verification retry
+   is the bounded fresh route while main still names the target. PR CI and automatic main
+   validation keep every existing check and required status. The gate document records
+   API limits and measured baseline durations; candidate savings are not yet measured.
 3. **Packages the kit.** It refuses unless `bin/jpdev --version` prints `jpdev <version>`, line 2 of
    each vendored script names `<tag>`, and both scripts match their sources. Then
    `git archive` of the commit into `judgment-pack-devkit-<version>.tgz`, `checksums.txt` written

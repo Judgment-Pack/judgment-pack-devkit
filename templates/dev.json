@@ -10,6 +10,7 @@
     {"name": "npm-ci", "run": "npm ci", "toolchain": "node", "timeout": 900}
   ],
   "checks": [
+    {"name": "generated-docs", "run": "python3 scripts/dev/generated_docs.py", "toolchain": "shell", "summary": "^generated-docs:", "timeout": 300},
     {"name": "build", "run": "npm run build", "toolchain": "node", "timeout": 600},
     {"name": "unit-tests", "run": "npm test", "cwd": "packages/example", "toolchain": "node",
      "summary": "^\\s*(Test Files|Tests)\\s", "timeout": 1200},
