@@ -4,12 +4,82 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version",
-    "generators"
+    "version"
+  ],
+  "anyOf": [
+    {
+      "required": [
+        "generators"
+      ]
+    },
+    {
+      "required": [
+        "duplication"
+      ]
+    }
   ],
   "properties": {
     "version": {
       "const": 1
+    },
+    "duplication": {
+      "description": "the duplication check (lib/duplication.py, vendored as scripts/dev/duplication.py): off unless this member is present; a pair of places sharing at least min_tokens tokens, each over at least min_lines lines, fails it",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "languages",
+        "min_tokens",
+        "min_lines"
+      ],
+      "properties": {
+        "languages": {
+          "description": "the languages read; each names its file extensions and comment syntax",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "go",
+              "javascript",
+              "python",
+              "shell",
+              "typescript"
+            ]
+          }
+        },
+        "paths": {
+          "description": "repository-relative globs of the files read (* and ? within one segment, ** as a whole segment); default **",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+)(?:/(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+))*$"
+          }
+        },
+        "exclude": {
+          "description": "repository-relative globs of files not read",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+)(?:/(?:\\*\\*|(?!\\.\\.?(?:/|$))(?![^/]*\\*\\*)[^/\\\\\\[\\]{}]+))*$"
+          }
+        },
+        "min_tokens": {
+          "description": "the fewest shared tokens reported",
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 10000
+        },
+        "min_lines": {
+          "description": "the fewest lines each place of a reported pair spans",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      }
     },
     "generators": {
       "type": "array",

@@ -39,7 +39,7 @@ def inside(root, value):
 
 
 def config(value):
-    need(isinstance(value, dict) and set(value) == {'version', 'generators'} and
+    need(isinstance(value, dict) and {'version', 'generators'} <= set(value) <= {'version', 'generators', 'duplication'} and
          type(value['version']) is int and value['version'] == 1, 'expected version1 generator declaration')
     need(isinstance(value['generators'], list) and value['generators'], 'generators must be nonempty')
     names, outputs = set(), []

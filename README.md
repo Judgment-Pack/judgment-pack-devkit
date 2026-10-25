@@ -171,6 +171,52 @@ the same name overrides it. `config/env.example` documents each setting with its
   the same check first and does not start the run on a refusal.
 - `jpdev env`: the effective settings and where each came from.
 
+## The duplication check
+
+Duplicated logic is where two copies drift. `lib/duplication.py` (python3 standard library) is an
+opt-in check-list step: a repository vendors it as `scripts/dev/duplication.py` and lists the step
+`{"name": "duplication", "run": "python3 scripts/dev/duplication.py", "toolchain": "shell",
+"summary": "^duplication:", "timeout": 300}`, which `templates/dev.json` carries. The step is off,
+and its summary line says so, until the repository's `jpdev.json` declares a `duplication` member
+with its thresholds (`templates/jpdev.schema.json` holds the shape):
+
+```json
+"duplication": {
+  "languages": ["go", "python", "typescript"],
+  "exclude": ["**/testdata/**"],
+  "min_tokens": 70,
+  "min_lines": 6
+}
+```
+
+- `languages` (required): any of `go`, `javascript`, `python`, `shell` and `typescript`; each names
+  its file extensions and comment syntax. The files read are the tracked, and the untracked but not
+  ignored, files of those extensions that match a `paths` glob (default `**`) and no `exclude` glob.
+  Globs are repository-relative: `*` and `?` stay within one segment and a `**` segment spans any
+  number of segments. A symbolic link is not followed.
+- `min_tokens` (10 to 10000) and `min_lines` (1 to 10000), both required: a pair is reported when
+  two places share at least `min_tokens` tokens and each place spans at least `min_lines` lines.
+  Whitespace, layout and comments are not tokens; identifiers, keywords, numbers, string literals
+  and each punctuation character are. A copy laid out or commented differently is still a copy; a
+  copy whose names were changed is not.
+- An intentional copy is marked with an ignore block: the code between a comment that holds
+  `duplication:ignore-start` and a comment that holds `duplication:ignore-end` is not read, in any
+  comment syntax of the language (`//`, `/* */`, `#`). The text in a string is not a marker. A start
+  that is never closed, an end with no start, and a start inside an open block are reported.
+
+The report names each pair with both places and the shared token count, one line each. Three
+copies of a block make two pairs: each copy is named against the one before it.
+
+```
+duplication: 1 duplicate pair (at least 70 tokens over at least 6 lines, 214 files of go, python, typescript)
+  internal/audit/receipt.go:18-50 and internal/export/receipt.go:40-72: 131 tokens
+```
+
+The exit status is 0 when nothing is found or the check is off, 1 when a pair or an ignore marker
+problem is found, and 2 when the declaration is refused. A refusal names the member, for example
+`duplication: refused: jpdev.json duplication.min_tokens: an integer from 10 to 10000 is required
+(got 5)`.
+
 ## The caps
 
 | Toolchain | Cap |

@@ -215,6 +215,17 @@ class GeneratedDocsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('missing installed dependency', result.stderr)
 
+    def test_duplication_member_is_left_to_the_duplication_check(self):
+        duplication = {'languages':['python'], 'min_tokens':50, 'min_lines':5}
+        self.assertEqual(g.config({'version':1, 'generators':[self.item], 'duplication':duplication}), [self.item])
+        with self.assertRaises(g.Invalid):
+            g.config({'version':1, 'duplication':duplication})
+        self.write('jpdev.json', json.dumps({'version':1, 'generators':[self.item], 'duplication':duplication}))
+        result = subprocess.run([sys.executable, str(HELPER), '--root', str(self.root)],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('reference current', result.stdout)
+
 
 if __name__ == '__main__':
     unittest.main()

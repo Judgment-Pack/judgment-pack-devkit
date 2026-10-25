@@ -1,5 +1,12 @@
 {
   "version": 1,
+  "duplication": {
+    "languages": ["go", "python", "typescript"],
+    "paths": ["**"],
+    "exclude": ["**/testdata/**", "**/*.gen.go"],
+    "min_tokens": 70,
+    "min_lines": 6
+  },
   "generators": [
     {
       "name": "reference",

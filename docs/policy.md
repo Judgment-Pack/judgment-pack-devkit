@@ -10,6 +10,9 @@ are the ones a brief does not repeat.
 - **CI owns everything deterministic.** Formatting, builds, unit tests, schema checks,
   certification suites, whitespace and path checks run in CI on every pull request. A session
   does not re-run them to reassure itself and does not watch CI run.
+- **Duplication is where two copies drift:** a repository opts in to the `duplication` check with
+  its own token and line thresholds in `jpdev.json`, and marks an intentional copy with an explicit
+  ignore block.
 - **Define and implement a dependency-ordered coherent batch first.** Name the related issues,
   dependency order and acceptance criteria; write acceptance and regression fixtures by hand
   alongside code. During development, run useful focused checks of changed paths, affected

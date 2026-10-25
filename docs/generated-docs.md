@@ -27,7 +27,10 @@ segment. Declare every output file individually; directories/globs are unsupport
 `timeout` is an integer1–3600 seconds (default120). The optional `dependencies` list contains
 explicit existing `node_modules` directories only, such as `node_modules` or
 `packages/example/node_modules`. Omit it when the generator needs no installed npm dependencies.
-The example command/output must be adjusted to the repository's actual generator.
+The example command/output must be adjusted to the repository's actual generator. The optional
+`duplication` member of the same file configures
+[the duplication check](../README.md#the-duplication-check); this checker accepts that member and
+does not read it.
 
 Add the ordinary `dev.json` check (and keep the generator's useful existing coverage):
 
