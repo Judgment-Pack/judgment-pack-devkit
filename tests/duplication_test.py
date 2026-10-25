@@ -2,14 +2,18 @@
 import copy
 import importlib.util
 import itertools
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = Path(os.environ.get('DUPLICATION_HELPER', str(ROOT / 'lib' / 'duplication.py')))
@@ -157,6 +161,86 @@ def total(rows):
             result += row.amount
     return result
 '''
+# One JavaScript function, 31 tokens: function total ( rows ) { / let sum = 0 ; /
+# for ( const row of rows ) { / sum + = row . amount ; / } / return sum ; / }. On lines 2-8.
+SPREAD_JS = '''// ledger totals
+function total(rows) {
+  let sum = 0;
+  for (const row of rows) {
+    sum += row.amount;
+  }
+  return sum;
+}
+'''
+# The same 31 tokens on lines 2-4: too few lines for a line threshold of 5.
+COMPACT_JS = '''// the same tokens on three lines
+function total(rows) { let sum = 0;
+  for (const row of rows) { sum += row.amount; }
+  return sum; }
+'''
+# The spread copy (2-8), the compact copy (10-12) and the spread copy again (14-20) in one file.
+ONE_JS = '''// three places of one function
+function total(rows) {
+  let sum = 0;
+  for (const row of rows) {
+    sum += row.amount;
+  }
+  return sum;
+}
+const first = 1;
+function total(rows) { let sum = 0;
+  for (const row of rows) { sum += row.amount; }
+  return sum; }
+const second = 2;
+function total(rows) {
+  let sum = 0;
+  for (const row of rows) {
+    sum += row.amount;
+  }
+  return sum;
+}
+'''
+JAVASCRIPT = {'languages': ['javascript'], 'min_tokens': 25, 'min_lines': 5}
+# A valid ignore block in the file, and the copy outside it on lines 9-15.
+REPORT_BLOCK_ELSEWHERE = '''"""Report helpers."""
+
+# duplication:ignore-start
+class Ledger:
+    pass
+# duplication:ignore-end
+
+
+def total(rows):
+    # copied from the ledger
+    result = 0
+    for row in rows:
+        if row.amount > 0:
+            result += row.amount
+    return result
+'''
+# The code around two ignore blocks is the same 8 + 8 tokens twice: it may not join across them.
+TWO_BLOCKS = '''alpha = compute(1, 2)
+# duplication:ignore-start
+skipped = 1
+# duplication:ignore-end
+beta = combine(alpha, 3)
+gamma = 0
+alpha = compute(1, 2)
+# duplication:ignore-start
+skipped = 2
+# duplication:ignore-end
+beta = combine(alpha, 3)
+'''
+# The ledger's function with an ignore block inside it: 14 tokens (lines 1-3), the block, 8 tokens.
+SPLIT = '''def total(rows):
+    result = 0
+    for row in rows:
+        # duplication:ignore-start
+        if row.amount > 0:
+        # duplication:ignore-end
+            result += row.amount
+    return result
+'''
 PYTHON = {'languages': ['python'], 'min_tokens': 20, 'min_lines': 5}
 
 
@@ -242,6 +326,30 @@ class DuplicatePairs(Fixture):
             '  three.py:12-17 and three.py:23-28: 29 tokens',
         ])
 
+    def test_a_copy_is_named_when_a_nearer_place_spans_too_few_lines(self):
+        self.declare(JAVASCRIPT)
+        self.write('lib/a.js', SPREAD_JS)
+        self.write('lib/b.js', COMPACT_JS)
+        self.write('lib/c.js', SPREAD_JS)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'duplication: 1 duplicate pair (at least 25 tokens over at least 5 lines, 3 files of javascript)',
+            '  lib/a.js:2-8 and lib/c.js:2-8: 31 tokens',
+        ])
+        # The compact place sorting last changes nothing.
+        (self.root / 'lib' / 'b.js').rename(self.root / 'lib' / 'd.js')
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], ['  lib/a.js:2-8 and lib/c.js:2-8: 31 tokens'])
+
+    def test_a_copy_is_named_past_a_compact_place_in_the_same_file(self):
+        self.declare(JAVASCRIPT)
+        self.write('lib/one.js', ONE_JS)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], ['  lib/one.js:2-8 and lib/one.js:14-20: 31 tokens'])
+
     def test_a_repeated_short_pattern_is_not_a_copy_of_itself(self):
         # "0," repeated: every run of 10 tokens recurs 2 tokens later, but the two places overlap.
         self.declare({'languages': ['python'], 'min_tokens': 10, 'min_lines': 1})
@@ -260,6 +368,29 @@ class IgnoreBlock(Fixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout,
                          'duplication: no duplicate block (at least 20 tokens over at least 5 lines, 2 files of python)\n')
+
+    def test_an_ignore_block_does_not_hide_a_copy_outside_it(self):
+        self.declare(PYTHON)
+        self.write('src/ledger.py', LEDGER)
+        self.write('tools/report.py', REPORT_BLOCK_ELSEWHERE)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], ['  src/ledger.py:4-9 and tools/report.py:9-15: 29 tokens'])
+
+    def test_the_code_around_two_ignore_blocks_does_not_join(self):
+        self.declare({'languages': ['python'], 'min_tokens': 10, 'min_lines': 1})
+        self.write('join.py', TWO_BLOCKS)
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('duplication: no duplicate block', result.stdout)
+
+    def test_an_ignore_block_inside_a_copy_splits_it(self):
+        self.declare({'languages': ['python'], 'min_tokens': 12, 'min_lines': 2})
+        self.write('src/ledger.py', LEDGER)
+        self.write('tools/split.py', SPLIT)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], ['  src/ledger.py:4-6 and tools/split.py:1-3: 14 tokens'])
 
     def test_the_markers_work_in_block_and_line_comments(self):
         self.declare({'languages': ['go'], 'min_tokens': 50, 'min_lines': 5})
@@ -318,6 +449,12 @@ class Tokens(unittest.TestCase):
         tokens, _ = texts('shell', 'echo "$#" ${#list[@]} a#b # note\n')
         self.assertEqual(tokens, ['echo', '"$#"', '$', '{', '#', 'list', '[', '@', ']', '}', 'a', '#', 'b'])
 
+    def test_a_marker_in_a_shell_here_document_counts(self):
+        tokens, problems = texts('shell', "cat <<'EOF'\n# duplication:ignore-start\nEOF\necho hidden\n"
+                                          "# duplication:ignore-end\necho shown\n")
+        self.assertEqual(tokens, ['cat', '<', '<', "'EOF'", '<barrier>', 'echo', 'shown'])
+        self.assertEqual(problems, [])
+
     def test_an_unclosed_quote_ends_at_the_line_end(self):
         tokens, _ = texts('go', 'a := "open\nb := 1\n')
         self.assertEqual(tokens, ['a', ':', '=', '"open', 'b', ':', '=', '1'])
@@ -373,6 +510,69 @@ class Scope(Fixture):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('1 file of python', result.stdout)
 
+    def test_a_tracked_directory_replaced_by_a_link_is_not_read(self):
+        outside = tempfile.TemporaryDirectory(prefix='duplication-outside-')
+        self.addCleanup(outside.cleanup)
+        Path(outside.name, 'report.py').write_text(REPORT)
+        self.declare(PYTHON)
+        self.write('src/ledger.py', LEDGER)
+        self.write('inner/report.py', 'x = 1\n')
+        subprocess.run(['git', 'add', 'inner/report.py'], cwd=str(self.root), check=True, capture_output=True)
+        shutil.rmtree(str(self.root / 'inner'))
+        (self.root / 'inner').symlink_to(outside.name, target_is_directory=True)
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 file of python', result.stdout)
+
+    def test_a_file_over_the_size_limit_is_named_and_not_read(self):
+        big = LEDGER + '# padding\n' * 120
+        self.declare(dict(PYTHON, max_file_bytes=1024))
+        self.write('gen/big.py', big)
+        self.write('tools/report.py', REPORT)
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'duplication: no duplicate block (at least 20 tokens over at least 5 lines, 1 file of python; '
+            '1 file not read)',
+            '  not read: gen/big.py: %d bytes, over max_file_bytes 1024 (a large generated file belongs in '
+            'exclude)' % len(big.encode()),
+        ])
+        self.declare(dict(PYTHON, max_file_bytes=len(big.encode())))
+        self.assertEqual(self.cli().returncode, 1, 'a file at the limit is read')
+
+    def test_a_binary_file_is_named_and_not_read(self):
+        self.declare(PYTHON)
+        self.write('src/ledger.py', LEDGER)
+        (self.root / 'tools').mkdir()
+        (self.root / 'tools' / 'blob.py').write_bytes(b'\0' + REPORT.encode())
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:],
+                         ['  not read: tools/blob.py: binary (a NUL byte in its first 8192 bytes)'])
+
+    def test_carriage_return_line_endings_count_as_one_line(self):
+        self.write('src/ledger.py', LEDGER)
+        (self.root / 'tools').mkdir()
+        (self.root / 'tools' / 'cr.py').write_bytes(LEDGER.replace('\n', '\r').encode())
+        self.declare(PYTHON)
+        self.assertEqual(self.cli().returncode, 0)
+        self.declare(dict(PYTHON, min_lines=1))
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], ['  src/ledger.py:1-13 and tools/cr.py:1-1: 47 tokens'])
+
+    def test_running_out_of_memory_is_a_named_refusal(self):
+        # A mock: running out of memory cannot be produced reliably in CI, so the detector raises it.
+        self.declare(PYTHON)
+        self.write('src/ledger.py', LEDGER)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(d, 'duplicates', side_effect=MemoryError), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(err):
+            status = d.main(['--root', str(self.root)])
+        self.assertEqual((status, out.getvalue()), (2, ''))
+        self.assertEqual(err.getvalue(), 'duplication: refused: out of memory reading the files in scope; put large '
+                                         'generated files in exclude or lower max_file_bytes\n')
+
     def test_tracked_and_untracked_files_are_read(self):
         self.declare(PYTHON)
         self.write('src/ledger.py', LEDGER)
@@ -403,13 +603,14 @@ class Scope(Fixture):
 
 
 GOOD = {'languages': ['go', 'javascript', 'python', 'shell', 'typescript'], 'paths': ['**', 'src/*.go'],
-        'exclude': ['**/testdata/**', 'gen/?.ts'], 'min_tokens': 10, 'min_lines': 1}
+        'exclude': ['**/testdata/**', 'gen/?.ts'], 'min_tokens': 10, 'min_lines': 1, 'max_file_bytes': 2048}
 # A change to a good declaration, the member the refusal names, and the words it says.
 REFUSED = [
     ('version 2', lambda v: v.update(version=2), 'jpdev.json version: 1 is required (got 2)'),
     ('not an object', lambda v: v.update(duplication=[]), 'jpdev.json duplication: an object is required'),
     ('unknown member', lambda v: v['duplication'].update(threshold=50),
-     "jpdev.json duplication: unknown member 'threshold' (allowed: exclude, languages, min_lines, min_tokens, paths)"),
+     "jpdev.json duplication: unknown member 'threshold' (allowed: exclude, languages, max_file_bytes, min_lines, "
+     "min_tokens, paths)"),
     ('missing languages', lambda v: v['duplication'].pop('languages'), 'jpdev.json duplication.languages: required'),
     ('missing min_tokens', lambda v: v['duplication'].pop('min_tokens'), 'jpdev.json duplication.min_tokens: required'),
     ('missing min_lines', lambda v: v['duplication'].pop('min_lines'), 'jpdev.json duplication.min_lines: required'),
@@ -431,6 +632,12 @@ REFUSED = [
      'jpdev.json duplication.min_lines: an integer from 1 to 10000 is required (got 0)'),
     ('min_lines oversized', lambda v: v['duplication'].update(min_lines=10001),
      'jpdev.json duplication.min_lines: an integer from 1 to 10000 is required (got 10001)'),
+    ('min_tokens fraction', lambda v: v['duplication'].update(min_tokens=50.5),
+     'jpdev.json duplication.min_tokens: an integer from 10 to 10000 is required (got 50.5)'),
+    ('max_file_bytes too small', lambda v: v['duplication'].update(max_file_bytes=1023),
+     'jpdev.json duplication.max_file_bytes: an integer from 1024 to 104857600 is required (got 1023)'),
+    ('max_file_bytes oversized', lambda v: v['duplication'].update(max_file_bytes=104857601),
+     'jpdev.json duplication.max_file_bytes: an integer from 1024 to 104857600 is required (got 104857601)'),
     ('empty paths', lambda v: v['duplication'].update(paths=[]),
      'jpdev.json duplication.paths: a non-empty list of globs is required'),
     ('parent segment', lambda v: v['duplication'].update(paths=['../src/**']),
@@ -450,6 +657,31 @@ REFUSED = [
 ]
 
 
+def reads(config, path):
+    """Whether the declaration reads a repository-relative path, by its extension and globs."""
+    extensions = [e for language in config['languages'] for e in d.LANGUAGES[language][0]]
+    return (os.path.splitext(path)[1] in extensions and any(p.fullmatch(path) for p in config['paths'])
+            and not any(p.fullmatch(path) for p in config['exclude']))
+
+
+class ChangedRules(unittest.TestCase):
+    def test_every_rule_that_can_match_a_file_read_selects_the_step(self):
+        for name in ('templates/jpdev.json', 'jpdev.json'):
+            declaration = json.loads((ROOT / name).read_text())
+            config = d.settings(declaration)
+            extensions = [e for language in config['languages'] for e in d.LANGUAGES[language][0]]
+            for index, rule in enumerate(declaration['changed']):
+                reachable = []
+                for glob in rule['paths']:
+                    pattern, base = d.glob_pattern(glob, glob), re.sub(r'\*\*|\*|\?', 'x', glob)
+                    for sample in [base] + [base + e for e in extensions] + [base + '/x' + e for e in extensions]:
+                        if pattern.fullmatch(sample) and reads(config, sample):
+                            reachable.append(sample)
+                if reachable:
+                    with self.subTest(declaration=name, rule=index):
+                        self.assertIn('duplication', rule['checks'], 'the rule matches %s' % reachable[0])
+
+
 class Configuration(Fixture):
     def declaration(self, change=None):
         value = {'version': 1, 'duplication': copy.deepcopy(GOOD)}
@@ -459,8 +691,9 @@ class Configuration(Fixture):
 
     def test_a_good_declaration_is_read(self):
         config = d.settings(self.declaration())
-        self.assertEqual((config['languages'], config['min_tokens'], config['min_lines']),
-                         (GOOD['languages'], 10, 1))
+        self.assertEqual((config['languages'], config['min_tokens'], config['min_lines'], config['max_file_bytes']),
+                         (GOOD['languages'], 10, 1, 2048))
+        self.assertEqual(d.settings({'version': 1, 'duplication': PYTHON})['max_file_bytes'], 1048576)
 
     def test_each_invalid_declaration_is_refused_with_its_member_named(self):
         for name, change, message in REFUSED:
@@ -505,9 +738,11 @@ class Schema(unittest.TestCase):
         self.assertEqual(member['required'], ['languages', 'min_tokens', 'min_lines'])
         self.assertFalse(member['additionalProperties'])
         self.assertEqual(member['properties']['languages']['items']['enum'], sorted(d.LANGUAGES))
-        for name, bounds in (('min_tokens', d.MIN_TOKENS), ('min_lines', d.MIN_LINES)):
+        for name, bounds in (('min_tokens', d.MIN_TOKENS), ('min_lines', d.MIN_LINES),
+                             ('max_file_bytes', d.MAX_FILE_BYTES)):
             limits = member['properties'][name]
-            self.assertEqual((limits['type'], limits['minimum'], limits['maximum']), ('integer',) + bounds)
+            self.assertEqual((limits['type'], limits['multipleOf'], limits['minimum'], limits['maximum']),
+                             ('integer', 1) + bounds)
 
     def test_the_schema_and_the_command_agree_on_every_vector(self):
         # The standard-library reader of tests/changed_checks_test.py always runs, so the test never

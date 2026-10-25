@@ -2,7 +2,8 @@
 """The duplication check: name each block of code that appears in two places.
 
 Off unless the repository's jpdev.json declares a `duplication` member: the languages to read, a
-token threshold, a line threshold and, optionally, path globs. A pair is reported when two places
+token threshold, a line threshold and, optionally, path globs and a file size limit. A file over
+the limit, or with a NUL byte near its start, is not read and is named. A pair is reported when two places
 share at least min_tokens tokens and each place spans at least min_lines lines. Layout and
 comments are not tokens; identifiers, keywords, numbers, string literals and each punctuation
 character are. The code between a comment holding `duplication:ignore-start` and a comment holding
@@ -22,7 +23,13 @@ import sys
 
 MIN_TOKENS = (10, 10000)
 MIN_LINES = (1, 10000)
-MEMBERS = ('exclude', 'languages', 'min_lines', 'min_tokens', 'paths')
+MAX_FILE_BYTES = (1024, 104857600)
+DEFAULT_MAX_FILE_BYTES = 1048576
+MEMBERS = ('exclude', 'languages', 'max_file_bytes', 'min_lines', 'min_tokens', 'paths')
+# A file whose first BINARY_PROBE bytes hold a NUL byte is binary and is not read.
+BINARY_PROBE = 8192
+# The most recent places of each run of min_tokens tokens that a later place is compared with.
+RECENT = 16
 
 _C_COMMENTS = r'//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)'
 # A quoted string that may not span a line ends at the line's end when it is not closed.
@@ -124,6 +131,8 @@ def settings(declaration, name='jpdev.json'):
         'exclude': _globs(value['exclude'], where + '.exclude') if 'exclude' in value else [],
         'min_tokens': _integer(value['min_tokens'], MIN_TOKENS, where + '.min_tokens'),
         'min_lines': _integer(value['min_lines'], MIN_LINES, where + '.min_lines'),
+        'max_file_bytes': _integer(value.get('max_file_bytes', DEFAULT_MAX_FILE_BYTES), MAX_FILE_BYTES,
+                                   where + '.max_file_bytes'),
     }
 
 
@@ -141,8 +150,10 @@ def candidates(root, config):
                 or any(p.fullmatch(value) for p in config['exclude'])):
             continue
         path = root / value
-        # A symbolic link is not followed; a tracked file deleted from the work tree is not read.
-        if path.is_symlink() or not path.is_file():
+        # A symbolic link is not followed, whether it is the file or a directory above it (a
+        # tracked directory replaced by a link), and a tracked file deleted from the work tree is
+        # not read: the path must resolve to itself, a regular file below the root.
+        if path.is_symlink() or not path.is_file() or path.resolve() != path:
             continue
         result.append((value, language))
     return result
@@ -198,62 +209,107 @@ def windows(ids, size):
         yield position, value
 
 
+def _examine(files, first, i, second, j, floor, min_tokens, min_lines, found):
+    """Extend the shared run at (first, i) and (second, j) to its whole block and report it.
+
+    Returns the end of the block in the second file, whether it was reported, and whether it is a
+    run that repeats itself: two places in one file whose shared tokens go on past the second
+    place's start, cut there so the places do not overlap.
+    """
+    a, b = files[first][1], files[second][1]
+    start_a, start_b = i, j
+    while start_a > 0 and start_b > floor and a[start_a - 1] == b[start_b - 1]:
+        start_a, start_b = start_a - 1, start_b - 1
+    # Two places in one file may not overlap: the block stops where its second place starts.
+    limit = start_b if first == second else len(a)
+    end_a, end_b = i, j
+    while end_a < limit and end_b < len(b) and a[end_a] == b[end_b]:
+        end_a, end_b = end_a + 1, end_b + 1
+    repeats = end_a > limit or (first == second and end_a == limit and end_b < len(b) and a[end_a] == b[end_b])
+    if end_a > limit:
+        end_a, end_b = limit, limit + (start_b - start_a)
+    count = end_a - start_a
+    reported = False
+    if count >= min_tokens:
+        places = []
+        for index, start, end in ((first, start_a, end_a), (second, start_b, end_b)):
+            path, _, firsts, lasts = files[index]
+            places.append((path, firsts[start], lasts[end - 1]))
+        if min(last - first_line + 1 for _, first_line, last in places) >= min_lines:
+            found.append((places[0], places[1], count))
+            reported = True
+    return max(end_b, j + 1), reported, repeats
+
+
 def duplicates(files, min_tokens, min_lines):
     """Each pair of places sharing at least min_tokens tokens over at least min_lines lines.
 
-    files is a list of (path, ids, first lines, last lines). A run of min_tokens tokens is
-    compared with the previous place the same run appeared, so three copies make two pairs; the
-    pair is then extended both ways to the whole shared block, which is examined once.
+    files is a list of (path, ids, first lines, last lines). Each run of min_tokens tokens is
+    compared with the places the same run appeared before, the most recent first, until one makes
+    a reported pair: three copies make two pairs, and a copy is still named when a nearer place of
+    the same tokens spans too few lines. The RECENT most recent places of a run are kept. A pair is
+    extended both ways to its whole shared block, and each block is examined once. After a run
+    that repeats itself in one file (a table of one short row) and is not reported, the other
+    places of that file are passed over for that run; the places in other files are still compared.
     """
-    latest, examined, found = {}, {}, []
+    seen, examined, found = {}, {}, []
     for second, (_, b, _, _) in enumerate(files):
         for j, value in windows(b, min_tokens):
-            previous = latest.get(value)
-            latest[value] = second * _STRIDE + j
-            if previous is None:
+            here = second * _STRIDE + j
+            earlier = seen.get(value)
+            if earlier is None:
+                seen[value] = here
                 continue
-            first, i = divmod(previous, _STRIDE)
-            key = (first, second, j - i)
-            floor = examined.get(key, 0)
-            if j < floor:
-                continue
-            a = files[first][1]
-            start_a, start_b = i, j
-            while start_a > 0 and start_b > floor and a[start_a - 1] == b[start_b - 1]:
-                start_a, start_b = start_a - 1, start_b - 1
-            # Two places in one file may not overlap: the block stops where its second place starts.
-            limit = start_b if first == second else len(a)
-            end_a, end_b = i, j
-            while end_a < limit and end_b < len(b) and a[end_a] == b[end_b]:
-                end_a, end_b = end_a + 1, end_b + 1
-            if end_a > limit:
-                end_a, end_b = limit, limit + (start_b - start_a)
-            examined[key] = max(end_b, j + 1)
-            count = end_a - start_a
-            if count < min_tokens:
-                continue
-            places = []
-            for index, start, end in ((first, start_a, end_a), (second, start_b, end_b)):
-                path, _, firsts, lasts = files[index]
-                places.append((path, firsts[start], lasts[end - 1]))
-            if min(last - first_line + 1 for _, first_line, last in places) >= min_lines:
-                found.append((places[0], places[1], count))
+            if type(earlier) is int:
+                earlier = seen[value] = [earlier]
+            skip_file = None
+            for previous in reversed(earlier):
+                first, i = divmod(previous, _STRIDE)
+                if first == skip_file:
+                    continue
+                key = (first, second, j - i)
+                state = examined.get(key)
+                if state is None or j >= state[0]:
+                    state = examined[key] = _examine(files, first, i, second, j, state[0] if state else 0,
+                                                     min_tokens, min_lines, found)
+                if state[1]:
+                    break
+                if state[2]:
+                    skip_file = second
+            earlier.append(here)
+            if len(earlier) > RECENT:
+                del earlier[0]
     return sorted(found)
 
 
 def check(root, config):
-    """The pairs, the ignore marker problems and the number of files read."""
-    vocabulary, barriers, files, problems = {}, itertools.count(-1, -1), [], []
+    """The pairs, the ignore marker problems, the number of files read and the files not read."""
+    vocabulary, barriers, files, problems, skipped = {}, itertools.count(-1, -1), [], [], []
     for value, language in candidates(root, config):
-        text = (root / value).read_bytes().decode('utf-8', 'replace').replace('\r\n', '\n')
+        path = root / value
+        size = path.stat().st_size
+        if size > config['max_file_bytes']:
+            skipped.append((value, '%d bytes, over max_file_bytes %d (a large generated file belongs in exclude)'
+                            % (size, config['max_file_bytes'])))
+            continue
+        data = path.read_bytes()
+        if b'\0' in data[:BINARY_PROBE]:
+            skipped.append((value, 'binary (a NUL byte in its first %d bytes)' % BINARY_PROBE))
+            continue
+        text = data.decode('utf-8', 'replace').replace('\r\n', '\n')
         ids, firsts, lasts, found = tokenize(text, language, vocabulary, barriers)
         files.append((value, ids, firsts, lasts))
         problems.extend((value, line, message) for line, message in found)
-    return duplicates(files, config['min_tokens'], config['min_lines']), problems, len(files)
+    return duplicates(files, config['min_tokens'], config['min_lines']), problems, len(files), skipped
 
 
 def plural(count, word):
     return '%d %s%s' % (count, word, '' if count == 1 else 's')
+
+
+def notices(skipped):
+    for path, reason in skipped:
+        print('  not read: %s: %s' % (path, reason))
 
 
 def main(argv=None):
@@ -276,15 +332,20 @@ def main(argv=None):
             print('duplication: off: %s declares no duplication member (a repository opts in with its thresholds)'
                   % args.config)
             return 0
-        pairs, problems, count = check(root, config)
+        try:
+            pairs, problems, count, skipped = check(root, config)
+        except MemoryError:
+            raise Refused('out of memory reading the files in scope; put large generated files in exclude or '
+                          'lower max_file_bytes')
     except (Refused, OSError, subprocess.SubprocessError) as error:
         print('duplication: refused: %s' % error, file=sys.stderr)
         return 2
-    scope = 'at least %s over at least %s, %s of %s' % (
+    scope = 'at least %s over at least %s, %s of %s%s' % (
         plural(config['min_tokens'], 'token'), plural(config['min_lines'], 'line'), plural(count, 'file'),
-        ', '.join(config['languages']))
+        ', '.join(config['languages']), '; %s not read' % plural(len(skipped), 'file') if skipped else '')
     if not pairs and not problems:
         print('duplication: no duplicate block (%s)' % scope)
+        notices(skipped)
         return 0
     if pairs:
         print('duplication: %s (%s)' % (plural(len(pairs), 'duplicate pair'), scope))
@@ -294,6 +355,7 @@ def main(argv=None):
         print('duplication: %s' % plural(len(problems), 'ignore marker problem'))
         for path, line, message in sorted(problems):
             print('  %s:%d: %s' % (path, line, message))
+    notices(skipped)
     return 1
 
 

@@ -9,7 +9,7 @@
   "changed": [
     {
       "paths": ["docs/**", "*.md", "LICENSE", "NOTICE", ".github/PULL_REQUEST_TEMPLATE.md"],
-      "checks": ["diff-check", "local-paths"]
+      "checks": ["diff-check", "local-paths", "duplication"]
     },
     {
       "paths": ["AGENTS.md", "CLAUDE.md", "templates/AGENTS.md", "templates/CLAUDE.md"],

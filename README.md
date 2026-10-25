@@ -205,19 +205,29 @@ with its thresholds (`templates/jpdev.schema.json` holds the shape):
   its file extensions and comment syntax. The files read are the tracked, and the untracked but not
   ignored, files of those extensions that match a `paths` glob (default `**`) and no `exclude` glob.
   Globs are repository-relative: `*` and `?` stay within one segment and a `**` segment spans any
-  number of segments. A symbolic link is not followed.
+  number of segments. A symbolic link is not followed, whether it is the file or a directory
+  above it. A file larger than `max_file_bytes` (1024 to 104857600, default 1048576) is not read,
+  nor is a file with a NUL byte in its first 8192 bytes (binary); each is named in a `not read:`
+  line, and the check does not fail on it. A large generated file belongs in `exclude`.
 - `min_tokens` (10 to 10000) and `min_lines` (1 to 10000), both required: a pair is reported when
   two places share at least `min_tokens` tokens and each place spans at least `min_lines` lines.
   Whitespace, layout and comments are not tokens; identifiers, keywords, numbers, string literals
   and each punctuation character are. A copy laid out or commented differently is still a copy; a
-  copy whose names were changed is not.
+  copy whose names were changed is not. A line ends at a line feed: a file with carriage-return
+  line endings alone counts as one line.
 - An intentional copy is marked with an ignore block: the code between a comment that holds
   `duplication:ignore-start` and a comment that holds `duplication:ignore-end` is not read, in any
-  comment syntax of the language (`//`, `/* */`, `#`). The text in a string is not a marker. A start
+  comment syntax of the language (`//`, `/* */`, `#`). The text in a string is not a marker; the
+  text of a shell here-document is read as code, so a marker after a `#` there counts. An ignore
+  block inside a copy splits it in two, and each part is held to the thresholds on its own. A start
   that is never closed, an end with no start, and a start inside an open block are reported.
 
-The report names each pair with both places and the shared token count, one line each. Three
-copies of a block make two pairs: each copy is named against the one before it.
+The report names each pair with both places and the shared token count, one line each. Each run of
+`min_tokens` tokens is compared with the places it appeared before (the 16 most recent), nearest
+first, until one makes a reported pair: three copies of a block make two pairs, and a copy is still
+named when a nearer place of the same tokens spans too few lines. Two places in one file never
+overlap, and a run that repeats a pattern shorter than `min_tokens` in one file (a table of one
+short row) is not reported as copies of itself.
 
 ```
 duplication: 1 duplicate pair (at least 70 tokens over at least 6 lines, 214 files of go, python, typescript)
@@ -230,9 +240,9 @@ copies of `templates/check.sh`, `lib/generated_docs.py` and `lib/handover_check.
 same on purpose.
 
 The exit status is 0 when nothing is found or the check is off, 1 when a pair or an ignore marker
-problem is found, and 2 when the declaration is refused. A refusal names the member, for example
-`duplication: refused: jpdev.json duplication.min_tokens: an integer from 10 to 10000 is required
-(got 5)`.
+problem is found, and 2 when the declaration is refused or the files in scope do not fit in
+memory. A refusal names the member, for example `duplication: refused: jpdev.json
+duplication.min_tokens: an integer from 10 to 10000 is required (got 5)`.
 
 ## The caps
 

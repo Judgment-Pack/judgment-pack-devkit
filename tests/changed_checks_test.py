@@ -370,7 +370,7 @@ class ChangedCheckTests(unittest.TestCase):
 
 SCHEMA_KEYWORDS = {'$schema', 'title', 'description', 'type', 'const', 'enum', 'required', 'anyOf', 'properties',
                    'additionalProperties', 'items', 'minItems', 'uniqueItems', 'minLength', 'minimum',
-                   'maximum', 'pattern'}
+                   'maximum', 'multipleOf', 'pattern'}
 SCHEMA_TYPES = {'object': dict, 'array': list, 'string': str}
 
 
@@ -416,6 +416,8 @@ def schema_errors(schema, value, where='$'):
             errors.append('%s: does not match the pattern' % where)
     if type(value) is int and not schema.get('minimum', value) <= value <= schema.get('maximum', value):
         errors.append('%s: out of range' % where)
+    if type(value) in (int, float) and 'multipleOf' in schema and value % schema['multipleOf']:
+        errors.append('%s: not a multiple of %r' % (where, schema['multipleOf']))
     return errors
 
 

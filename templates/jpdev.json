@@ -21,19 +21,19 @@
   "changed": [
     {
       "paths": ["docs/**", "*.md"],
-      "checks": ["generated-docs", "diff-check"]
+      "checks": ["generated-docs", "duplication", "diff-check"]
     },
     {
       "paths": ["go/**"],
-      "checks": ["generated-docs", "go-test", "diff-check"]
+      "checks": ["generated-docs", "duplication", "go-test", "diff-check"]
     },
     {
       "paths": ["packages/example/**"],
-      "checks": ["build", "unit-tests", "diff-check"]
+      "checks": ["duplication", "build", "unit-tests", "diff-check"]
     },
     {
       "paths": ["tests/**/*.py"],
-      "checks": ["python-tests", "diff-check"]
+      "checks": ["duplication", "python-tests", "diff-check"]
     }
   ]
 }
