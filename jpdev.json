@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "changed": [
+    {
+      "paths": ["docs/**", "*.md", "LICENSE", "NOTICE", ".github/PULL_REQUEST_TEMPLATE.md"],
+      "checks": ["diff-check", "local-paths"]
+    },
+    {
+      "paths": ["AGENTS.md", "CLAUDE.md", "templates/AGENTS.md", "templates/CLAUDE.md"],
+      "checks": ["diff-check", "local-paths", "agent-docs", "tests"]
+    },
+    {
+      "paths": ["docs/adopting.md", "templates/*.md"],
+      "checks": ["diff-check", "local-paths", "tests"]
+    }
+  ]
+}

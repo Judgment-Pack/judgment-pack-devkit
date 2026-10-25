@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "changed": [
+    {"paths": ["docs/**", "*.md"], "checks": ["docs-lint", "whitespace"]},
+    {"paths": ["**/*.go", "go.mod", "go.sum"], "checks": ["go-vet", "go-test", "whitespace"]},
+    {"paths": ["tests/**/*.py"], "checks": ["python-tests", "whitespace"]}
+  ]
+}

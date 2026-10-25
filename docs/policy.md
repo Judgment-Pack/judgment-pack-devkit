@@ -55,9 +55,15 @@ are the ones a brief does not repeat.
   does not count. Preserve the failing assertion and restored passing evidence.
 
 Evidence reuse applies only where an actual repository gate implements and validates equivalence.
-This policy does not introduce automatic changed-check selection or release-evidence reuse:
-Devkit #33 (`--changed`), Devkit #37 and Agent #213 remain separate work. Keep the summary of
-what actually ran and what remains required by current CI/release gates.
+This policy does not introduce release-evidence reuse: Devkit #37 and Agent #213 remain separate
+work. Keep the summary of what actually ran and what remains required by current CI/release gates.
+
+**Scoped runs.** `jpdev check --changed [BASE]` runs only the check-list steps that the
+repository's `jpdev.json` maps the changed paths to, and the whole list when a changed path is
+unmapped. The scoped run is allowed for local iteration and on pull requests. The full list is
+required on the default branch, before a release, and whenever check-selection semantics changed
+(the mapping, the manifest, the runner or the selection code). A scoped run's record keeps its
+selection block with the summary: a step it did not select did not pass.
 
 ## Who builds and who reviews
 
