@@ -1,6 +1,8 @@
 """Handwritten fixture repositories exercise the actual shared checker CLI."""
 import importlib.util
 import copy
+import contextlib
+import io
 from unittest.mock import patch
 import json
 import os
@@ -117,6 +119,38 @@ class GeneratedDocsTests(unittest.TestCase):
         result = self.cli()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('checked-in output missing', result.stderr)
+
+    def test_failing_generator_log_read_is_bounded_before_decode(self):
+        self.item['run'] = "python3 -c 'import sys; sys.stdout.write(chr(120)*65536); sys.exit(7)'"
+        self.declare()
+        original_open = Path.open
+        reads = []
+        class ObservedReader:
+            def __init__(self, stream, path):
+                self.stream, self.path = stream, path
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+            def read(self, size=-1):
+                data = self.stream.read(size)
+                reads.append((size, len(data), self.path.stat().st_size))
+                return data
+        def observed_open(path, mode='r', *args, **kwargs):
+            stream = original_open(path, mode, *args, **kwargs)
+            return ObservedReader(stream, path) if path.name == 'generator.log' and mode == 'rb' else stream
+        stderr = io.StringIO()
+        with patch.object(Path, 'open', observed_open), contextlib.redirect_stderr(stderr):
+            result = g.check(self.root)
+        self.assertEqual(result, 7)
+        self.assertTrue(reads, 'the actual failed-generator log must be read')
+        self.assertTrue(all(0 <= requested <= 8192 for requested, _, _ in reads), reads)
+        self.assertLessEqual(sum(consumed for _, consumed, _ in reads), 8192)
+        self.assertTrue(all(log_size == 65536 for _, _, log_size in reads), reads)
+        self.assertEqual(stderr.getvalue().splitlines()[0], 'x' * 8192)
+        self.assertIn('generator reference exited 7', stderr.getvalue())
+        self.assertEqual((self.root/'docs/result.md').read_text(), 'fresh\n')
 
     def test_generator_exit_status_preserved(self):
         self.item['run'] = 'python3 generator.py; echo generator-detail >&2; exit 7'

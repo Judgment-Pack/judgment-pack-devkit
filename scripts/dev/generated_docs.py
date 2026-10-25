@@ -133,7 +133,8 @@ def check(root, declaration='jpdev.json'):
                     target.unlink()
             status = execute(item['run'], clone, item.get('timeout', 120), temporary / 'generator.log')
             if status:
-                data = (temporary / 'generator.log').read_bytes()[:8192].decode(errors='replace')
+                with (temporary / 'generator.log').open('rb') as stream:
+                    data = stream.read(8192).decode(errors='replace')
                 print(data, file=sys.stderr)
                 print('generated-docs: generator %s exited %d; regenerate: %s' %
                       (item['name'], status, item['run']), file=sys.stderr)
