@@ -77,7 +77,11 @@ jobs:
       # A step with requires_env fails under CI when its variable is empty, unless the step is
       # marked optional in dev.json. A repository whose dev.json has a parity step sets the
       # variable here: a shallow checkout of the other repository, then the variable pointing at
-      # it (a private repository needs a token with read access). Uncomment and adapt:
+      # it (a private repository needs a token with read access). The checkout must end up OUTSIDE
+      # this clone: an untracked, un-ignored path inside it is a changed path to `check.sh
+      # --changed`, which then runs the whole list on every pull request. actions/checkout places
+      # a checkout only under the workspace, so the step after it moves it under the runner's
+      # temporary directory before any check runs. Uncomment and adapt:
       #
       # - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       #   with:
@@ -87,8 +91,12 @@ jobs:
       #     fetch-depth: 1
       #     persist-credentials: false
       #     token: ${{ secrets.DESK_READ_TOKEN }}
-      # - name: Name the checkout for the parity step
-      #   run: echo "JPDEV_DESK=$GITHUB_WORKSPACE/desk-checkout" >> "$GITHUB_ENV"
+      # - name: Move the checkout outside the clone and name it for the parity step
+      #   env:
+      #     OUTSIDE: ${{ runner.temp }}/desk-checkout
+      #   run: |
+      #     mv desk-checkout "$OUTSIDE"
+      #     echo "JPDEV_DESK=$OUTSIDE" >> "$GITHUB_ENV"
       - name: Setup steps
         run: scripts/dev/check.sh --setup
       - name: Checks
