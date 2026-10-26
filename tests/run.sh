@@ -423,6 +423,39 @@ handover_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print 
 if [ "$handover_line2" = "$handover_want" ]; then ok "scripts/dev/handover_check.sh line 2 names the kit version and source"; else bad "scripts/dev/handover_check.sh line 2 names the kit version and source" "line 2: $handover_line2
 wanted: $handover_want"; fi
 if cmp -s <(tail -n +2 "$kit/lib/handover_check.sh") <(tail -n +3 "$kit/scripts/dev/handover_check.sh" 2>/dev/null); then ok "scripts/dev/handover_check.sh is the library script after its version line"; else bad "scripts/dev/handover_check.sh is the library script after its version line"; fi
+changed_line2=$(sed -n 2p "$kit/scripts/dev/changed_checks.py" 2>/dev/null)
+changed_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (lib/changed_checks.py)"
+if [ "$changed_line2" = "$changed_want" ]; then ok "scripts/dev/changed_checks.py line 2 names the kit version and source"; else bad "scripts/dev/changed_checks.py line 2 names the kit version and source" "line 2: $changed_line2
+wanted: $changed_want"; fi
+if cmp -s "$kit/lib/changed_checks.py" <(sed 2d "$kit/scripts/dev/changed_checks.py" 2>/dev/null); then ok "scripts/dev/changed_checks.py is the library selection code but for its version line"; else bad "scripts/dev/changed_checks.py is the library selection code but for its version line"; fi
+
+# The release evidence hashes the runner and its selection code, which CI runs on pull requests.
+out=$(python3 -I -c 'import json, sys; inputs = json.load(open(sys.argv[1]))["inputs"]; missing = [p for p in ("scripts/dev/check.sh", "scripts/dev/changed_checks.py") if p not in inputs]; print("missing: " + " ".join(missing) if missing else "covered")' "$kit/.github/ci-evidence.json" 2>&1) && s=0 || s=$?
+expect ".github/ci-evidence.json inputs hold the vendored runner and its selection code" 0 '^covered$' "$out" "$s"
+
+# --- jpdev version tells a kit at a release from one past it; --version stays the release's line
+released=$("$jpdev" --version)
+if [[ $released =~ ^jpdev\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "jpdev --version prints the release version alone"; else bad "jpdev --version prints the release version alone" "$released"; fi
+out=$("$jpdev" version 2>&1) && s=0 || s=$?
+if [ "$(git -C "$kit" rev-parse --show-toplevel 2>/dev/null)" = "$kit" ]; then
+  expect "jpdev version adds the kit checkout's git describe" 0 "^${released//./\\.} \\($(git -C "$kit" describe --tags --always)\\)\$" "$out" "$s"
+else
+  expect "jpdev version is the release version where the kit is no checkout" 0 "^${released//./\\.}\$" "$out" "$s"
+fi
+# A kit unpacked inside another repository's clone is not that repository's commit.
+git init -q -b main "$work/kitcopy"
+git -C "$work/kitcopy" -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false commit -q --allow-empty -m outer
+mkdir -p "$work/kitcopy/vendor/kit"
+cp -R "$kit/bin" "$kit/lib" "$work/kitcopy/vendor/kit/"
+out=$("$work/kitcopy/vendor/kit/bin/jpdev" version 2>&1) && s=0 || s=$?
+expect "jpdev version describes no repository the kit only sits inside" 0 "^${released//./\\.}\$" "$out" "$s"
+out=$(GIT_DIR=$work/kitcopy/.git "$work/kitcopy/vendor/kit/bin/jpdev" version 2>&1) && s=0 || s=$?
+expect "jpdev version describes no repository GIT_DIR names" 0 "^${released//./\\.}\$" "$out" "$s"
+if [ "$(git -C "$kit" rev-parse --show-toplevel 2>/dev/null)" = "$kit" ]; then
+  out=$(GIT_DIR=$work/kitcopy/.git "$jpdev" version 2>&1) && s=0 || s=$?
+  expect "jpdev version describes the kit checkout whatever GIT_DIR names" 0 "^${released//./\\.} \\($(git -C "$kit" describe --tags --always)\\)\$" "$out" "$s"
+fi
+rm -rf "$work/kitcopy"
 
 # --- the lock
 lock=$work/test.lock
@@ -989,7 +1022,8 @@ cx_reset
 out=$(STUB_CODEX_EDIT=1 cx_run --no-commit --small) && s=0 || s=$?
 expect "codex run --small refuses a shared path after the run" 2 'refused after the run: file.txt is a shared or boundary path' "$out" "$s"
 prompt=$(python3 -I -c 'import sys; a = open(sys.argv[1], "rb").read().split(b"\0"); sys.stdout.write(a[-2].decode())' "$STUB_CODEX_ARGS")
-expect "codex run --small prepends its scoped-check line" 0 '^This is a small fix: run only the check-list steps' "$(sed -n '2p' <<< "$prompt")" 0
+expect "codex run --small prepends its scoped-check line" 0 '^This is a small fix: run .jpdev check --changed., which runs only the check-list steps jpdev.json maps' "$(sed -n '2p' <<< "$prompt")" 0
+absent "codex run --small leaves the choice of steps to the mapping, not --only" '--only' "$(sed -n '2p' <<< "$prompt")"
 cx_reset
 out=$(JPDEV_SMALL_MAX_LINES=0 STUB_CODEX_EDIT=1 STUB_CODEX_EDIT_FILE=AGENTS.md cx_run --no-commit --small) && s=0 || s=$?
 expect "codex run --small refuses a change over the line bound" 2 'changed lines exceeds JPDEV_SMALL_MAX_LINES=0' "$out" "$s"

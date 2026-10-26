@@ -99,7 +99,8 @@ summary block, and anything you stopped on or chose not to do.
 - `scripts/dev/check.sh` is a copy of `templates/check.sh`; after a change to the template, copy
   it again. Line 2 of the template names the kit version (`# from judgment-pack-devkit vX.Y.Z
   (templates/check.sh)`) and moves with `JPDEV_VERSION` in `lib/common.sh` at a release; a test
-  holds the two together.
+  holds the two together. `scripts/dev/changed_checks.py` is `lib/changed_checks.py` with the
+  same version on line 2; after a change to the library file, copy it again.
 - This file is `templates/AGENTS.md` plus this section. Change a shared rule in the template and
   here together, then run `scripts/sync-agent-docs.sh .` for `CLAUDE.md`.
 - Machine settings (paths, caps, name lists) never live in this repository. They are read from the

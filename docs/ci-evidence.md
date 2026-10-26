@@ -103,7 +103,9 @@ PR or another repository is ineligible. Unavailable evidence never becomes succe
 No workflow automatically dispatches/retries, and no automatic full CI is disabled.
 
 The unchanged `lint`/`tests` and `contract`/`check` job names retain branch-protection
-statuses. Main/PR CI still runs full deterministic checks. Release now verifies
+statuses. Main CI still runs the full deterministic checks; PR CI runs the checks its
+changed-path mapping selects (`check.sh --changed`, the whole list when a path is unmapped) and
+records no evidence. Release now verifies
 that the required full deterministic work was completed at the exact source and
 compatible inputs, rather than executing those equivalent checks again. Review,
 exact-head CI and publication approval requirements remain.

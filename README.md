@@ -101,8 +101,10 @@ the same name overrides it. `config/env.example` documents each setting with its
   working tree (deletions, both sides of a rename, and submodules whatever their `ignore` setting),
   plus untracked files that are not ignored. `BASE` defaults to the default branch: `origin/HEAD`,
   else `origin/main`, else `origin/master`. The whole list runs when a changed path matches no rule,
-  when `jpdev.json`, the manifest or `scripts/dev/check.sh` changed, when nothing changed, or when
-  there is no mapping. A block before the summary names each check selected with the globs that
+  when `jpdev.json`, the manifest, `scripts/dev/check.sh` or `scripts/dev/changed_checks.py`
+  changed, when nothing changed, or when there is no mapping. The vendored
+  `scripts/dev/check.sh --changed [BASE]` makes the same selection with the vendored
+  `scripts/dev/changed_checks.py`, where the kit is not installed and in CI on pull requests. A block before the summary names each check selected with the globs that
   selected it and each check not selected, or why the whole list runs. An invalid mapping, a `BASE` that names no commit, a missing
   default branch or merge base, and `--changed` with `--only` are refused with exit 2 before any
   check runs.
@@ -182,6 +184,10 @@ the same name overrides it. `config/env.example` documents each setting with its
   command and is ignored; the product term “adversarial” is not in the base list. `codex run` runs
   the same check first and does not start the run on a refusal.
 - `jpdev env`: the effective settings and where each came from.
+- `jpdev --version` prints the release version (`jpdev X.Y.Z`); `jpdev version` adds, when the kit is
+  a git checkout, the commit it is at (`jpdev X.Y.Z (vX.Y.Z-4-g1f02688)`), which tells a kit at a
+  release from one past it. An option `jpdev check` does not know, and a refused `--changed`
+  selection, name the same.
 
 ## The duplication check
 
@@ -238,8 +244,8 @@ duplication: 1 duplicate pair (at least 70 tokens over at least 6 lines, 214 fil
 
 The kit runs the check on itself with `python3 lib/duplication.py`, over its Python and shell
 files at 100 tokens and 10 lines, and leaves out `scripts/dev/**`: those files are the vendored
-copies of `templates/check.sh`, `lib/generated_docs.py` and `lib/handover_check.sh`, kept the
-same on purpose.
+copies of `templates/check.sh`, `lib/generated_docs.py`, `lib/handover_check.sh` and
+`lib/changed_checks.py`, kept the same on purpose.
 
 The exit status is 0 when nothing is found or the check is off, 1 when a pair or an ignore marker
 problem is found, and 2 when the declaration is refused or the files in scope do not fit in
@@ -272,8 +278,9 @@ Python steps, and for other steps that invoke `python3`, name the interpreter us
 - `templates/dev.json`, `templates/dev.schema.json`: the manifest by example and its JSON Schema.
 - `templates/jpdev.json`, `templates/jpdev.schema.json`: the generated-document declaration, the
   changed-path mapping and the duplication thresholds by example, and their JSON Schema.
-- `templates/check.sh` and `lib/handover_check.sh`: the public checks a repository vendors as
-  `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`.
+- `templates/check.sh`, `lib/handover_check.sh` and `lib/changed_checks.py`: the public checks a
+  repository vendors as `scripts/dev/check.sh`, `scripts/dev/handover_check.sh` and
+  `scripts/dev/changed_checks.py`.
 - `templates/codex-brief.md`, `templates/codex-review-brief.md`: the build and review brief
   skeletons `jpdev codex brief-template` prints.
 - `templates/AGENTS.md`, `templates/CLAUDE.md`: the agent instructions (one text, generated from

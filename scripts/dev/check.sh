@@ -1,22 +1,48 @@
 #!/usr/bin/env bash
 # from judgment-pack-devkit v0.7.0 (templates/check.sh)
-# scripts/dev/check.sh [--setup] [--only a,b] [--skip a,b] [--all] [--manifest FILE]
+# scripts/dev/check.sh [--setup] [--only a,b | --changed [BASE]] [--skip a,b] [--all] [--manifest FILE]
 # Runs the checks of dev.json in order and prints one summary block; exit status = failures.
+# --changed runs only the checks jpdev.json maps the paths changed since the merge base of BASE
+# (default: the default branch) and HEAD to, with changed_checks.py vendored beside this script;
+# the whole list runs when a changed path is unmapped, when jpdev.json, the manifest, this script
+# or changed_checks.py changed, when nothing changed, or with no mapping.
 # Stops at the first failure unless --all. --setup runs the manifest's setup steps instead.
 # A step whose requires_env variable is empty is skipped, and said to be; when CI is set that is a
 # failure unless the step is marked optional: true. Standard library python3 only. jpdev sets JPDEV_WRAP to add its caps around each step.
 root=${JPDEV_ROOT:-$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)} || exit 2
-exec python3 -I - "$root" "$@" <<'PY'
+exec python3 -I - "$root" "$0" "$@" <<'PY'
 import json, os, re, shutil, signal, subprocess, sys, time
 from pathlib import Path
-root, args = sys.argv[1], sys.argv[2:]
-opt = {'only': set(), 'skip': set(), 'all': False, 'setup': False, 'manifest': root + '/dev.json'}
+root, script, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+opt = {'only': set(), 'skip': set(), 'all': False, 'setup': False, 'manifest': root + '/dev.json', 'changed': None}
+def refuse(message): print('check.sh: ' + message, file=sys.stderr); sys.exit(2)
 while args:
     a = args.pop(0)
     if a in ('--only', '--skip'): opt[a[2:]] = set(args.pop(0).split(','))
     elif a == '--manifest': opt['manifest'] = args.pop(0)
     elif a in ('--all', '--setup'): opt[a[2:]] = True
-    else: sys.exit('check.sh: unknown argument ' + a)
+    elif a == '--changed': opt['changed'] = [args.pop(0)] if args and not args[0].startswith('-') else []
+    else:
+        try:
+            with open(script, encoding='utf-8') as handle: origin = handle.readlines()[1][2:].split(' (')[0].strip()
+        except (OSError, IndexError, UnicodeDecodeError): origin = 'an unknown kit version'
+        refuse('unknown argument %s (this runner is %s)' % (a, origin))
+if opt['changed'] is not None:
+    if opt['only']: refuse('--changed and --only both choose the steps; give one')
+    if opt['setup']: refuse('--changed selects checks, not setup steps')
+    here = os.path.dirname(os.path.abspath(script))
+    found = [p for p in (os.path.join(here, 'changed_checks.py'), os.path.join(here, os.pardir, 'lib', 'changed_checks.py'))
+             if os.path.isfile(p)]
+    if not found: refuse('--changed needs changed_checks.py beside this script (vendor the kit\'s scripts/dev/changed_checks.py)')
+    # The first line is the selection (whole, or only NAME,NAME); the rest is the report. A refusal is its own.
+    picked = subprocess.run([sys.executable, '-I', found[0], '--root', root, '--manifest', opt['manifest'],
+                             '--label', 'check.sh --changed'] + ['--base=' + b for b in opt['changed']],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True)
+    if picked.returncode: sys.exit(2)
+    first, _, report = picked.stdout.partition('\n')
+    if first.startswith('only ') and first[5:]: opt['only'] = set(first[5:].split(','))
+    elif first != 'whole': refuse('--changed: the selection could not be read')
+    print(report, end='', flush=True)
 m = json.load(open(opt['manifest'], encoding='utf-8'))
 logdir = os.environ.get('JPDEV_LOGDIR')
 log_probe_error = ''

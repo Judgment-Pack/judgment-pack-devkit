@@ -63,7 +63,25 @@ usage: jpdev COMMAND [ARGS]
                      neutral phrasing; require the handover heading for a build brief
   env                print the effective settings and where each came from
   --version          print the version
+  version            print the version and, when the kit is a git checkout, the commit it is at
+                     (git describe), which tells a kit at a release from one past it
 USAGE
+}
+
+# kit_version prints the version, with the kit checkout's git describe when the kit is its own clone.
+# A repository named by the environment (GIT_DIR under a hook, for one) is never taken for the kit's.
+kit_version() {
+  local top described=""
+  top=$(kit_git rev-parse --show-toplevel 2>/dev/null) || top=""
+  if [ -n "$top" ] && [ "$top" -ef "$kit" ]; then
+    described=$(kit_git describe --tags --always 2>/dev/null) || described=""
+  fi
+  printf 'jpdev %s%s\n' "$JPDEV_VERSION" "${described:+ ($described)}"
+}
+
+kit_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_NAMESPACE git -C "$kit" "$@"
 }
 
 need_value() { [ $# -ge 2 ] || jpdev_die "$1 needs a value"; }
@@ -85,7 +103,7 @@ cmd_check() {
         if [ $# -gt 0 ] && [[ $1 != -* ]]; then base_args=(--base "$1"); shift; fi
         ;;
       -h | --help) usage; exit 0 ;;
-      *) jpdev_die "check: unknown argument $1" ;;
+      *) jpdev_die "check: unknown argument $1; this kit is $(kit_version), and \`jpdev check --help\` lists what it takes" ;;
     esac
   done
   [ "$changed" -eq 0 ] || [ "$only" -eq 0 ] || jpdev_die "check: --changed and --only both choose the steps; give one"
@@ -95,7 +113,8 @@ cmd_check() {
   if [ "$changed" -eq 1 ]; then
     # The first line is the selection (whole, or only NAME,NAME); the rest is the report.
     local selection first
-    selection=$(python3 -I "$kit/lib/changed_checks.py" --root "$root" --manifest "$manifest" "${base_args[@]}") || exit 2
+    selection=$(python3 -I "$kit/lib/changed_checks.py" --root "$root" --manifest "$manifest" "${base_args[@]}") ||
+      jpdev_die "check --changed: refused by this kit, $(kit_version)"
     first=${selection%%$'\n'*}
     printf '%s\n' "${selection#*$'\n'}"
     case $first in
@@ -666,7 +685,7 @@ codex_run() {
   rm -f -- "$dir/msg.txt" "$dir/pr.md"
   prompt="The rules are this repository's AGENTS.md; follow them."
   if [ "$small" -eq 1 ]; then
-    prompt+=$'\nThis is a small fix: run only the check-list steps the change touches with `jpdev check --only <steps>`; CI runs the whole list.'
+    prompt+=$'\nThis is a small fix: run `jpdev check --changed`, which runs only the check-list steps jpdev.json maps the changed paths to (the whole list when a path is unmapped); do not choose the steps yourself. CI checks the pull request the same way and runs the whole list on the default branch.'
   fi
   prompt+=$'\n'"$(cat "$brief")"
   local args=(exec -m "$model" -c "model_reasoning_effort=$effort" --sandbox "$sandbox")
@@ -1049,7 +1068,8 @@ case ${1:-} in
   carry) shift; cmd_carry "$@" ;;
   codex) shift; cmd_codex "$@" ;;
   env) shift; cmd_env "$@" ;;
-  --version | version) echo "jpdev $JPDEV_VERSION" ;;
+  --version) echo "jpdev $JPDEV_VERSION" ;;
+  version) kit_version ;;
   -h | --help | help | "") usage; [ -n "${1:-}" ] || exit 2 ;;
   *) echo "jpdev: unknown command '$1'" >&2; usage >&2; exit 2 ;;
 esac

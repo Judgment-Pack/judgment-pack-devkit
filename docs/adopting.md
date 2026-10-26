@@ -56,6 +56,7 @@ mkdir -p scripts/dev
 devkit=path/to/judgment-pack-devkit
 cp "$devkit/templates/check.sh" scripts/dev/check.sh
 cp "$devkit/scripts/dev/handover_check.sh" scripts/dev/handover_check.sh
+cp "$devkit/scripts/dev/changed_checks.py" scripts/dev/changed_checks.py
 ```
 
 Line 2 of the template, `# from judgment-pack-devkit vX.Y.Z (templates/check.sh)`, records the kit
@@ -63,10 +64,16 @@ release the copy came from. A vendored copy keeps that line, so a later reader c
 it is behind. The kit's `scripts/dev/handover_check.sh` similarly vendors `lib/handover_check.sh`
 with its release on line 2. Vendor `scripts/dev/check.sh` and `scripts/dev/handover_check.sh`
 together, and copy both whole files again when updating them. `jpdev setup` names this pair when
-either file is absent.
+either file is absent. `scripts/dev/changed_checks.py`, the selection code of `--changed`, is
+`lib/changed_checks.py` with the release on line 2; vendor it beside `check.sh` and update the two
+together (`check.sh --changed` refuses when it is absent, and the CI template uses `--changed` on
+pull requests). A runner given an option it does not know names the release on its line 2, and
+`jpdev version` prints the installed kit's version with the commit a kit checkout is at.
 
-`scripts/dev/check.sh [--setup] [--only A,B] [--skip A,B] [--all]` runs the manifest with no
-caps and prints the summary block. Before a setup or check run, it creates a missing declared
+`scripts/dev/check.sh [--setup] [--only A,B | --changed [BASE]] [--skip A,B] [--all]` runs the
+manifest with no caps and prints the summary block. `--changed` selects the checks as
+`jpdev check --changed` does (see [changed-path check selection](#changed-path-check-selection)),
+with the same rules and the same report, through the vendored `scripts/dev/changed_checks.py`. Before a setup or check run, it creates a missing declared
 Python environment with `python3.X` on PATH, then the newest
 `~/.pyenv/versions/3.X.*/bin/python3`; it refuses before any step when neither exists. Every step
 runs with that environment's `bin` first on PATH, so the manifest's Python setup step installs its
@@ -100,8 +107,21 @@ regenerates `CLAUDE.md`.
 ## 4. Add the CI workflow
 
 Copy `templates/ci-check.yml` to `.github/workflows/ci.yml`. It reads the toolchain
-versions from `dev.json`, sets the toolchains up, and runs `scripts/dev/check.sh --setup` and
-`scripts/dev/check.sh --all`. Its handover job rejects removals from boundary paths unless the pull
+versions from `dev.json`, sets the toolchains up, and runs `scripts/dev/check.sh --setup` and the
+checks: on a pull request `scripts/dev/check.sh --all --changed origin/<base branch>`, on a push to
+the default branch and on a dispatch `scripts/dev/check.sh --all`. The pull request runs the checks
+`jpdev.json` maps its changed paths to, and the whole list when a path is unmapped, when the
+mapping, the manifest or the runner changed, or when there is no mapping, so a repository without
+a `changed` mapping runs the whole list on every pull request as before. The default branch always
+runs the whole list, and only that run is the evidence a release takes (see
+[trusted CI evidence](ci-evidence.md)); a check a pull request did not select did not pass there,
+and the default-branch run is where a mapping that missed an effect shows. This is the
+[policy](policy.md#testing)'s split: CI owns every deterministic check, the scoped run is allowed on
+pull requests, and the full list is required on the default branch and before a release. The check
+job checks out the whole history so that the merge base with the base branch is found. When the
+base cannot be resolved (a missing or empty base branch name, or no merge base in the history),
+the pull-request job fails with the refusal before any check runs rather than falling back to the
+whole list; a push to the default branch runs the whole list whatever the mapping says. Its handover job rejects removals from boundary paths unless the pull
 request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present through
 the vendored `scripts/dev/handover_check.sh`. Copy
 `templates/update-branches.yml` to `.github/workflows/update-branches.yml` to update open branches
@@ -219,7 +239,7 @@ message that names the member or rule at fault, before any check runs.
 `templates/jpdev.schema.json` documents the same shape and `templates/jpdev.json` holds an example.
 
 The whole list runs when a changed path matches no rule, when `jpdev.json`, the manifest (as named
-or as a symlink resolves) or `scripts/dev/check.sh` changed, when nothing changed, and when there is
+or as a symlink resolves), `scripts/dev/check.sh` or `scripts/dev/changed_checks.py` changed, when nothing changed, and when there is
 no mapping (no `jpdev.json`, or one without `changed`). Map only paths whose effect on the checks is
 known, and put the checks that read every file (whitespace, path and name checks) in every rule.
 Selection sees only what git reports in this clone: an edit hidden by assume-unchanged or

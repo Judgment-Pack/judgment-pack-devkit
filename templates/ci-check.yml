@@ -1,5 +1,8 @@
 # Vendor as .github/workflows/ci.yml. Runs the repository's own check list (dev.json)
 # with scripts/dev/check.sh, with the toolchains set up from the manifest and no caps.
+# A pull request runs `check.sh --changed` against its base branch: the checks jpdev.json maps the
+# changed paths to, and the whole list when a path is unmapped, when the mapping, the manifest or the
+# runner changed, or with no mapping. A push to the default branch and a dispatch run the whole list.
 name: dev-check
 run-name: dev-check ${{ inputs.sha || github.sha }}
 
@@ -32,8 +35,10 @@ jobs:
     name: check
     runs-on: ubuntu-latest
     steps:
+      # The whole history, so that --changed finds the merge base with the base branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.sha }}
       - name: Read the toolchains from dev.json
@@ -87,7 +92,15 @@ jobs:
       - name: Setup steps
         run: scripts/dev/check.sh --setup
       - name: Checks
-        run: scripts/dev/check.sh --all
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            scripts/dev/check.sh --all --changed "origin/$BASE_REF"
+          else
+            scripts/dev/check.sh --all
+          fi
 
   handover:
     name: handover

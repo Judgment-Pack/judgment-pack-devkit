@@ -8,7 +8,9 @@ are the ones a brief does not repeat.
 ## Who owns what
 
 - **CI owns everything deterministic.** Formatting, builds, unit tests, schema checks,
-  certification suites, whitespace and path checks run in CI on every pull request. A session
+  certification suites, whitespace and path checks run in CI: on a pull request those its
+  changed-path mapping selects (the whole list without one), and the whole list on the default
+  branch. A session
   does not re-run them to reassure itself and does not watch CI run.
 - **Duplication is where two copies drift:** a repository opts in to the `duplication` check with
   its own token and line thresholds in `jpdev.json`, and marks an intentional copy with an explicit
@@ -112,7 +114,8 @@ pull request before review, MEDIUMs named by the review of record are fixed in t
 MEDIUM found only on re-read goes to the pre-release batch, and LOW rides.
 
 `jpdev codex run --small` is for a bounded fix on an existing branch. It tells the builder to run
-only the touched check-list steps; CI runs the whole list. The wrapper refuses the result after the
+`jpdev check --changed`, so the mapping and not the builder chooses the steps; CI checks the pull
+request the same way and runs the whole list on the default branch. The wrapper refuses the result after the
 run if it changed a manifest `handover.shared_paths` or `handover.boundary_paths` entry, or if its
 added and removed lines exceed `JPDEV_SMALL_MAX_LINES` (80 by default). The size/path guard is
 unchanged by the batch workflow. A relevant CI failure gets a focused fix and rerun; reuse the builder unless the safeguard-stop rule below requires a fresh session.

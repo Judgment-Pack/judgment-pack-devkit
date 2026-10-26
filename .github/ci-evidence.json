@@ -5,6 +5,7 @@
   "inputs": [
     "dev.json",
     "scripts/dev/check.sh",
+    "scripts/dev/changed_checks.py",
     "lib/ci_evidence.py",
     "templates/check.sh",
     "lib/generated_docs.py",

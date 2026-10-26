@@ -1,4 +1,5 @@
-"""Handwritten fixture repositories exercise `jpdev check --changed` through bin/jpdev."""
+"""Handwritten fixture repositories exercise `jpdev check --changed` through bin/jpdev, and the
+same fixtures `scripts/dev/check.sh --changed` through the vendored runner and selection code."""
 import copy
 import importlib.util
 import json
@@ -80,6 +81,11 @@ def git(cwd, *args):
 class ChangedCheckTests(unittest.TestCase):
     """A clone of a fixture origin, on a topic branch, with the mapping of tests/fixture."""
 
+    LABEL = 'jpdev check --changed'
+
+    def seed(self, seed):
+        """Add files to the fixture origin before its first commit."""
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='changed-checks-')
         self.addCleanup(temporary.cleanup)
@@ -97,6 +103,7 @@ class ChangedCheckTests(unittest.TestCase):
                  'cmd/tool/main.go': 'package main\n', 'tests/unit_test.py': 'pass\n', 'scripts/tool.sh': 'true\n'}
         for name, text in files.items():
             self.write(name, text, seed)
+        self.seed(seed)
         git(seed, 'add', '-A')
         git(seed, 'commit', '-q', '-m', 'seed')
         git(self.work, 'init', '-q', '--bare', '-b', 'main', str(self.work / 'origin.git'))
@@ -138,12 +145,12 @@ class ChangedCheckTests(unittest.TestCase):
         status, out, err = self.check('--changed')
         self.assertEqual(status, 0, out + err)
         self.assertEqual(self.ran(out), {'docs-lint', 'whitespace'}, out)
-        self.assertIn('== jpdev check --changed: 2 changed paths since origin/main (merge base ', out)
+        self.assertIn('== %s: 2 changed paths since origin/main (merge base ' % self.LABEL, out)
         self.assertRegex(out, r'(?m)^selected +docs-lint +docs/\*\*, \*\.md$')
         self.assertRegex(out, r'(?m)^not selected +go-test +no changed path maps to it$')
         self.assertIn('== 2 of 5 checks selected ==', out)
         self.assertIn('== 2 passed, 0 failed, 0 skipped, 0 not run ==', out)
-        self.assertLess(out.index('== jpdev check --changed'), out.index('== check summary'))
+        self.assertLess(out.index('== ' + self.LABEL), out.index('== check summary'))
 
     def test_mapped_go_path_runs_the_go_steps(self):
         self.write('cmd/tool/main.go', 'package main\n\nfunc main() {}\n')
@@ -207,6 +214,29 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertEqual(status, 0, out + err)
         self.assertIn('selection input changed: scripts/dev/check.sh: whole list', out)
         self.assertEqual(self.ran(out), ALL, out)
+
+    def test_a_change_to_the_vendored_selection_code_runs_the_whole_list(self):
+        selection = self.clone / 'scripts' / 'dev' / 'changed_checks.py'
+        selection.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(ROOT / 'scripts' / 'dev' / 'changed_checks.py'), str(selection))
+        self.mapping(lambda value: value['changed'].append({'paths': ['scripts/dev/**'], 'checks': ['whitespace']}))
+        base = self.commit_base('vendored selection code')
+        with selection.open('a') as handle:
+            handle.write('# a line after the selection code\n')
+        status, out, err = self.check('--changed', base)
+        self.assertEqual(status, 0, out + err)
+        self.assertIn('selection input changed: scripts/dev/changed_checks.py: whole list', out)
+        self.assertEqual(self.ran(out), ALL, out)
+
+    def test_failures_name_the_kit_version(self):
+        version = subprocess.run([str(JPDEV), '--version'], stdout=subprocess.PIPE, universal_newlines=True,
+                                 check=True).stdout.strip()
+        status, out, err = self.check('--changed', 'no-such-ref')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn('jpdev: check --changed: refused by this kit, %s' % version, err)
+        status, out, err = self.check('--chagned')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn('check: unknown argument --chagned; this kit is %s' % version, err)
 
     def test_a_symlinked_manifest_retargeted_runs_the_whole_list(self):
         manifest = json.loads((FIXTURE / 'changed-dev.json').read_text())
@@ -292,7 +322,7 @@ class ChangedCheckTests(unittest.TestCase):
     def test_no_changed_path_runs_the_whole_list(self):
         status, out, err = self.check('--changed')
         self.assertEqual(status, 0, out + err)
-        self.assertIn('== jpdev check --changed: 0 changed paths since origin/main', out)
+        self.assertIn('== %s: 0 changed paths since origin/main' % self.LABEL, out)
         self.assertIn('no changed path: whole list', out)
         self.assertEqual(self.ran(out), ALL, out)
 
@@ -341,18 +371,24 @@ class ChangedCheckTests(unittest.TestCase):
                 self.mapping(change)
                 status, out, err = self.check('--changed')
                 self.assertEqual(status, 2, out + err)
-                self.assertIn('jpdev check --changed: refused: ' + message + '\n', err)
+                self.assertIn(self.LABEL + ': refused: ' + message + '\n', err)
                 self.assertEqual(out, '')
                 self.assertNotIn('check: running', err)
         self.write('jpdev.json', '{"version": 1, "changed": [')
         status, out, err = self.check('--changed')
         self.assertEqual(status, 2, out + err)
-        self.assertIn('jpdev check --changed: refused: jpdev.json: not readable JSON', err)
+        self.assertIn(self.LABEL + ': refused: jpdev.json: not readable JSON', err)
 
     def test_an_unresolved_base_is_refused(self):
+        self.write('docs/guide.md', 'guide, edited\n')
         status, out, err = self.check('--changed', 'no-such-ref')
         self.assertEqual(status, 2, out + err)
         self.assertIn("refused: cannot resolve BASE 'no-such-ref' to a commit", err)
+        self.assertEqual(out, '')
+        # A pull-request job whose base branch name came through empty asks for `origin/`.
+        status, out, err = self.check('--changed', 'origin/')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn("refused: cannot resolve BASE 'origin/' to a commit", err)
         self.assertEqual(out, '')
         git(self.clone, 'remote', 'remove', 'origin')
         status, out, err = self.check('--changed')
@@ -360,12 +396,106 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertIn('refused: no default branch found (origin/HEAD, origin/main or origin/master); name BASE', err)
         status, out, err = self.check('--changed', 'main')
         self.assertEqual(status, 0, out + err)
-        self.assertIn('0 changed paths since main', out)
+        self.assertIn('1 changed path since main', out)
+
+    def test_a_shallow_clone_without_the_merge_base_is_refused(self):
+        seed = self.work / 'seed'
+        git(seed, 'switch', '-q', '-c', 'side')
+        self.write('docs/side.md', 'side\n', seed)
+        git(seed, 'add', '-A')
+        git(seed, 'commit', '-q', '-m', 'side')
+        git(seed, 'switch', '-q', 'main')
+        self.write('docs/main.md', 'main\n', seed)
+        git(seed, 'add', '-A')
+        git(seed, 'commit', '-q', '-m', 'main moves on')
+        git(seed, 'push', '-q', str(self.work / 'origin.git'), 'main', 'side')
+        # Each branch tip alone: the commit they share is not in the clone.
+        self.clone = self.work / 'shallow'
+        git(self.work, 'clone', '-q', '--depth', '1', '--no-single-branch', '--branch', 'side',
+            (self.work / 'origin.git').as_uri(), str(self.clone))
+        self.write('docs/guide.md', 'guide, edited\n')
+        for args in (('--changed',), ('--changed', 'origin/main')):
+            with self.subTest(args=args):
+                status, out, err = self.check(*args)
+                self.assertEqual(status, 2, out + err)
+                self.assertIn(self.LABEL + ': refused: no merge base of origin/main and HEAD '
+                              '(a shallow clone needs the history)\n', err)
+                self.assertEqual(out, '')
+                self.assertNotIn('check: running', err)
 
     def test_changed_and_only_are_not_given_together(self):
         status, out, err = self.check('--changed', '--only', 'docs-lint')
         self.assertEqual(status, 2, out + err)
         self.assertIn('--changed and --only both choose the steps; give one', err)
+
+
+class VendoredChangedCheckTests(ChangedCheckTests):
+    """Every fixture of ChangedCheckTests again, through the clone's vendored scripts/dev/check.sh and
+    scripts/dev/changed_checks.py instead of bin/jpdev: the same selection, refusals and report."""
+
+    LABEL = 'check.sh --changed'
+
+    def seed(self, seed):
+        runner = seed / 'scripts' / 'dev' / 'check.sh'
+        runner.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(ROOT / 'scripts' / 'dev' / 'check.sh'), str(runner))
+        shutil.copy(str(ROOT / 'scripts' / 'dev' / 'changed_checks.py'), str(runner.parent / 'changed_checks.py'))
+
+    def check(self, *args, runner=None, env=None):
+        result = subprocess.run([str(runner or self.clone / 'scripts' / 'dev' / 'check.sh')] + list(args),
+                                cwd=str(self.clone), env=env or self.env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+                                timeout=120)
+        return result.returncode, result.stdout, result.stderr
+
+    def report(self, out, label):
+        """The selection block, from its heading to its last line, with the runner's name left out."""
+        lines = out.split('== check summary')[0].splitlines()
+        return [line.replace(label, 'RUNNER') for line in lines if not line.startswith('PASS ')]
+
+    def test_the_kit_and_the_vendored_runner_select_alike(self):
+        cases = [('docs', {'docs/guide.md': 'guide, edited\n'}),
+                 ('go and tests', {'cmd/tool/main.go': 'package main\n\nfunc main() {}\n', 'tests/unit_test.py': 'assert 1\n'}),
+                 ('unmapped', {'scripts/new.sh': 'true\n'})]
+        for label, files in cases:
+            with self.subTest(case=label):
+                for name, text in files.items():
+                    self.write(name, text)
+                status, vendored, err = self.check('--changed')
+                self.assertEqual(status, 0, vendored + err)
+                status, kit, err = ChangedCheckTests.check(self, '--changed')
+                self.assertEqual(status, 0, kit + err)
+                self.assertEqual(self.report(vendored, self.LABEL), self.report(kit, ChangedCheckTests.LABEL))
+                self.assertEqual(self.ran(vendored), self.ran(kit))
+                git(self.clone, 'checkout', '-q', '--', '.')
+                git(self.clone, 'clean', '-qfd')
+
+    def test_the_template_in_the_kit_uses_the_kit_selection_code(self):
+        self.write('docs/guide.md', 'guide, edited\n')
+        env = dict(self.env, JPDEV_ROOT=str(self.clone))
+        status, out, err = self.check('--changed', runner=ROOT / 'templates' / 'check.sh', env=env)
+        self.assertEqual(status, 0, out + err)
+        self.assertEqual(self.ran(out), {'docs-lint', 'whitespace'}, out)
+
+    def test_failures_name_the_kit_version(self):
+        line2 = (ROOT / 'templates' / 'check.sh').read_text().splitlines()[1]
+        self.assertRegex(line2, r'^# from judgment-pack-devkit v[0-9]+\.[0-9]+\.[0-9]+ \(templates/check\.sh\)$')
+        status, out, err = self.check('--chagned')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn('check.sh: unknown argument --chagned (this runner is %s)\n' % line2[2:].split(' (')[0], err)
+
+    def test_changed_needs_the_vendored_selection_code(self):
+        (self.clone / 'scripts' / 'dev' / 'changed_checks.py').unlink()
+        self.write('docs/guide.md', 'guide, edited\n')
+        status, out, err = self.check('--changed')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn('check.sh: --changed needs changed_checks.py beside this script', err)
+        self.assertEqual(out, '')
+
+    def test_changed_selects_checks_not_setup_steps(self):
+        status, out, err = self.check('--setup', '--changed')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn('check.sh: --changed selects checks, not setup steps', err)
 
 
 SCHEMA_KEYWORDS = {'$schema', 'title', 'description', 'type', 'const', 'enum', 'required', 'anyOf', 'properties',
