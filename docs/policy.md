@@ -57,8 +57,9 @@ are the ones a brief does not repeat.
   does not count. Preserve the failing assertion and restored passing evidence.
 
 Evidence reuse applies only where an actual repository gate implements and validates equivalence.
-This policy does not introduce release-evidence reuse: Devkit #37 and Agent #213 remain separate
-work. Keep the summary of what actually ran and what remains required by current CI/release gates.
+At release, that gate is the [release evidence gate](ci-evidence.md), which each repository adopts
+in its own issue; this policy introduces no other reuse. Keep the summary of what actually ran and
+what remains required by current CI/release gates.
 
 **Scoped runs.** `jpdev check --changed [BASE]` runs only the check-list steps that the
 repository's `jpdev.json` maps the changed paths to, and the whole list when a changed path is

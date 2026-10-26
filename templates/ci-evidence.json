@@ -1,0 +1,102 @@
+{
+  "$comment": [
+    "Vendor as .github/ci-evidence.json, with scripts/dev/release_evidence.py (docs/ci-evidence.md).",
+    "Every member below is required unless its comment says optional; an unknown member is refused.",
+    "\"$comment\" is allowed in any object whose members are fixed names, and is ignored."
+  ],
+  "schema": 2,
+  "repository": "Owner/name",
+  "branch": "main",
+  "max_age_hours": 48,
+  "inputs": [
+    "go.mod",
+    "go.sum",
+    "testdata/pins/companions.json"
+  ],
+  "fresh_at_release": [
+    "tag-history",
+    "policy-tag-corpus"
+  ],
+  "profiles": {
+    "linux": {
+      "$comment": [
+        "compare release-runner: the release job, on the same platform, resolves the image and the tools itself;",
+        "a CI image or tool that differs from what it resolves refuses. The release job must run on this platform."
+      ],
+      "platform": {
+        "RUNNER_OS": "Linux",
+        "RUNNER_ARCH": "X64"
+      },
+      "compare": "release-runner",
+      "tools": {
+        "go": ["go", "version"],
+        "python": ["python3", "--version"]
+      },
+      "pins": {
+        "go": "go version go1.26.5 linux/amd64"
+      }
+    },
+    "macos": {
+      "$comment": [
+        "compare pins: for a leg the release job cannot resolve itself (another OS or architecture).",
+        "Every tool needs a pin, the exact text its command prints; ImageOS is optional and pins the image family."
+      ],
+      "platform": {
+        "RUNNER_OS": "macOS",
+        "RUNNER_ARCH": "ARM64",
+        "ImageOS": "macos15"
+      },
+      "compare": "pins",
+      "tools": {
+        "go": ["go", "version"]
+      },
+      "pins": {
+        "go": "go version go1.26.5 darwin/arm64"
+      }
+    }
+  },
+  "workflows": {
+    "ci": {
+      "$comment": [
+        "path and name: the workflow file and its name: line. events: push, and workflow_dispatch if the fresh",
+        "route dispatches it; a dispatch that checks out another commit (an input sha) is refused by capture.",
+        "A run of another trigger on the branch at the commit (schedule, workflow_run, repository_dispatch) is",
+        "never evidence, but refuses reuse while unfinished or when newer than the selected run and not successful;",
+        "pull request and merge queue runs, other branches' and forks' runs neither count nor block.",
+        "skipped_jobs (optional): jobs that must have been skipped on the trusted branch, such as a pull-request-only job."
+      ],
+      "path": ".github/workflows/ci.yml",
+      "name": "CI",
+      "events": ["push", "workflow_dispatch"],
+      "skipped_jobs": ["PR sample"],
+      "jobs": {
+        "check": {
+          "$comment": [
+            "name: the job's display name as the API reports it; job_id: its key under jobs: in the workflow.",
+            "checks: the dev.json checks this job runs, or \"all\"; optional_skips (optional): checks it may skip;",
+            "setup (optional): true when the job's setup log is recorded too. A tag-sensitive check is never listed",
+            "here: the release workflow runs it itself, and fresh_at_release names it in the decision record."
+          ],
+          "name": "check",
+          "job_id": "check",
+          "labels": ["ubuntu-latest"],
+          "profile": "linux",
+          "checks": "all",
+          "optional_skips": [],
+          "setup": true
+        },
+        "go-macos": {
+          "$comment": [
+            "A matrix leg is one entry: its display name with the matrix values, its own job key (the capture",
+            "step's --job, for example go-${{ matrix.os }}), and the job_id every leg shares."
+          ],
+          "name": "go (macos-latest)",
+          "job_id": "go",
+          "labels": ["macos-latest"],
+          "profile": "macos",
+          "checks": ["go-test"]
+        }
+      }
+    }
+  }
+}
