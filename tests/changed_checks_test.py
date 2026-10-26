@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location('changed_checks', ROOT / 'lib' / '
 c = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(c)
 ALL = {'docs-lint', 'go-vet', 'go-test', 'python-tests', 'whitespace'}
+WORKFLOW_PATH = 'a workflow-created path belongs outside the clone or in .gitignore: whole list'
 # What jpdev check exports to its steps, and settings a caller's machine may hold.
 DROPPED = ('CI', 'JPDEV_ROOT', 'JPDEV_WRAP', 'JPDEV_NODE_BIN', 'JPDEV_GO_BIN', 'JPDEV_LOGDIR',
            'JPDEV_STEP_TIMEOUT', 'JPDEV_VENV', 'JPDEV_NAME_PATTERNS', 'JPDEV_GO_SDK_DIR', 'JPDEV_NVM_DIR')
@@ -166,9 +167,36 @@ class ChangedCheckTests(unittest.TestCase):
         self.write('scripts/new.sh', 'true\n')
         status, out, err = self.check('--changed')
         self.assertEqual(status, 0, out + err)
-        self.assertIn('unmapped path scripts/new.sh: whole list', out)
+        self.assertIn('untracked path scripts/new.sh is not mapped; ' + WORKFLOW_PATH, out)
         self.assertIn('== whole list: 5 checks ==', out)
         self.assertEqual(self.ran(out), ALL, out)
+
+    def test_an_unmapped_untracked_path_says_where_a_workflow_path_belongs(self):
+        # A workflow that checks another repository out inside the clone leaves an untracked path.
+        self.write('docs/guide.md', 'guide, edited\n')
+        self.write('desk-checkout/package.json', '{}\n')
+        self.write('scripts/new.sh', 'true\n')
+        git(self.clone, 'add', 'scripts/new.sh')
+        status, out, err = self.check('--changed')
+        self.assertEqual(status, 0, out + err)
+        self.assertIn('\nuntracked path desk-checkout/package.json is not mapped; a workflow-created path '
+                      'belongs outside the clone or in .gitignore: whole list\n', out)
+        self.assertNotIn('unmapped path desk-checkout/', out)
+        # A tracked unmapped path keeps the plain reason.
+        self.assertIn('\nunmapped path scripts/new.sh: whole list\n', out)
+        self.assertNotIn('untracked path scripts/new.sh', out)
+        self.assertIn('== whole list: 5 checks ==', out)
+        self.assertEqual(self.ran(out), ALL, out)
+
+    def test_an_ignored_workflow_path_leaves_the_selection_scoped(self):
+        self.write('.gitignore', 'desk-checkout/\n')
+        base = self.commit_base('ignore the workflow checkout')
+        self.write('desk-checkout/package.json', '{}\n')
+        self.write('docs/guide.md', 'guide, edited\n')
+        status, out, err = self.check('--changed', base)
+        self.assertEqual(status, 0, out + err)
+        self.assertNotIn('desk-checkout', out)
+        self.assertEqual(self.ran(out), {'docs-lint', 'whitespace'}, out)
 
     def test_paths_of_several_rules_select_the_union(self):
         self.write('docs/guide.md', 'guide, edited\n')

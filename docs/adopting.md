@@ -121,7 +121,13 @@ pull requests, and the full list is required on the default branch and before a 
 job checks out the whole history so that the merge base with the base branch is found. When the
 base cannot be resolved (a missing or empty base branch name, or no merge base in the history),
 the pull-request job fails with the refusal before any check runs rather than falling back to the
-whole list; a push to the default branch runs the whole list whatever the mapping says. Its handover job rejects removals from boundary paths unless the pull
+whole list; a push to the default branch runs the whole list whatever the mapping says. Any
+untracked path that is not ignored and that a workflow step creates inside the clone (a checkout of
+another repository for a parity step, a download, a build output) is a changed path to `--changed`:
+unless a rule maps it, every pull request runs the whole list. Such a path must live outside the
+clone or be listed in `.gitignore`; the template's commented parity example checks the other
+repository out and moves it under the runner's temporary directory before any check runs, and the
+selection report names such a path as untracked and not mapped. Its handover job rejects removals from boundary paths unless the pull
 request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present through
 the vendored `scripts/dev/handover_check.sh`. Copy
 `templates/update-branches.yml` to `.github/workflows/update-branches.yml` to update open branches
@@ -175,7 +181,9 @@ node on PATH (the kit puts the manifest's node first on PATH for every step; the
 with `--disable-wasm-trap-handler`, which is what lets it run under the Go address-space cap).
 Its last check, `parity`, compares the package with a checkout of the Desk and is skipped
 unless `JPDEV_DESK` names one; it is marked `optional` because that repository's CI does not
-check the Desk out.
+check the Desk out. A repository whose CI does check the other repository out keeps that checkout
+outside the clone (see [step 4](#4-add-the-ci-workflow)), or `--changed` runs the whole list on
+every pull request.
 
 To run it against a clone of that repository:
 
@@ -244,5 +252,9 @@ no mapping (no `jpdev.json`, or one without `changed`). Map only paths whose eff
 known, and put the checks that read every file (whitespace, path and name checks) in every rule.
 Selection sees only what git reports in this clone: an edit hidden by assume-unchanged or
 skip-worktree, an ignored file and a path outside the clone are not seen, and the full list remains
-the guard for them. The [policy](policy.md#testing) says where a scoped run is allowed and where the
+the guard for them. Conversely, any untracked path that is not ignored is seen, including one a CI
+workflow creates inside the clone: unless a rule maps it, it defeats `--changed` on every run, so a
+path a workflow creates belongs outside the clone or in `.gitignore`. The report names an unmapped
+untracked path as `untracked path PATH is not mapped; a workflow-created path belongs outside the
+clone or in .gitignore: whole list`. The [policy](policy.md#testing) says where a scoped run is allowed and where the
 full list is required.
