@@ -248,14 +248,19 @@ class Accepted(Gate):
         self.config['workflows']['ci']['events'] = ['push']
         self.assertEqual(self.decide(), 'run-missing')
 
-    def test_older_failures_and_pull_request_runs_do_not_block_the_newest_success(self):
+    def test_older_failures_and_newer_green_runs_of_other_triggers_do_not_block(self):
         self.add_run(dict(RUN, id=90, conclusion='failure', created_at='2026-10-25T09:00:00Z',
                           run_started_at='2026-10-25T09:00:00Z'))
+        self.add_run(dict(RUN, id=91, event='schedule', conclusion='cancelled',
+                          created_at='2026-10-25T09:30:00Z', run_started_at='2026-10-25T09:30:00Z'))
         self.add_run(dict(RUN, id=110, event='pull_request', head_branch='feature',
-                          conclusion='failure', created_at='2026-10-25T11:00:00Z',
-                          run_started_at='2026-10-25T11:00:00Z'))
+                          created_at='2026-10-25T11:00:00Z', run_started_at='2026-10-25T11:00:00Z'))
+        self.add_run(dict(RUN, id=111, event='schedule', created_at='2026-10-25T11:10:00Z',
+                          run_started_at='2026-10-25T11:10:00Z'))
         self.assertEqual(self.decide(), 'reuse')
         self.assertEqual(self.record['workflows']['ci']['run_id'], 100)
+        self.assertEqual((self.record['workflows']['ci']['runs_at_commit'],
+                          self.record['workflows']['ci']['applicable']), (5, 2))
 
 
 class WrongCommit(Gate):
@@ -322,6 +327,10 @@ class WrongEvent(Gate):
     def test_a_push_to_another_branch(self):
         self.data[RUNS]['workflow_runs'][0] = dict(RUN, head_branch='release-candidate')
         self.refuses('run-missing')
+
+    def test_a_job_of_another_branch(self):
+        self.refuses('job-identity', lambda: self.jobs[0].update(head_branch='feature'))
+        self.assertIn('test (ubuntu-latest)', self.record['refusal']['detail'])
 
     def test_a_main_run_that_belongs_to_a_pull_request(self):
         self.refuses('run-trigger', lambda: self.both_runs(pull_requests=[{'number': 7}]))
@@ -437,6 +446,27 @@ class NewerAttempt(Gate):
                 self.newer(status=status, conclusion=None, run_started_at=started)
                 self.data['actions/runs/101'] = self.listed[-1]
                 self.refuses('run-unfinished')
+
+    def test_a_newer_failed_or_running_run_of_another_trigger(self):
+        for event in ('schedule', 'workflow_run', 'repository_dispatch'):
+            for status, conclusion, code in (('completed', 'failure', 'run-newer-failed'),
+                                             ('in_progress', None, 'run-unfinished')):
+                with self.subTest(event=event, status=status):
+                    self.data = world()
+                    self.add_run(dict(RUN, id=120, event=event, status=status, conclusion=conclusion,
+                                      created_at='2026-10-25T11:00:00Z',
+                                      run_started_at='2026-10-25T11:00:00Z'))
+                    self.refuses(code)
+                    self.assertIn('120', self.record['refusal']['detail'])
+
+    def test_a_newer_failed_run_of_a_pull_request_or_another_branch(self):
+        for changes in ({'event': 'pull_request', 'head_branch': 'feature'},
+                        {'event': 'push', 'head_branch': 'release-candidate'}):
+            with self.subTest(changes=changes):
+                self.data = world()
+                self.add_run(dict(dict(RUN, id=121, conclusion='timed_out', created_at='2026-10-25T11:00:00Z',
+                                       run_started_at='2026-10-25T11:00:00Z'), **changes))
+                self.refuses('run-newer-failed')
 
     def test_the_selected_run_has_a_newer_failed_attempt(self):
         self.refuses('run-result', lambda: self.both_runs(run_attempt=2, conclusion='failure',
@@ -571,6 +601,26 @@ class UnavailableEvidence(Gate):
         self.refuses('unavailable-or-malformed')
         self.data = world()
         self.refuses('unavailable-or-malformed', lambda: self.data.update({'': []}))
+
+    def test_unsupported_compression_or_nesting_is_a_recorded_refusal(self):
+        stored = zipped(EVIDENCE_LINUX)
+        # The compression method of the local header (offset 8) and the central directory entry
+        # (offset 10 from its signature), set by hand to 99, which zipfile does not implement.
+        method = bytearray(stored)
+        local, central = method.index(b'PK\x03\x04'), method.index(b'PK\x01\x02')
+        method[local + 8:local + 10] = (99).to_bytes(2, 'little')
+        method[central + 10:central + 12] = (99).to_bytes(2, 'little')
+        nested = io.BytesIO()
+        with zipfile.ZipFile(nested, 'w', zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('evidence.json', '[' * 100000 + ']' * 100000)
+        for name, raw in (('NotImplementedError', bytes(method)), ('RecursionError', nested.getvalue())):
+            with self.subTest(error=name):
+                self.data = world()
+                self.data['actions/artifacts/301/zip'] = raw
+                self.artifacts[0].update(size_in_bytes=len(raw),
+                                         digest='sha256:' + hashlib.sha256(raw).hexdigest())
+                self.refuses('unavailable-or-malformed')
+                self.assertEqual(self.record['refusal']['detail'], name)
 
     def test_stale_or_future_evidence(self):
         for started in ('2026-10-23T11:59:59Z', '2026-10-25T12:00:01Z'):
@@ -742,6 +792,13 @@ class KitAdoption(unittest.TestCase):
         self.assertIn('run: python3 scripts/dev/release_evidence.py verify --output', release)
         self.assertNotIn('uses: ./.github/workflows/ci.yml', release)
         self.assertIn('scripts/dev/release_evidence.py line 2', release)
+        # The decision record is kept on a refusal too: the upload runs unless the run was cancelled.
+        self.assertIn('verify --output "${{ runner.temp }}/release-evidence.json"', release)
+        self.assertIn('      - name: Keep the decision record\n'
+                      '        if: ${{ !cancelled() }}\n'
+                      '        uses: actions/upload-artifact@', release)
+        self.assertIn('          path: ${{ runner.temp }}/release-evidence.json\n'
+                      '          if-no-files-found: error\n', release)
         self.assertIn('cmp -s lib/release_evidence.py <(sed 2d scripts/dev/release_evidence.py)', release)
 
 
@@ -944,6 +1001,21 @@ class RealCLI(unittest.TestCase):
         result = self.cli(self.world(), extra=extra)
         self.assertEqual(json.loads(path.read_text())['refusal']['code'], 'checkout-changed')
         self.assertEqual(result.returncode, 1)
+
+    def test_verify_refuses_a_helper_that_is_not_the_committed_one(self):
+        helper = self.root / 'release_evidence.py'
+        original = helper.read_bytes()
+        def git(*args):
+            subprocess.run(['git', *args], cwd=self.root, env=self.env, check=True,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        git('update-index', '--skip-worktree', 'release_evidence.py')
+        self.addCleanup(git, 'update-index', '--no-skip-worktree', 'release_evidence.py')
+        self.addCleanup(helper.write_bytes, original)
+        helper.write_bytes(original + b'\n# not the bytes the commit holds\n')
+        path, extra = self.record('helper.json')
+        result = self.cli(self.world(), extra=extra)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(path.read_text())['refusal']['code'], 'helper-source')
 
     def test_capture_writes_the_evidence_verify_takes(self):
         log = self.root.parent / 'checks.log'

@@ -60,6 +60,8 @@
       "$comment": [
         "path and name: the workflow file and its name: line. events: push, and workflow_dispatch if the fresh",
         "route dispatches it; a dispatch that checks out another commit (an input sha) is refused by capture.",
+        "A run of any other event or branch at the commit (schedule, workflow_run, a pull request) is never",
+        "evidence, but refuses reuse while unfinished or when newer than the selected run and not successful.",
         "skipped_jobs (optional): jobs that must have been skipped on the trusted branch, such as a pull-request-only job."
       ],
       "path": ".github/workflows/ci.yml",

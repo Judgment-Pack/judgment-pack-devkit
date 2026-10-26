@@ -26,6 +26,7 @@ import sys
 import tempfile
 from urllib.parse import quote
 import zipfile
+import zlib
 
 SCHEMA = 2
 MAX_AGE_HOURS = 48
@@ -373,32 +374,42 @@ def run_identity(run, source, workflow, workflow_id, branch):
     need(positive(run['id']) and positive(run['run_attempt']), 'run-identity')
 
 
+def attempt_order(run):
+    return (timestamp(run['run_started_at']), timestamp(run['created_at']), run['id'])
+
+
 def select(api, source, workflow, workflow_id, branch, trail=None):
     """The newest applicable attempt, never an older green one.
 
     Applicable: a run of this workflow at the exact commit, on the trusted branch, by a trusted
-    event. A pull request run, another branch or another event is not evidence and is not
-    applicable. Every applicable run must be complete; the newest by its latest attempt's start
-    is the one selected, whatever its result."""
+    event; only an applicable run is evidence. Every run of the workflow at the commit, whatever
+    its event or branch, takes part in the scan: none may be unfinished, and none whose latest
+    attempt started after the selected one's may have failed. The selected run is the applicable
+    one whose latest attempt started last, whatever its result."""
     runs = api.pages('actions/workflows/%d/runs?head_sha=%s' % (workflow_id, source['source']),
                      'workflow_runs')
     applicable = [run for run in runs
                   if run.get('head_branch') == branch and run.get('event') in workflow['events']]
     if trail is not None:
         trail['runs_at_commit'] = len(runs)
-        newest = sorted(applicable, key=lambda run: str(run.get('run_started_at')), reverse=True)
         trail['applicable'] = len(applicable)
-        trail['candidates'] = [{key: run.get(key) for key in ('id', 'run_attempt', 'event', 'status',
-                                                              'conclusion', 'run_started_at')}
+        newest = sorted(runs, key=lambda run: str(run.get('run_started_at')), reverse=True)
+        trail['candidates'] = [{key: run.get(key) for key in ('id', 'run_attempt', 'event', 'head_branch',
+                                                              'status', 'conclusion', 'run_started_at')}
                                for run in newest[:20]]
     need(applicable, 'run-missing', 'no %s run of %s at %s' % ('/'.join(workflow['events']),
                                                                workflow['path'], source['source']))
     for run in applicable:
         run_identity(run, source, workflow, workflow_id, branch)
-    unfinished = [run['id'] for run in applicable if run['status'] != 'completed']
+    scanned = runs
+    unfinished = [run['id'] for run in scanned if run['status'] != 'completed']
     need(not unfinished, 'run-unfinished', 'runs %s have not completed' % unfinished)
-    return max(applicable, key=lambda run: (timestamp(run['run_started_at']),
-                                            timestamp(run['created_at']), run['id']))
+    chosen = max(applicable, key=attempt_order)
+    newer = ['%s (%s, %s)' % (run['id'], run['event'], run['conclusion']) for run in scanned
+             if attempt_order(run) > attempt_order(chosen) and run['conclusion'] != 'success']
+    need(not newer, 'run-newer-failed', 'runs %s started after run %s and did not succeed' % (
+        newer, chosen['id']))
+    return chosen
 
 
 def selection(run):
@@ -588,7 +599,8 @@ def verify(api, config, source, release_tag, now, record):
 
 
 # Malformed or missing API data or files: a refusal like any other, never a success.
-MALFORMED = (KeyError, IndexError, ValueError, TypeError, AttributeError, OSError, zipfile.BadZipFile)
+MALFORMED = (KeyError, IndexError, ValueError, TypeError, AttributeError, OSError, EOFError,
+             NotImplementedError, RecursionError, zipfile.BadZipFile, zlib.error)
 
 
 def refusal_of(error):

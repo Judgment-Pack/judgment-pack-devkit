@@ -26,9 +26,12 @@ Evidence is reused only when all of this holds; anything else refuses.
 - **A trusted trigger.** A `push` to the configured branch, which must be the repository's
   default branch, or a `workflow_dispatch` on it when the configuration lists that event. A run
   associated with a pull request is refused.
-- **The newest attempt, never an older green one.** Every applicable run must have completed, and
-  the one whose latest attempt started last is selected, whatever its result: a newer failed,
-  cancelled or running attempt is never searched past ([selection](#selection)).
+- **The newest attempt, never an older green one.** Only a trusted-trigger run is evidence, but
+  every run of the workflow at the commit takes part, whatever its event or branch (a schedule,
+  `workflow_run` or `repository_dispatch` run, a pull request, another branch): none may be
+  unfinished, and none newer than the selected run may have failed. The applicable run whose
+  latest attempt started last is selected, whatever its result: a newer failed, cancelled or
+  running attempt is never searched past ([selection](#selection)).
 - **Every required job and matrix leg,** by display name, each `success` on the configured
   runner labels and a GitHub-hosted runner; jobs that must be skipped (a pull-request-only job)
   are named, and nothing else may be skipped. Each job's check results cover every configured
@@ -111,16 +114,20 @@ job, a pin file and two tag-sensitive checks.
 All runs of the workflow at the commit are read (`head_sha` filter, every page of 100, at most
 1,000 because GitHub's filtered search stops there; a changed total, a short page, a repeated id
 or a missing page refuses). A run is applicable when its branch is the trusted branch and its event
-a configured one; pull request, merge queue and other-branch runs are not evidence and do not
-take part. Then:
+a configured one; only an applicable run is evidence. Every run at the commit, whatever its event
+or branch, takes part in the scan. Then:
 
 1. no applicable run: `run-missing`;
-2. any applicable run not `completed` (queued, waiting, in progress, a re-run under way):
-   `run-unfinished`;
-3. the selected run is the one whose latest attempt started last (`run_started_at`, then creation
-   time, then id); a re-run makes its run the newest;
-4. that run, read again by id, must still be at the attempt listed, `completed` and `success`:
-   otherwise `run-race` or `run-result`, the decision record naming the run, attempt and result.
+2. any run at the commit not `completed` (queued, waiting, in progress, a re-run under way), of
+   any event or branch: `run-unfinished`;
+3. the selected run is the applicable one whose latest attempt started last (`run_started_at`,
+   then creation time, then id); a re-run makes its run the newest;
+4. any run at the commit, of any event or branch, whose latest attempt started after the selected
+   one's and did not succeed: `run-newer-failed`. A newer successful run of another trigger does
+   not block, and is not evidence;
+5. the selected run, read again by id, must still be at the attempt listed, `completed` and
+   `success`: otherwise `run-race` or `run-result`, the decision record naming the run, attempt and
+   result.
 
 Jobs are read from that attempt's own job list, so jobs of another attempt never count; a
 failed-jobs-only re-run whose kept jobs belong to an earlier attempt refuses. Artifacts must carry
@@ -157,7 +164,8 @@ artifact. It holds:
   `max_age_hours`, `checked_at`, `fresh_at_release`;
 - `inputs`: each recorded path's git object id;
 - per workflow: `workflow_id`, `path`, `name`, `events`, the number of runs at the commit and of
-  applicable ones, the newest candidates (id, attempt, event, status, conclusion, start), the
+  applicable ones, the newest runs at the commit (id, attempt, event, branch, status, conclusion,
+  start), the
   selected `run_id`, `attempt`, `event`, `status`, `conclusion`, `run_started_at`, `age_hours`,
   and the reusable workflows the run resolved (`referenced_workflows`, each with its commit);
 - per job: display name, job id, result, labels, start and end, the artifact (id, name, digest),
@@ -170,17 +178,17 @@ repository metadata, ids, timestamps and tool versions only; command errors are 
 
 | Class | Codes |
 | --- | --- |
-| wrong commit, tree-equivalent commit | `run-sha`, `evidence-identity`, `job-identity`, `artifact-run`, `run-missing` |
+| wrong commit, tree-equivalent commit | `run-sha`, `evidence-identity`, `job-identity`, `artifact-run`, `run-missing`, `run-identity` |
 | wrong repository | `run-repository`, `repository-identity`, `context-repository`, `context-repository-id`, `artifact-run` |
 | wrong event or branch (pull request head, synthetic merge, merge queue, another branch) | `run-missing`, `run-trigger`, `branch-default`, `evidence-identity` |
 | wrong workflow, mutable status name | `workflow-identity`, `run-workflow`, `job-identity`, `run-missing` |
-| missing job, matrix leg or check | `job-coverage`, `artifact-coverage`, `check-coverage` |
+| missing or failed job, matrix leg or check | `job-coverage`, `job-result`, `artifact-coverage`, `check-coverage` |
 | unexpected skip | `job-skipped`, `job-not-skipped`, `check-result` |
-| newer failed, cancelled or running attempt | `run-result`, `run-unfinished`, `run-race`, `attempt-changed`, `latest-changed`, `final-latest-changed` |
+| newer failed, cancelled or running attempt | `run-result`, `run-unfinished`, `run-newer-failed`, `run-race`, `attempt-changed`, `latest-changed`, `final-latest-changed` |
 | changed inputs | `input-identity`, `runtime-identity`, `job-runner`, `evidence-identity` |
-| unavailable or stale evidence | `api-unavailable`, `pagination-*`, `artifact-expired`, `artifact-size`, `artifact-interval`, `artifact-digest`, `artifact-entries`, `run-age`, `response-size`, `unavailable-or-malformed` |
+| unavailable or stale evidence | `api-unavailable`, `pagination-*`, `artifact-expired`, `artifact-size`, `artifact-interval`, `artifact-digest`, `artifact-entries`, `run-age`, `timestamp`, `response-size`, `unavailable-or-malformed` |
 | tag movement | `tag-syntax`, `tag-annotated`, `tag-commit`, `tag-changed` |
-| the release checkout or configuration | `source-sha`, `checkout-root`, `checkout-sha`, `checkout-changed`, `config-source`, `config-invalid`, `helper-source`, `input-missing`, `runner-identity`, `runner-platform`, `tool-identity`, `check-config` |
+| the release checkout or configuration | `source-sha`, `git-unavailable`, `checkout-root`, `checkout-sha`, `checkout-changed`, `config-source`, `config-invalid`, `helper-source`, `input-missing`, `runner-identity`, `runner-platform`, `tool-identity`, `check-config` |
 
 `capture` refuses with `capture-ref`, `capture-event`, `capture-job`, `capture-workflow`,
 `capture-run`, `check-infrastructure`, `check-duplicate`, `check-coverage`, `check-result` and the
@@ -194,8 +202,8 @@ dispatches or re-runs anything automatically, and no automatic CI is turned off.
 1. Make fresh evidence at the same commit, once:
    - re-run **all** jobs of the main CI run at the commit
      (`gh run rerun <run id> --repo <owner/name>`; a failed-jobs-only re-run leaves the other jobs'
-     evidence in an earlier attempt and refuses). This works while the commit is no longer main's
-     tip, and is the route for `run-age` and a changed hosted image (`runtime-identity`);
+     evidence in an earlier attempt and refuses). This also works after main moved on, and is the
+     route for `run-age` and a changed hosted image (`runtime-identity`);
    - or, when main still names the commit, dispatch the CI workflow on main
      (`gh workflow run ci.yml --ref main --repo <owner/name>`) where `workflow_dispatch` is a
      configured event.
