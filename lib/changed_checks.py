@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""changed_checks.py --root ROOT --manifest MANIFEST [--base BASE]
+"""changed_checks.py --root ROOT --manifest MANIFEST [--base BASE] [--label TEXT]
 
 Selects the check-list steps that the changed paths of a clone can affect, for
-`jpdev check --changed [BASE]`. The changed paths are those that differ from the merge base of
+`jpdev check --changed [BASE]` and `scripts/dev/check.sh --changed [BASE]`. A repository vendors
+this file as scripts/dev/changed_checks.py beside scripts/dev/check.sh. The changed paths are those that differ from the merge base of
 BASE and HEAD in HEAD, in the index or in the working tree (deletions, both sides of a rename, and
 submodules whatever their ignore setting), plus untracked files that are not ignored. BASE
 defaults to the default branch: origin/HEAD, else origin/main, else origin/master. Only what git
@@ -13,11 +14,12 @@ The mapping is the `changed` member of jpdev.json at the root: rules of path glo
 names they select. A glob is matched against the whole repository-relative path; `*` and
 `?` stay within one path segment and a `**` segment matches any number of segments. The whole
 list runs when a changed path matches no rule, when a selection input changed (the mapping file,
-the manifest, scripts/dev/check.sh), when nothing changed, or when there is no mapping.
+the manifest, scripts/dev/check.sh, scripts/dev/changed_checks.py), when nothing changed, or when
+there is no mapping.
 
 The first line of the output is the selection, `whole` or `only NAME,NAME`; the lines after it
-are the report jpdev check prints. Exit 0, or 2 with one line naming the refusal. Standard
-library only.
+are the report the runner prints, headed and refused with --label (default `jpdev check
+--changed`). Exit 0, or 2 with one line naming the refusal. Standard library only.
 """
 import argparse
 import json
@@ -174,7 +176,7 @@ def changed_paths(root, merge_base):
 
 def selection_inputs(root, manifest):
     """The repository paths whose change changes the selection itself."""
-    inputs = [CONFIG, 'scripts/dev/check.sh']
+    inputs = [CONFIG, 'scripts/dev/check.sh', 'scripts/dev/changed_checks.py']
     # The manifest as named (a symlink retargeted changes the link) and as resolved.
     for path in (os.path.abspath(manifest), os.path.realpath(manifest)):
         for top in (str(root), os.path.realpath(str(root))):
@@ -187,7 +189,7 @@ def selection_inputs(root, manifest):
     return inputs
 
 
-def select(root, manifest, base=None):
+def select(root, manifest, base=None, runner='jpdev check --changed'):
     """Return (selected names or None for the whole list, report lines)."""
     status, top = git(root, 'rev-parse', '--show-toplevel')
     if status:
@@ -195,11 +197,11 @@ def select(root, manifest, base=None):
     root = Path(top.decode('utf-8', 'surrogateescape').strip())
     steps = step_names(manifest)
     rules, no_mapping = load_rules(root, steps, os.path.basename(manifest))
-    label, merge_base = resolve_base(root, base)
+    base_label, merge_base = resolve_base(root, base)
     paths = changed_paths(root, merge_base)
     short = git(root, 'rev-parse', '--short', merge_base)[1].decode().strip() or merge_base[:12]
     noun = 'path' if len(paths) == 1 else 'paths'
-    report = ['== jpdev check --changed: %d changed %s since %s (merge base %s) ==' % (len(paths), noun, label, short)]
+    report = ['== %s: %d changed %s since %s (merge base %s) ==' % (runner, len(paths), noun, base_label, short)]
     why = []
     changed_inputs = [p for p in selection_inputs(root, manifest) if p in paths]
     if changed_inputs:
@@ -251,11 +253,12 @@ def main():
     parser.add_argument('--root', required=True)
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--base')
+    parser.add_argument('--label', default='jpdev check --changed')
     args = parser.parse_args()
     try:
-        selected, report = select(args.root, args.manifest, args.base)
+        selected, report = select(args.root, args.manifest, args.base, args.label)
     except Refused as error:
-        print('jpdev check --changed: refused: %s' % error, file=sys.stderr)
+        print('%s: refused: %s' % (args.label, error), file=sys.stderr)
         return 2
     print('whole' if selected is None else 'only ' + ','.join(selected))
     print('\n'.join(report))

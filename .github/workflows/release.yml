@@ -168,6 +168,10 @@ jobs:
           want="# from judgment-pack-devkit ${RELEASE_TAG} (lib/handover_check.sh)"
           [ "${line}" = "${want}" ] || { echo "scripts/dev/handover_check.sh line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
           cmp -s <(tail -n +2 lib/handover_check.sh) <(tail -n +3 scripts/dev/handover_check.sh) || { echo "scripts/dev/handover_check.sh is not a versioned copy of lib/handover_check.sh" >&2; exit 1; }
+          line="$(sed -n 2p scripts/dev/changed_checks.py)"
+          want="# from judgment-pack-devkit ${RELEASE_TAG} (lib/changed_checks.py)"
+          [ "${line}" = "${want}" ] || { echo "scripts/dev/changed_checks.py line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
+          cmp -s <(head -n 1 lib/changed_checks.py; tail -n +2 lib/changed_checks.py) <(sed 2d scripts/dev/changed_checks.py) || { echo "scripts/dev/changed_checks.py is not a versioned copy of lib/changed_checks.py" >&2; exit 1; }
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       # git archive writes the named paths of the commit, with the commit's time and each file's
@@ -198,7 +202,7 @@ jobs:
           kit="${unpack}/judgment-pack-devkit-${VERSION}"
           [ "$("${kit}/bin/jpdev" --version)" = "jpdev ${VERSION}" ] || { echo "the packaged jpdev does not report ${VERSION}" >&2; exit 1; }
           "${kit}/bin/jpdev" env > /dev/null
-          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
+          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/dev/changed_checks.py scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
             test -e "${kit}/${path}" || { echo "the tarball does not hold ${path}" >&2; exit 1; }
           done
 

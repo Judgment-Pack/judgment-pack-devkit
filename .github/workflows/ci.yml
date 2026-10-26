@@ -2,7 +2,9 @@ name: CI
 
 # The check list is dev.json, run by scripts/dev/check.sh (the kit's own vendored runner). The two
 # jobs keep their names, which branch protection requires: `lint` runs the cheap steps, `tests` the
-# kit's test run.
+# kit's test run. A pull request runs, of each job's steps, those `check.sh --changed` selects
+# against the base branch (all of them when a path is unmapped or a selection input changed); a push
+# to main and a dispatch run every step, and only they record the evidence a release takes.
 
 on:
   push:
@@ -20,17 +22,26 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
+      # The whole history, so that --changed finds the merge base with the base branch.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       # Whitespace; no machine-local path in tracked text; CLAUDE.md is AGENTS.md and the root
       # copy starts with the template; every script parses; no block of code is duplicated over the
       # thresholds of jpdev.json; the JSON documents parse; shellcheck (the program the runner image
       # carries).
       - name: The lint steps of dev.json
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -o pipefail
-          scripts/dev/check.sh --all --only diff-check,local-paths,agent-docs,bash-n,duplication,json,shellcheck | tee "${{ runner.temp }}/checks.log"
+          if [ "$EVENT" = pull_request ]; then
+            scripts/dev/check.sh --all --changed "origin/$BASE_REF" --skip tests | tee "${{ runner.temp }}/checks.log"
+          else
+            scripts/dev/check.sh --all --only diff-check,local-paths,agent-docs,bash-n,duplication,json,shellcheck | tee "${{ runner.temp }}/checks.log"
+          fi
 
       - name: Record exact CI inputs and coverage
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -50,11 +61,19 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: The kit's tests (jpdev check and check.sh on the fixture, the caps, the record gate)
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -o pipefail
-          scripts/dev/check.sh --only tests | tee "${{ runner.temp }}/checks.log"
+          if [ "$EVENT" = pull_request ]; then
+            scripts/dev/check.sh --changed "origin/$BASE_REF" --skip diff-check,local-paths,agent-docs,bash-n,duplication,json,shellcheck | tee "${{ runner.temp }}/checks.log"
+          else
+            scripts/dev/check.sh --only tests | tee "${{ runner.temp }}/checks.log"
+          fi
 
       - name: Record exact CI inputs and coverage
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
