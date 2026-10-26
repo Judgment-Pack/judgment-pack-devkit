@@ -27,11 +27,14 @@ Evidence is reused only when all of this holds; anything else refuses.
   default branch, or a `workflow_dispatch` on it when the configuration lists that event. A run
   associated with a pull request is refused.
 - **The newest attempt, never an older green one.** Only a trusted-trigger run is evidence, but
-  every run of the workflow at the commit takes part, whatever its event or branch (a schedule,
-  `workflow_run` or `repository_dispatch` run, a pull request, another branch): none may be
-  unfinished, and none newer than the selected run may have failed. The applicable run whose
-  latest attempt started last is selected, whatever its result: a newer failed, cancelled or
-  running attempt is never searched past ([selection](#selection)).
+  every run of this repository on the trusted branch at the commit takes part, whatever its
+  trigger (a schedule, `workflow_run` or `repository_dispatch` run included): none may be
+  unfinished, and none whose latest attempt started after the selected one's may have failed. The
+  applicable run whose latest attempt started last is selected, whatever its result: a newer
+  failed, cancelled or running attempt is never searched past ([selection](#selection)). Pull
+  request and merge queue runs, other branches' runs and runs from another head repository test
+  other code or can be started from outside, so they neither count nor block: a fork pull request
+  at the release commit cannot hold a release.
 - **Every required job and matrix leg,** by display name, each `success` on the configured
   runner labels and a GitHub-hosted runner; jobs that must be skipped (a pull-request-only job)
   are named, and nothing else may be skipped. Each job's check results cover every configured
@@ -114,24 +117,30 @@ job, a pin file and two tag-sensitive checks.
 All runs of the workflow at the commit are read (`head_sha` filter, every page of 100, at most
 1,000 because GitHub's filtered search stops there; a changed total, a short page, a repeated id
 or a missing page refuses). A run is applicable when its branch is the trusted branch and its event
-a configured one; only an applicable run is evidence. Every run at the commit, whatever its event
-or branch, takes part in the scan. Then:
+a configured one; only an applicable run is evidence. The scan takes every run at the commit on
+the trusted branch, from this repository as head repository, whose event is not a pull request
+event (`pull_request`, `pull_request_target`, `pull_request_review`...) or `merge_group`. Then:
 
 1. no applicable run: `run-missing`;
-2. any run at the commit not `completed` (queued, waiting, in progress, a re-run under way), of
-   any event or branch: `run-unfinished`;
+2. any scanned run not `completed` (queued, waiting, in progress, a re-run under way):
+   `run-unfinished`;
 3. the selected run is the applicable one whose latest attempt started last (`run_started_at`,
    then creation time, then id); a re-run makes its run the newest;
-4. any run at the commit, of any event or branch, whose latest attempt started after the selected
-   one's and did not succeed: `run-newer-failed`. A newer successful run of another trigger does
-   not block, and is not evidence;
+4. any scanned run whose latest attempt started after the selected one's (by start time, not by
+   run id: a re-run of an older run is newer) and did not succeed: `run-newer-failed`. A newer
+   successful run of another trigger does not block, and is not evidence;
 5. the selected run, read again by id, must still be at the attempt listed, `completed` and
    `success`: otherwise `run-race` or `run-result`, the decision record naming the run, attempt and
    result.
 
 Jobs are read from that attempt's own job list, so jobs of another attempt never count; a
 failed-jobs-only re-run whose kept jobs belong to an earlier attempt refuses. Artifacts must carry
-the selected attempt in their name.
+the selected attempt in their name. An artifact's archive is read, never extracted. Before its
+entries are checked, an archive that does not open, a compression other than stored or deflated,
+or members declared over 256 KiB is `unavailable-or-malformed`; then the archive must hold exactly
+one `evidence.json` (`artifact-entries`); then content over 256 KiB when read, nesting deeper than
+16 levels (counted before parsing, so the interpreter's recursion limit plays no part), JSON that
+does not parse, or a document that is not an object is `unavailable-or-malformed` too.
 
 ## Execution inputs
 
@@ -164,8 +173,8 @@ artifact. It holds:
   `max_age_hours`, `checked_at`, `fresh_at_release`;
 - `inputs`: each recorded path's git object id;
 - per workflow: `workflow_id`, `path`, `name`, `events`, the number of runs at the commit and of
-  applicable ones, the newest runs at the commit (id, attempt, event, branch, status, conclusion,
-  start), the
+  applicable ones, the newest runs at the commit, scanned or not (id, attempt, event, branch,
+  status, conclusion, start), the
   selected `run_id`, `attempt`, `event`, `status`, `conclusion`, `run_started_at`, `age_hours`,
   and the reusable workflows the run resolved (`referenced_workflows`, each with its commit);
 - per job: display name, job id, result, labels, start and end, the artifact (id, name, digest),

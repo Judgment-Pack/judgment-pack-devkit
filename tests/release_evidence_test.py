@@ -459,14 +459,40 @@ class NewerAttempt(Gate):
                     self.refuses(code)
                     self.assertIn('120', self.record['refusal']['detail'])
 
-    def test_a_newer_failed_run_of_a_pull_request_or_another_branch(self):
-        for changes in ({'event': 'pull_request', 'head_branch': 'feature'},
-                        {'event': 'push', 'head_branch': 'release-candidate'}):
-            with self.subTest(changes=changes):
+    def test_runs_from_outside_the_trusted_branch_do_not_block(self):
+        fork = {'id': 77, 'full_name': 'fork/project'}
+        cases = {
+            'a newer failed fork pull request run': dict(event='pull_request', head_branch='main',
+                                                         head_repository=fork, conclusion='failure'),
+            'a fork pull request run awaiting approval': dict(event='pull_request', head_branch='feature',
+                                                              head_repository=fork, status='action_required',
+                                                              conclusion=None, run_started_at=None),
+            'a newer failed run on another branch': dict(event='push', head_branch='release-candidate',
+                                                         conclusion='failure'),
+            'a newer failed pull_request_target run': dict(event='pull_request_target', conclusion='failure'),
+            'a newer failed merge queue run': dict(event='merge_group', conclusion='failure'),
+            'a newer failed run from another head repository': dict(event='schedule', head_repository=fork,
+                                                                    conclusion='failure'),
+        }
+        for name, changes in cases.items():
+            with self.subTest(case=name):
                 self.data = world()
-                self.add_run(dict(dict(RUN, id=121, conclusion='timed_out', created_at='2026-10-25T11:00:00Z',
+                self.add_run(dict(dict(RUN, id=121, created_at='2026-10-25T11:00:00Z',
                                        run_started_at='2026-10-25T11:00:00Z'), **changes))
-                self.refuses('run-newer-failed')
+                self.assertEqual(self.decide(), 'reuse')
+                self.assertEqual(self.record['workflows']['ci']['run_id'], 100)
+
+    def test_a_lower_id_run_rerun_later_that_failed(self):
+        self.add_run(dict(RUN, id=95, event='schedule', conclusion='failure',
+                          created_at='2026-10-25T09:00:00Z', run_started_at='2026-10-25T11:00:00Z'))
+        self.refuses('run-newer-failed')
+        self.assertIn('95', self.record['refusal']['detail'])
+
+    def test_a_higher_id_run_that_started_before_the_selected_attempt(self):
+        self.both_runs(run_started_at='2026-10-25T11:30:00Z')
+        self.add_run(dict(RUN, id=130, event='schedule', conclusion='failure',
+                          created_at='2026-10-25T11:00:00Z', run_started_at='2026-10-25T11:00:00Z'))
+        self.assertEqual(self.decide(), 'reuse')
 
     def test_the_selected_run_has_a_newer_failed_attempt(self):
         self.refuses('run-result', lambda: self.both_runs(run_attempt=2, conclusion='failure',
@@ -602,25 +628,69 @@ class UnavailableEvidence(Gate):
         self.data = world()
         self.refuses('unavailable-or-malformed', lambda: self.data.update({'': []}))
 
-    def test_unsupported_compression_or_nesting_is_a_recorded_refusal(self):
-        stored = zipped(EVIDENCE_LINUX)
-        # The compression method of the local header (offset 8) and the central directory entry
-        # (offset 10 from its signature), set by hand to 99, which zipfile does not implement.
-        method = bytearray(stored)
+    def raw_evidence(self, index, text, compression=zipfile.ZIP_DEFLATED):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', compression) as archive:
+            archive.writestr('evidence.json', text)
+        self.raw_archive(index, output.getvalue())
+
+    def raw_archive(self, index, raw):
+        artifact = self.artifacts[index]
+        self.data['actions/artifacts/%d/zip' % artifact['id']] = raw
+        artifact.update(size_in_bytes=len(raw), digest='sha256:' + hashlib.sha256(raw).hexdigest())
+
+    def malformed(self, detail):
+        self.refuses('unavailable-or-malformed')
+        self.assertIn(detail, self.record['refusal']['detail'])
+
+    def test_an_unsupported_compression_method(self):
+        # The compression method of the local header (offset 8) and of the central directory entry
+        # (offset 10 from its signature), set by hand to 99.
+        method = bytearray(zipped(EVIDENCE_LINUX))
         local, central = method.index(b'PK\x03\x04'), method.index(b'PK\x01\x02')
         method[local + 8:local + 10] = (99).to_bytes(2, 'little')
         method[central + 10:central + 12] = (99).to_bytes(2, 'little')
-        nested = io.BytesIO()
-        with zipfile.ZipFile(nested, 'w', zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr('evidence.json', '[' * 100000 + ']' * 100000)
-        for name, raw in (('NotImplementedError', bytes(method)), ('RecursionError', nested.getvalue())):
-            with self.subTest(error=name):
+        self.raw_archive(0, bytes(method))
+        self.malformed('a compression other than stored or deflated')
+        self.data = world()
+        self.raw_evidence(0, json.dumps(EVIDENCE_LINUX), zipfile.ZIP_BZIP2)
+        self.malformed('a compression other than stored or deflated')
+
+    def test_json_that_does_not_parse_or_is_not_an_object(self):
+        self.raw_evidence(0, '{"schema": 2, ')
+        self.malformed('JSONDecodeError')
+        self.data = world()
+        self.raw_evidence(0, b'\xff\xfe{}')
+        self.refuses('unavailable-or-malformed')
+        self.data = world()
+        self.raw_evidence(0, '[1]')
+        self.malformed('evidence.json is not an object')
+
+    def test_json_nested_deeper_than_the_bound(self):
+        for depth in (17, 100000):
+            with self.subTest(depth=depth):
                 self.data = world()
-                self.data['actions/artifacts/301/zip'] = raw
-                self.artifacts[0].update(size_in_bytes=len(raw),
-                                         digest='sha256:' + hashlib.sha256(raw).hexdigest())
-                self.refuses('unavailable-or-malformed')
-                self.assertEqual(self.record['refusal']['detail'], name)
+                self.raw_evidence(0, '[' * depth + ']' * depth)
+                self.malformed('nesting deeper than 16')
+        # At the bound, and brackets inside a string, are not nesting: those refuse later.
+        self.data = world()
+        self.raw_evidence(0, '{"a": ' + '[' * 15 + ']' * 15 + '}')
+        self.refuses('evidence-identity')
+        self.data = world()
+        self.raw_evidence(0, json.dumps(dict(EVIDENCE_LINUX, note='[' * 100 + '\\"{')))
+        self.refuses('evidence-identity')
+        self.assertIn('unexpected members', self.record['refusal']['detail'])
+
+    def test_evidence_over_the_size_bound(self):
+        text = '{"pad": "' + 'x' * (256 * 1024 - 10) + '"}'
+        self.assertEqual(len(text), 256 * 1024 + 1)
+        self.raw_evidence(0, text)
+        self.malformed('declared over 262144 bytes')
+        self.data = world()
+        at_bound = '{"pad": "' + 'x' * (256 * 1024 - 11) + '"}'
+        self.assertEqual(len(at_bound), 256 * 1024)
+        self.raw_evidence(0, at_bound)
+        self.refuses('evidence-identity')
 
     def test_stale_or_future_evidence(self):
         for started in ('2026-10-23T11:59:59Z', '2026-10-25T12:00:01Z'):

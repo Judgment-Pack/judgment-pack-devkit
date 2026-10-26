@@ -32,11 +32,17 @@ import zlib
 SCHEMA = 2
 MAX_AGE_HOURS = 48
 EVENTS = ('push', 'workflow_dispatch')
+# Runs of these events are neither evidence nor part of the newer-attempt scan.
+OUTSIDE_EVENT_PREFIX = 'pull_request'
+OUTSIDE_EVENTS = ('merge_group',)
 COMPARE = ('release-runner', 'pins')
 # runner_group_id and runner_group_name of a job on a GitHub-hosted runner.
 HOSTED = (0, 'GitHub Actions')
 RUNNER_KEYS = ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')
 EVIDENCE_LIMIT = 256 * 1024
+# evidence.json nests four levels; deeper JSON is refused before it is parsed, whatever the
+# interpreter's recursion limit.
+EVIDENCE_DEPTH = 16
 ARTIFACT_LIMIT = 1024 * 1024
 KEY = re.compile(r'[A-Za-z0-9_-]{1,64}')
 REPOSITORY = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
@@ -383,10 +389,10 @@ def select(api, source, workflow, workflow_id, branch, trail=None):
     """The newest applicable attempt, never an older green one.
 
     Applicable: a run of this workflow at the exact commit, on the trusted branch, by a trusted
-    event; only an applicable run is evidence. Every run of the workflow at the commit, whatever
-    its event or branch, takes part in the scan: none may be unfinished, and none whose latest
-    attempt started after the selected one's may have failed. The selected run is the applicable
-    one whose latest attempt started last, whatever its result."""
+    event; only an applicable run is evidence. Every run of this repository on the trusted branch
+    at the commit, whatever its trigger, takes part in the scan: none may be unfinished, and none
+    whose latest attempt started after the selected one's may have failed. The selected run is the
+    applicable one whose latest attempt started last, whatever its result."""
     runs = api.pages('actions/workflows/%d/runs?head_sha=%s' % (workflow_id, source['source']),
                      'workflow_runs')
     applicable = [run for run in runs
@@ -402,7 +408,13 @@ def select(api, source, workflow, workflow_id, branch, trail=None):
                                                                workflow['path'], source['source']))
     for run in applicable:
         run_identity(run, source, workflow, workflow_id, branch)
-    scanned = runs
+    # A schedule, workflow_run or repository_dispatch run on the trusted branch is scanned. A pull
+    # request or merge queue run, another branch's run or another head repository's run tests
+    # other code or can be started from outside: never evidence, and never a block either.
+    scanned = [run for run in runs if run.get('head_branch') == branch and
+               not str(run.get('event')).startswith(OUTSIDE_EVENT_PREFIX) and
+               run.get('event') not in OUTSIDE_EVENTS and
+               (run.get('head_repository') or {}).get('id') == source['repository_id']]
     unfinished = [run['id'] for run in scanned if run['status'] != 'completed']
     need(not unfinished, 'run-unfinished', 'runs %s have not completed' % unfinished)
     chosen = max(applicable, key=attempt_order)
@@ -457,6 +469,28 @@ def check_jobs(jobs, run, workflow, branch):
     return by_name
 
 
+def nesting_within(data, limit):
+    """Whether no array or object in the JSON text nests deeper than limit (strings skipped)."""
+    depth, in_string, escaped = 0, False, False
+    for byte in data:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5c:
+                escaped = True
+            elif byte == 0x22:
+                in_string = False
+        elif byte == 0x22:
+            in_string = True
+        elif byte in (0x5b, 0x7b):
+            depth += 1
+            if depth > limit:
+                return False
+        elif byte in (0x5d, 0x7d):
+            depth -= 1
+    return True
+
+
 def read_artifact(api, artifact, run, job):
     need(artifact['expired'] is False, 'artifact-expired', artifact['name'])
     size = artifact['size_in_bytes']
@@ -472,17 +506,26 @@ def read_artifact(api, artifact, run, job):
     raw = api.get('actions/artifacts/%d/zip' % artifact['id'], binary=True)
     need(len(raw) == size and artifact['digest'] == 'sha256:' + digest(raw), 'artifact-digest',
          artifact['name'])
+    # A malformed or unreadable archive or document is one refusal, unavailable-or-malformed, and
+    # is told apart from a well-formed archive of another shape (artifact-entries) before that
+    # check. The archive is read, never extracted, and no declared size is trusted.
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         entries = archive.infolist()
-        need(len(entries) == 1 and entries[0].filename == 'evidence.json' and
-             not entries[0].is_dir() and entries[0].file_size <= EVIDENCE_LIMIT,
+        need(all(entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) for entry in entries),
+             'unavailable-or-malformed', artifact['name'] + ': a compression other than stored or deflated')
+        need(sum(entry.file_size for entry in entries) <= EVIDENCE_LIMIT, 'unavailable-or-malformed',
+             '%s: declared over %d bytes' % (artifact['name'], EVIDENCE_LIMIT))
+        need(len(entries) == 1 and entries[0].filename == 'evidence.json' and not entries[0].is_dir(),
              'artifact-entries', artifact['name'])
-        # The archive is read, never extracted; the declared size is not trusted either.
         with archive.open(entries[0]) as member:
             data = member.read(EVIDENCE_LIMIT + 1)
-        need(len(data) <= EVIDENCE_LIMIT, 'artifact-entries', artifact['name'])
+    need(len(data) <= EVIDENCE_LIMIT, 'unavailable-or-malformed',
+         '%s: over %d bytes when read' % (artifact['name'], EVIDENCE_LIMIT))
+    need(nesting_within(data, EVIDENCE_DEPTH), 'unavailable-or-malformed',
+         '%s: nesting deeper than %d' % (artifact['name'], EVIDENCE_DEPTH))
     payload = json.loads(data)
-    need(isinstance(payload, dict), 'artifact-entries', artifact['name'])
+    need(isinstance(payload, dict), 'unavailable-or-malformed',
+         artifact['name'] + ': evidence.json is not an object')
     return payload
 
 
