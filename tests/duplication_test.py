@@ -350,6 +350,38 @@ class DuplicatePairs(Fixture):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[1:], ['  lib/one.js:2-8 and lib/one.js:14-20: 31 tokens'])
 
+    def test_a_copy_is_named_past_more_compact_places_than_the_recent_window(self):
+        # 17 compact places of every run lie between the two spread copies: more than the 16 most
+        # recent places a run keeps, so only the kept place that spans the line threshold names them.
+        self.declare(JAVASCRIPT)
+        self.write('lib/a.js', SPREAD_JS)
+        for index in range(1, d.RECENT + 2):
+            self.write('lib/b%02d.js' % index, COMPACT_JS)
+        self.write('lib/c.js', SPREAD_JS)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            'duplication: 1 duplicate pair (at least 25 tokens over at least 5 lines, 19 files of javascript)',
+            '  lib/a.js:2-8 and lib/c.js:2-8: 31 tokens',
+        ])
+
+    def test_a_copy_is_named_past_more_compact_places_than_the_recent_window_in_one_file(self):
+        # The spread copy on lines 2-8, 17 compact copies of 3 lines each after a line of one name of
+        # its own (so no copy joins its neighbours), and the spread copy again after one more.
+        compact = COMPACT_JS.split('\n', 1)[1]
+        spread = SPREAD_JS.split('\n', 1)[1]
+        text = '// many places of one function\n' + spread
+        for index in range(1, d.RECENT + 2):
+            text += 'gap%d\n' % index + compact
+        text += 'last\n' + spread
+        last = 8 + (d.RECENT + 1) * 4 + 1
+        self.declare(JAVASCRIPT)
+        self.write('lib/many.js', text)
+        result = self.cli()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[1:], [
+            '  lib/many.js:2-8 and lib/many.js:%d-%d: 31 tokens' % (last + 1, last + 7)])
+
     def test_a_repeated_short_pattern_is_not_a_copy_of_itself(self):
         # "0," repeated: every run of 10 tokens recurs 2 tokens later, but the two places overlap.
         self.declare({'languages': ['python'], 'min_tokens': 10, 'min_lines': 1})

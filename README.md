@@ -223,9 +223,11 @@ with its thresholds (`templates/jpdev.schema.json` holds the shape):
   that is never closed, an end with no start, and a start inside an open block are reported.
 
 The report names each pair with both places and the shared token count, one line each. Each run of
-`min_tokens` tokens is compared with the places it appeared before (the 16 most recent), nearest
-first, until one makes a reported pair: three copies of a block make two pairs, and a copy is still
-named when a nearer place of the same tokens spans too few lines. Two places in one file never
+`min_tokens` tokens is compared with the places it appeared before (the 16 most recent and, when it
+is older than them, the most recent place that itself spans `min_lines` lines), nearest first, until
+one makes a reported pair: three copies of a block make two pairs, a copy is still named when a
+nearer place of the same tokens spans too few lines, and no number of such places between two
+copies whose runs span `min_lines` lines hides the pair. Two places in one file never
 overlap, and a run that repeats a pattern shorter than `min_tokens` in one file (a table of one
 short row) is not reported as copies of itself.
 
