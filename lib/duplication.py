@@ -29,6 +29,7 @@ MEMBERS = ('exclude', 'languages', 'max_file_bytes', 'min_lines', 'min_tokens', 
 # A file whose first BINARY_PROBE bytes hold a NUL byte is binary and is not read.
 BINARY_PROBE = 8192
 # The most recent places of each run of min_tokens tokens that a later place is compared with.
+# Beyond them, the most recent place that itself spans min_lines lines is kept as well.
 RECENT = 16
 
 _C_COMMENTS = r'//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)'
@@ -247,12 +248,21 @@ def duplicates(files, min_tokens, min_lines):
     files is a list of (path, ids, first lines, last lines). Each run of min_tokens tokens is
     compared with the places the same run appeared before, the most recent first, until one makes
     a reported pair: three copies make two pairs, and a copy is still named when a nearer place of
-    the same tokens spans too few lines. The RECENT most recent places of a run are kept. A pair is
+    the same tokens spans too few lines. The RECENT most recent places of a run are kept, and so is
+    the most recent place that itself spans min_lines lines, after them when it is older: two such
+    places always make a reported pair, however many shorter places come between them. A pair is
     extended both ways to its whole shared block, and each block is examined once. After a run
     that repeats itself in one file (a table of one short row) and is not reported, the other
     places of that file are passed over for that run; the places in other files are still compared.
     """
-    seen, examined, found = {}, {}, []
+    # kept: the run's most recent place that spans min_lines lines, once it has left the recent places.
+    seen, kept, examined, found = {}, {}, {}, []
+
+    def spans(place):
+        index, start = divmod(place, _STRIDE)
+        _, _, firsts, lasts = files[index]
+        return lasts[start + min_tokens - 1] - firsts[start] + 1 >= min_lines
+
     for second, (_, b, _, _) in enumerate(files):
         for j, value in windows(b, min_tokens):
             here = second * _STRIDE + j
@@ -262,8 +272,9 @@ def duplicates(files, min_tokens, min_lines):
                 continue
             if type(earlier) is int:
                 earlier = seen[value] = [earlier]
+            older = kept.get(value)
             skip_file = None
-            for previous in reversed(earlier):
+            for previous in itertools.chain(reversed(earlier), () if older is None else (older,)):
                 first, i = divmod(previous, _STRIDE)
                 if first == skip_file:
                     continue
@@ -276,8 +287,13 @@ def duplicates(files, min_tokens, min_lines):
                     break
                 if state[2]:
                     skip_file = second
+            if older is not None and spans(here):
+                del kept[value]
             earlier.append(here)
             if len(earlier) > RECENT:
+                # The leaving place is kept when no place that stays spans min_lines lines.
+                if spans(earlier[0]) and not any(spans(place) for place in earlier[1:]):
+                    kept[value] = earlier[0]
                 del earlier[0]
     return sorted(found)
 
