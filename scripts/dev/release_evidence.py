@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# from judgment-pack-devkit v0.10.0 (lib/release_evidence.py)
+# from judgment-pack-devkit v0.11.0 (lib/release_evidence.py)
 """release_evidence.py capture|verify: reuse the CI evidence main produced at the release commit.
 
 capture  Runs in a CI job on the trusted branch, after the job's checks. Writes evidence.json for
