@@ -429,6 +429,10 @@ if [ "$changed_line2" = "$changed_want" ]; then ok "scripts/dev/changed_checks.p
 wanted: $changed_want"; fi
 if cmp -s "$kit/lib/changed_checks.py" <(sed 2d "$kit/scripts/dev/changed_checks.py" 2>/dev/null); then ok "scripts/dev/changed_checks.py is the library selection code but for its version line"; else bad "scripts/dev/changed_checks.py is the library selection code but for its version line"; fi
 
+# The release evidence hashes the runner and its selection code, which CI runs on pull requests.
+out=$(python3 -I -c 'import json, sys; inputs = json.load(open(sys.argv[1]))["inputs"]; missing = [p for p in ("scripts/dev/check.sh", "scripts/dev/changed_checks.py") if p not in inputs]; print("missing: " + " ".join(missing) if missing else "covered")' "$kit/.github/ci-evidence.json" 2>&1) && s=0 || s=$?
+expect ".github/ci-evidence.json inputs hold the vendored runner and its selection code" 0 '^covered$' "$out" "$s"
+
 # --- jpdev version tells a kit at a release from one past it; --version stays the release's line
 released=$("$jpdev" --version)
 if [[ $released =~ ^jpdev\ [0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "jpdev --version prints the release version alone"; else bad "jpdev --version prints the release version alone" "$released"; fi
@@ -445,6 +449,12 @@ mkdir -p "$work/kitcopy/vendor/kit"
 cp -R "$kit/bin" "$kit/lib" "$work/kitcopy/vendor/kit/"
 out=$("$work/kitcopy/vendor/kit/bin/jpdev" version 2>&1) && s=0 || s=$?
 expect "jpdev version describes no repository the kit only sits inside" 0 "^${released//./\\.}\$" "$out" "$s"
+out=$(GIT_DIR=$work/kitcopy/.git "$work/kitcopy/vendor/kit/bin/jpdev" version 2>&1) && s=0 || s=$?
+expect "jpdev version describes no repository GIT_DIR names" 0 "^${released//./\\.}\$" "$out" "$s"
+if [ "$(git -C "$kit" rev-parse --show-toplevel 2>/dev/null)" = "$kit" ]; then
+  out=$(GIT_DIR=$work/kitcopy/.git "$jpdev" version 2>&1) && s=0 || s=$?
+  expect "jpdev version describes the kit checkout whatever GIT_DIR names" 0 "^${released//./\\.} \\($(git -C "$kit" describe --tags --always)\\)\$" "$out" "$s"
+fi
 rm -rf "$work/kitcopy"
 
 # --- the lock

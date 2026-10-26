@@ -69,13 +69,19 @@ USAGE
 }
 
 # kit_version prints the version, with the kit checkout's git describe when the kit is its own clone.
+# A repository named by the environment (GIT_DIR under a hook, for one) is never taken for the kit's.
 kit_version() {
   local top described=""
-  top=$(git -C "$kit" rev-parse --show-toplevel 2>/dev/null) || top=""
+  top=$(kit_git rev-parse --show-toplevel 2>/dev/null) || top=""
   if [ -n "$top" ] && [ "$top" -ef "$kit" ]; then
-    described=$(git -C "$kit" describe --tags --always 2>/dev/null) || described=""
+    described=$(kit_git describe --tags --always 2>/dev/null) || described=""
   fi
   printf 'jpdev %s%s\n' "$JPDEV_VERSION" "${described:+ ($described)}"
+}
+
+kit_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_NAMESPACE git -C "$kit" "$@"
 }
 
 need_value() { [ $# -ge 2 ] || jpdev_die "$1 needs a value"; }

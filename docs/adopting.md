@@ -118,7 +118,10 @@ runs the whole list, and only that run is the evidence a release takes (see
 and the default-branch run is where a mapping that missed an effect shows. This is the
 [policy](policy.md#testing)'s split: CI owns every deterministic check, the scoped run is allowed on
 pull requests, and the full list is required on the default branch and before a release. The check
-job checks out the whole history so that the merge base with the base branch is found. Its handover job rejects removals from boundary paths unless the pull
+job checks out the whole history so that the merge base with the base branch is found. When the
+base cannot be resolved (a missing or empty base branch name, or no merge base in the history),
+the pull-request job fails with the refusal before any check runs rather than falling back to the
+whole list; a push to the default branch runs the whole list whatever the mapping says. Its handover job rejects removals from boundary paths unless the pull
 request body contains `Boundary change: yes`, then runs `handover.schema_probe` when present through
 the vendored `scripts/dev/handover_check.sh`. Copy
 `templates/update-branches.yml` to `.github/workflows/update-branches.yml` to update open branches

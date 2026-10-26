@@ -380,9 +380,15 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertIn(self.LABEL + ': refused: jpdev.json: not readable JSON', err)
 
     def test_an_unresolved_base_is_refused(self):
+        self.write('docs/guide.md', 'guide, edited\n')
         status, out, err = self.check('--changed', 'no-such-ref')
         self.assertEqual(status, 2, out + err)
         self.assertIn("refused: cannot resolve BASE 'no-such-ref' to a commit", err)
+        self.assertEqual(out, '')
+        # A pull-request job whose base branch name came through empty asks for `origin/`.
+        status, out, err = self.check('--changed', 'origin/')
+        self.assertEqual(status, 2, out + err)
+        self.assertIn("refused: cannot resolve BASE 'origin/' to a commit", err)
         self.assertEqual(out, '')
         git(self.clone, 'remote', 'remove', 'origin')
         status, out, err = self.check('--changed')
@@ -390,7 +396,32 @@ class ChangedCheckTests(unittest.TestCase):
         self.assertIn('refused: no default branch found (origin/HEAD, origin/main or origin/master); name BASE', err)
         status, out, err = self.check('--changed', 'main')
         self.assertEqual(status, 0, out + err)
-        self.assertIn('0 changed paths since main', out)
+        self.assertIn('1 changed path since main', out)
+
+    def test_a_shallow_clone_without_the_merge_base_is_refused(self):
+        seed = self.work / 'seed'
+        git(seed, 'switch', '-q', '-c', 'side')
+        self.write('docs/side.md', 'side\n', seed)
+        git(seed, 'add', '-A')
+        git(seed, 'commit', '-q', '-m', 'side')
+        git(seed, 'switch', '-q', 'main')
+        self.write('docs/main.md', 'main\n', seed)
+        git(seed, 'add', '-A')
+        git(seed, 'commit', '-q', '-m', 'main moves on')
+        git(seed, 'push', '-q', str(self.work / 'origin.git'), 'main', 'side')
+        # Each branch tip alone: the commit they share is not in the clone.
+        self.clone = self.work / 'shallow'
+        git(self.work, 'clone', '-q', '--depth', '1', '--no-single-branch', '--branch', 'side',
+            (self.work / 'origin.git').as_uri(), str(self.clone))
+        self.write('docs/guide.md', 'guide, edited\n')
+        for args in (('--changed',), ('--changed', 'origin/main')):
+            with self.subTest(args=args):
+                status, out, err = self.check(*args)
+                self.assertEqual(status, 2, out + err)
+                self.assertIn(self.LABEL + ': refused: no merge base of origin/main and HEAD '
+                              '(a shallow clone needs the history)\n', err)
+                self.assertEqual(out, '')
+                self.assertNotIn('check: running', err)
 
     def test_changed_and_only_are_not_given_together(self):
         status, out, err = self.check('--changed', '--only', 'docs-lint')

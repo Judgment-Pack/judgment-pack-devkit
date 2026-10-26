@@ -40,7 +40,7 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             scripts/dev/check.sh --all --changed "origin/$BASE_REF" --skip tests | tee "${{ runner.temp }}/checks.log"
           else
-            scripts/dev/check.sh --all --only diff-check,local-paths,agent-docs,bash-n,duplication,json,shellcheck | tee "${{ runner.temp }}/checks.log"
+            scripts/dev/check.sh --all --skip tests | tee "${{ runner.temp }}/checks.log"
           fi
 
       - name: Record exact CI inputs and coverage
