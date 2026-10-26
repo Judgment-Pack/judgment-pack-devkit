@@ -6,6 +6,7 @@ import io
 import hashlib
 import stat
 import shutil
+import socket
 import json
 import os
 from pathlib import Path
@@ -40,12 +41,14 @@ class Cleanup(unittest.TestCase):
         self.addCleanup(os.close, self.owner.meta)
         self.roots = [str(self.root)]
 
-    def git(self, *args, cwd=None):
+    def git(self, *args, cwd=None, input=None):
+        """Run git on the fixture; stdin is INPUT when given, else empty, never the caller's."""
         env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_SYSTEM': os.devnull,
                'GIT_AUTHOR_NAME': 'Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
                'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
-        result = subprocess.run(['git', *args], cwd=cwd or self.root, env=env,
-                                text=True, capture_output=True, check=True)
+        feed = {'stdin': subprocess.DEVNULL} if input is None else {'input': input}
+        result = subprocess.run(['git', *args], cwd=cwd or self.root, env=env, **feed,
+                                text=True, capture_output=True, check=True, timeout=60)
         return result.stdout.strip()
 
     def candidate(self, kind='review', path='old', base=None, removed=None):
@@ -321,7 +324,8 @@ class Cleanup(unittest.TestCase):
 
     def test_live_pid_and_unknown_process_evidence(self):
         folder, record = self.candidate()
-        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], cwd=folder)
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], cwd=folder,
+                                stdin=subprocess.DEVNULL)
         self.addCleanup(proc.wait)
         self.addCleanup(proc.terminate)
         # Supply a complete fixture host view without reading protected PID 1 or unrelated
@@ -684,6 +688,30 @@ class Cleanup(unittest.TestCase):
         with patch.object(clean.os, 'unlink', side_effect=PermissionError('removal denied')):
             self.refused(record, 'removal denied')
 
+    def test_git_calls_ignore_an_open_socket_on_stdin(self):
+        # An agent harness can leave the runner's stdin an open socket that never reaches end of
+        # file: a git call that inherits it and reads stdin (mktree) waits forever.
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        try:
+            result = subprocess.run([sys.executable, '-I', str(Path(__file__).resolve()),
+                                     'Cleanup.test_bare_git_refused'], stdin=theirs.fileno(),
+                                    capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            self.fail('the fixture git calls waited on the open socket on stdin')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        repo = self.home / 'empty.git'
+        self.git('init', '--bare', str(repo))
+        saved = os.dup(0)
+        self.addCleanup(os.close, saved)
+        os.dup2(theirs.fileno(), 0)
+        try:
+            tree = clean.run(['git', '--git-dir=' + str(repo), 'mktree'], str(self.home))
+        finally:
+            os.dup2(saved, 0)
+        self.assertEqual(tree, self.git('--git-dir=' + str(repo), 'mktree', input=''))
+
     def test_bare_git_refused(self):
         for nested in (False, True):
             with self.subTest(nested=nested):
@@ -691,7 +719,7 @@ class Cleanup(unittest.TestCase):
                 repo = self.root / path / 'saved.git' if nested else self.root / path
                 repo.parent.mkdir(parents=True, exist_ok=True)
                 self.git('init', '--bare', str(repo))
-                tree = self.git('--git-dir=' + str(repo), 'mktree')
+                tree = self.git('--git-dir=' + str(repo), 'mktree', input='')
                 commit = self.git('--git-dir=' + str(repo), 'commit-tree', tree, '-m', 'unpublished')
                 self.git('--git-dir=' + str(repo), 'update-ref', 'refs/heads/private', commit)
                 _, record = self.candidate(path=path)
