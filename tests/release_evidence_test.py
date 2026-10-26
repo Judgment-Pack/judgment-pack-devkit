@@ -167,14 +167,16 @@ class Gate(unittest.TestCase):
         self.addCleanup(resolve.stop)
         self.api = None
 
-    def decide(self, tag='v1.2.3'):
+    def decide(self, tag='v1.2.3', mode='publication'):
         self.api = FakeAPI(self.data)
-        record = {'workflows': {}}
+        record = {'workflows': {}, 'mode': mode}
         e.decide(self.api, self.config, copy.deepcopy(SOURCE), tag, NOW, record)
         self.record = record
-        if record['decision'] == 'reuse':
+        if record['decision'] in ('reuse', 'validated'):
             self.assertIsNone(record['refusal'])
-            return 'reuse'
+            # Only a publication reuses; only a validation-only run is validated.
+            self.assertEqual(record['decision'], {'publication': 'reuse'}.get(mode, 'validated'))
+            return record['decision']
         self.assertEqual(record['decision'], 'refuse')
         return record['refusal']['code']
 
@@ -231,6 +233,7 @@ class Accepted(Gate):
         self.assertEqual((ci['run_id'], ci['attempt'], ci['event'], ci['conclusion']),
                          (100, 1, 'push', 'success'))
         self.assertEqual(self.record['tag_object'], TAG_OBJECT)
+        self.assertEqual(self.api.calls.count('git/ref/tags/v1.2.3'), 2)
         self.assertEqual(sorted(ci['jobs']), ['test-linux', 'test-macos'])
         self.assertEqual(ci['jobs']['test-linux']['artifact']['name'], 'ci-evidence-ci-test-linux-1')
         self.assertEqual(ci['jobs']['test-macos']['runtime'], MACOS)
@@ -732,6 +735,108 @@ class TagMovement(Gate):
                 self.assertEqual(self.decide(tag), 'tag-syntax')
 
 
+class TagGrammar(Gate):
+    """The configured tag rule: vMAJOR.MINOR.PATCH, with a SemVer prerelease only where allowed."""
+
+    PRERELEASES = ('v1.2.3-alpha.1', 'v1.2.3-0', 'v1.2.3-rc.1-x', 'v1.2.3-x.7.z-92', 'v1.2.3-0a')
+    REFUSED = ('v1.2.3-', 'v1.2.3-01', 'v1.2.3-alpha.01', 'v1.2.3-alpha..1', 'v1.2.3-alpha.',
+               'v1.2.3+build', 'v1.2.3-alpha+build', 'v1.2.3-alpha_1', 'v1.2.3-\u00e9',
+               'v1.2.3-alpha\n', 'v01.2.3-alpha', 'v1.2-alpha', '1.2.3-alpha')
+
+    def tag(self, name, sha=SHA, kind='tag'):
+        """An annotated tag (kind tag) or a lightweight one (kind commit) naming sha."""
+        quoted = e.quote(name, safe='')
+        obj = 'o%039d' % len(self.data)
+        self.data['git/ref/tags/' + quoted] = {'ref': 'refs/tags/' + name,
+                                               'object': {'type': kind, 'sha': obj if kind == 'tag' else sha}}
+        self.data['git/tags/' + obj] = {'object': {'type': 'commit', 'sha': sha}}
+
+    def test_the_default_refuses_a_prerelease(self):
+        for name in self.PRERELEASES:
+            with self.subTest(tag=name):
+                self.tag(name)
+                self.assertEqual(self.decide(name), 'tag-syntax')
+        self.config['tag'] = {'prerelease': False}
+        self.assertEqual(self.decide('v1.2.3-alpha.1'), 'tag-syntax')
+        self.assertEqual(self.decide(), 'reuse')
+
+    def test_a_prerelease_is_taken_where_allowed(self):
+        self.config['tag'] = {'prerelease': True}
+        for name in self.PRERELEASES + ('v1.2.3',):
+            with self.subTest(tag=name):
+                self.tag(name)
+                self.assertEqual(self.decide(name), 'reuse')
+                self.assertEqual(self.api.calls.count('git/ref/tags/' + e.quote(name, safe='')), 2)
+
+    def test_only_the_prerelease_grammar_is_allowed(self):
+        self.config['tag'] = {'prerelease': True}
+        for name in self.REFUSED:
+            with self.subTest(tag=name):
+                self.tag(name)
+                self.assertEqual(self.decide(name), 'tag-syntax')
+
+    def test_a_prerelease_stays_bound_to_the_exact_commit_and_annotated(self):
+        self.config['tag'] = {'prerelease': True}
+        self.tag('v1.2.3-alpha.1', sha=OTHER)
+        self.assertEqual(self.decide('v1.2.3-alpha.1'), 'tag-commit')
+        self.tag('v1.2.3-alpha.2', kind='commit')
+        self.assertEqual(self.decide('v1.2.3-alpha.2'), 'tag-annotated')
+
+
+class DispatchValidation(Gate):
+    """A workflow_dispatch run: refused by default, or validation-only of the branch tip."""
+
+    def mode(self, env, dispatch=None):
+        config = copy.deepcopy(CONFIG)
+        if dispatch:
+            config['dispatch'] = {'validates': dispatch}
+        with patch.dict(os.environ, env):
+            try:
+                return e.release_mode(config)
+            except e.Refusal as error:
+                return error.code
+
+    def test_the_run_decides_its_mode(self):
+        dispatch = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main'}
+        cases = (({'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/tags/v1.2.3'}, None, 'publication'),
+                 ({'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/tags/v1.2.3'}, 'branch-tip', 'publication'),
+                 (dispatch, None, 'dispatch-not-gated'),
+                 (dispatch, 'none', 'dispatch-not-gated'),
+                 (dispatch, 'branch-tip', 'validation-only'),
+                 (dict(dispatch, GITHUB_REF='refs/heads/feature'), 'branch-tip', 'dispatch-ref'),
+                 (dict(dispatch, GITHUB_REF='refs/tags/v1.2.3'), 'branch-tip', 'dispatch-ref'))
+        for env, validates, outcome in cases:
+            with self.subTest(env=env, validates=validates):
+                self.assertEqual(self.mode(env, validates), outcome)
+
+    def test_a_validation_run_is_validated_and_reads_no_tag(self):
+        for name in ('git/ref/tags/v1.2.3', 'git/tags/' + TAG_OBJECT):
+            self.data.pop(name)
+        self.assertEqual(self.decide(None, 'validation-only'), 'validated')
+        self.assertNotIn('tag_object', self.record)
+        self.assertFalse([call for call in self.api.calls if call.startswith('git/')])
+        self.assertEqual(self.record['workflows']['ci']['run_id'], 100)
+        # The publication path still reads the tag: without it, nothing is reused.
+        self.assertEqual(self.decide('v1.2.3', 'publication'), 'api-unavailable')
+
+    def test_a_validation_run_is_never_a_publication_decision(self):
+        # Even with a tag that would pass at the commit, validation-only is not reuse.
+        self.assertEqual(self.decide('v1.2.3', 'validation-only'), 'validated')
+        for mode in (None, '', 'reuse', 'validated'):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.decide('v1.2.3', mode), 'mode-unknown')
+
+    def test_a_validation_run_is_held_to_the_same_evidence(self):
+        self.both_runs(conclusion='failure')
+        self.assertEqual(self.decide(None, 'validation-only'), 'run-result')
+        self.setUp()
+        self.evidence(0, lambda payload: payload.update(source=OTHER))
+        self.assertEqual(self.decide(None, 'validation-only'), 'evidence-identity')
+        self.setUp()
+        self.data['']['default_branch'] = 'trunk'
+        self.assertEqual(self.decide(None, 'validation-only'), 'branch-default')
+
+
 class Pagination(unittest.TestCase):
     def outcome(self, responses):
         try:
@@ -827,6 +932,13 @@ class Configuration(unittest.TestCase):
             'artifact-unsafe job key': lambda c: c['workflows']['ci']['jobs'].update({'a b': job(c)}),
             'comment not text': lambda c: c.update({'$comment': 3}),
             'comment where names are free': lambda c: c['profiles'].update({'$comment': 'no'}),
+            'tag rule not an object': lambda c: c.update(tag='v*'),
+            'tag rule without prerelease': lambda c: c.update(tag={}),
+            'tag prerelease not a boolean': lambda c: c.update(tag={'prerelease': 'yes'}),
+            'tag rule with a pattern': lambda c: c.update(tag={'prerelease': True, 'pattern': '.*'}),
+            'dispatch not an object': lambda c: c.update(dispatch='branch-tip'),
+            'dispatch without validates': lambda c: c.update(dispatch={}),
+            'dispatch validates the tag': lambda c: c.update(dispatch={'validates': 'tag'}),
         }
         for name, change in cases.items():
             with self.subTest(case=name):
@@ -840,6 +952,10 @@ class Configuration(unittest.TestCase):
         config['$comment'] = ['a', 'b']
         config['workflows']['ci']['jobs']['test-linux']['$comment'] = 'a leg'
         self.assertEqual(self.outcome(config), 'valid')
+        for tag, dispatch in (({'prerelease': True}, {'validates': 'branch-tip'}),
+                              ({'prerelease': False, '$comment': 'x'}, {'validates': 'none', '$comment': 'y'})):
+            with self.subTest(tag=tag, dispatch=dispatch):
+                self.assertEqual(self.outcome(dict(config, tag=tag, dispatch=dispatch)), 'valid')
 
 
 class KitAdoption(unittest.TestCase):
@@ -870,6 +986,27 @@ class KitAdoption(unittest.TestCase):
         self.assertIn('          path: ${{ runner.temp }}/release-evidence.json\n'
                       '          if-no-files-found: error\n', release)
         self.assertIn('cmp -s lib/release_evidence.py <(sed 2d scripts/dev/release_evidence.py)', release)
+
+    def test_the_publication_path_takes_only_a_reuse_decision(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        self.assertIn('      - name: Reuse exact-commit main CI evidence, or refuse\n        id: gate\n', release)
+        self.assertIn('    outputs:\n      # reuse, refuse or validated; only reuse is a publication decision.\n'
+                      '      decision: ${{ steps.gate.outputs.decision }}\n', release)
+        # The package job, which every publishing job needs, begins with the decision.
+        package = release[release.index('\n  package:\n'):release.index('\n  attest-and-draft:\n')]
+        self.assertIn('      - verify\n', package)
+        steps = package[package.index('    steps:\n'):]
+        head = '    steps:\n      # Only a publication decision'
+        self.assertTrue(steps.startswith(head), steps[:200])
+        self.assertIn('          DECISION: ${{ needs.verify.outputs.decision }}\n', steps)
+        script = steps[steps.index('        run: |\n') + len('        run: |\n'):steps.index('\n\n')]
+        script = '\n'.join(line[10:] for line in script.splitlines())
+        for decision, status in (('reuse', 0), ('validated', 1), ('refuse', 1), ('', 1), ('reuse ', 1)):
+            with self.subTest(decision=decision):
+                result = subprocess.run(['bash', '-c', script], env={'DECISION': decision, 'PATH': os.environ['PATH']},
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(result.returncode, status, result.stderr)
 
 
 class Boundaries(unittest.TestCase):
@@ -929,6 +1066,8 @@ class RealCLI(unittest.TestCase):
                                                    'checks': ['unit', 'audit'],
                                                    'optional_skips': ['audit']}}}}}
         (cls.root / '.github/ci-evidence.json').write_text(json.dumps(cls.config, indent=2) + '\n')
+        (cls.root / '.github/ci-evidence-dispatch.json').write_text(json.dumps(
+            dict(cls.config, dispatch={'validates': 'branch-tip'}), indent=2) + '\n')
         (cls.root / '.github/workflows/ci.yml').write_text('name: CI\non: push\njobs:\n  test: {}\n')
         (cls.root / 'dev.json').write_text('{"version": 1, "checks": [{"name": "unit"}, {"name": "audit"}]}\n')
         tool = bin_dir / 'release-evidence-fixture-tool'
@@ -960,11 +1099,17 @@ class RealCLI(unittest.TestCase):
         ids = subprocess.check_output(['git', 'rev-parse'] + [cls.sha + ':' + path for path in paths],
                                       cwd=cls.root, text=True, stdin=subprocess.DEVNULL).split()
         cls.inputs = dict(zip(paths, ids))
+        paths[0] = '.github/ci-evidence-dispatch.json'
+        ids = subprocess.check_output(['git', 'rev-parse'] + [cls.sha + ':' + path for path in paths],
+                                      cwd=cls.root, text=True, stdin=subprocess.DEVNULL).split()
+        cls.dispatch_inputs = dict(zip(paths, ids))
+        cls.outputs = Path(scratch.name) / 'step-outputs'
         cls.env = dict(git_env, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                        FIXTURE_API=str(cls.fixture_api), GITHUB_SHA=cls.sha,
                        GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID), ImageOS='ubuntu24',
                        ImageVersion='20261020.1', RUNNER_OS='Linux', RUNNER_ARCH='X64',
-                       RELEASE_TAG='v1.2.3')
+                       RELEASE_TAG='v1.2.3', GITHUB_EVENT_NAME='push', GITHUB_REF='refs/tags/v1.2.3',
+                       GITHUB_OUTPUT=str(cls.outputs))
         cls.capture_env = {'GITHUB_REF': 'refs/heads/main', 'GITHUB_EVENT_NAME': 'push',
                            'GITHUB_JOB': 'test', 'GITHUB_RUN_ID': '100', 'GITHUB_RUN_ATTEMPT': '1',
                            'GITHUB_WORKFLOW_REF': REPO + '/.github/workflows/ci.yml@refs/heads/main',
@@ -974,6 +1119,14 @@ class RealCLI(unittest.TestCase):
                                   'os_release': hashlib.sha256(Path('/etc/os-release').read_bytes()).hexdigest()},
                        'tools': {'fixture': 'fixture-tool 1.0'}}
 
+    def world_payload(self):
+        return {'schema': 2, 'repository': REPO, 'repository_id': REPO_ID,
+                'source': self.sha, 'inputs': self.inputs, 'workflow': 'ci',
+                'workflow_path': '.github/workflows/ci.yml', 'workflow_name': 'CI',
+                'job': 'test', 'run_id': 100, 'attempt': 1, 'event': 'push',
+                'ref': 'refs/heads/main', 'runtime': self.runtime,
+                'coverage': {'unit': 'PASS', 'audit': 'SKIP'}}
+
     def world(self, payload=None):
         now = dt.datetime.now(dt.timezone.utc)
         def iso(seconds):
@@ -981,12 +1134,7 @@ class RealCLI(unittest.TestCase):
         run = dict(RUN, head_sha=self.sha, created_at=iso(-600), run_started_at=iso(-600),
                    updated_at=iso(-300))
         job = dict(JOB_LINUX, name='tests', head_sha=self.sha, started_at=iso(-590), completed_at=iso(-300))
-        payload = payload or {'schema': 2, 'repository': REPO, 'repository_id': REPO_ID,
-                              'source': self.sha, 'inputs': self.inputs, 'workflow': 'ci',
-                              'workflow_path': '.github/workflows/ci.yml', 'workflow_name': 'CI',
-                              'job': 'test', 'run_id': 100, 'attempt': 1, 'event': 'push',
-                              'ref': 'refs/heads/main', 'runtime': self.runtime,
-                              'coverage': {'unit': 'PASS', 'audit': 'SKIP'}}
+        payload = payload or self.world_payload()
         artifact = dict(ARTIFACT_LINUX, name='ci-evidence-ci-test-1', created_at=iso(-301),
                         workflow_run=dict(ORIGIN, head_sha=self.sha))
         data = {'': {'id': REPO_ID, 'full_name': REPO, 'default_branch': 'main'},
@@ -1002,6 +1150,7 @@ class RealCLI(unittest.TestCase):
         return data
 
     def cli(self, data, mode='verify', extra=(), env=None):
+        self.outputs.write_text('')
         self.fixture_api.write_text(json.dumps({
             key: {'_binary': base64.b64encode(value).decode()} if isinstance(value, bytes) else value
             for key, value in data.items()}))
@@ -1061,6 +1210,61 @@ class RealCLI(unittest.TestCase):
                 result = self.cli(self.world(), extra=extra, env=env)
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(json.loads(path.read_text())['refusal']['code'], code)
+
+    def test_verify_writes_the_decision_and_mode_as_step_outputs(self):
+        path, extra = self.record('outputs.json')
+        result = self.cli(self.world(), extra=extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.outputs.read_text(), 'decision=reuse\nmode=publication\n')
+        record = json.loads(path.read_text())
+        self.assertEqual((record['mode'], record['event'], record['tag'], record['tag_prerelease'],
+                          record['dispatch']), ('publication', 'push', 'v1.2.3', False, 'none'))
+        data = self.world()
+        data['actions/runs/100']['conclusion'] = 'failure'
+        self.assertEqual(self.cli(data, extra=extra).returncode, 1)
+        self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=publication\n')
+
+    def test_a_dispatch_run_does_not_use_the_gate_by_default(self):
+        path, extra = self.record('dispatch.json')
+        result = self.cli(self.world(), extra=extra, env={'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                                                          'GITHUB_REF': 'refs/heads/main'})
+        self.assertEqual(result.returncode, 1)
+        record = json.loads(path.read_text())
+        self.assertEqual((record['decision'], record['refusal']['code'], record['mode']),
+                         ('refuse', 'dispatch-not-gated', None))
+        self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=\n')
+
+    def test_a_dispatch_validation_run_validates_the_tip_and_is_never_a_publication(self):
+        def world():
+            data = self.world(dict(self.world_payload(), inputs=self.dispatch_inputs))
+            data.pop('git/ref/tags/v1.2.3')
+            data.pop('git/tags/' + TAG_OBJECT)
+            return data
+        dispatch = {'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main',
+                    'RELEASE_TAG': 'main'}
+        path, extra = self.record('validation.json')
+        extra = extra + ['--config', '.github/ci-evidence-dispatch.json']
+        result = self.cli(world(), extra=extra, env=dispatch)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(path.read_text())
+        self.assertEqual((record['decision'], record['mode'], record['tag'], record['source'], record['dispatch']),
+                         ('validated', 'validation-only', None, self.sha, 'branch-tip'))
+        self.assertNotIn('tag_object', record)
+        self.assertEqual(self.outputs.read_text(), 'decision=validated\nmode=validation-only\n')
+        self.assertIn('release-evidence: validated, validation-only and never a publication decision', result.stderr)
+        for env, code in (({'GITHUB_REF': 'refs/heads/feature'}, 'dispatch-ref'),
+                          ({'GITHUB_SHA': OTHER}, 'checkout-sha')):
+            with self.subTest(code=code):
+                result = self.cli(world(), extra=extra, env=dict(dispatch, **env))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(path.read_text())['refusal']['code'], code)
+        # A tag push under the same configuration is a publication: it reads the tag, and without
+        # one it refuses.
+        result = self.cli(world(), extra=extra)
+        self.assertEqual(result.returncode, 1)
+        record = json.loads(path.read_text())
+        self.assertEqual((record['mode'], record['refusal']['code']), ('publication', 'api-unavailable'))
+        self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=publication\n')
 
     def test_verify_refuses_a_changed_checkout(self):
         config = self.root / '.github/ci-evidence.json'

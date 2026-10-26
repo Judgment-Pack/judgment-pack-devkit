@@ -125,12 +125,16 @@ jobs:
     permissions:
       contents: read
       actions: read
+    outputs:
+      # reuse, refuse or validated; only reuse is a publication decision.
+      decision: ${{ steps.gate.outputs.decision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
       - name: Reuse exact-commit main CI evidence, or refuse
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/dev/release_evidence.py verify --output "${{ runner.temp }}/release-evidence.json"
@@ -155,6 +159,15 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      # Only a publication decision is packaged and published: a validation-only decision
+      # ("validated", docs/ci-evidence.md) or no decision stops here.
+      - name: Require a publication decision from the gate
+        shell: bash
+        env:
+          DECISION: ${{ needs.verify.outputs.decision }}
+        run: |
+          [ "${DECISION}" = "reuse" ] || { echo "The release evidence gate decided '${DECISION:-nothing}'; only reuse is a publication decision (docs/ci-evidence.md)" >&2; exit 1; }
+
       - name: Check out the commit the run was started for
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

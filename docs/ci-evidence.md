@@ -49,6 +49,11 @@ Evidence is reused only when all of this holds; anything else refuses.
 - **Still true at the end.** The run's attempt and the selection are read again after collection,
   every workflow's selection once more after all of them, and the release tag must name the commit
   as an annotated tag, with the same tag object, before and after.
+- **A publication is held to its tag.** The tag follows the configured grammar: `vMAJOR.MINOR.PATCH`,
+  and a SemVer prerelease only where `tag.prerelease` allows one
+  ([tags and dispatch runs](#prerelease-tags-and-dispatch-runs)). A `workflow_dispatch` run of the
+  release workflow is refused, or, where `dispatch.validates` is `branch-tip`, validates the branch's
+  tip with a decision that is never a publication's.
 
 Mutable external state the release workflow checks fresh stays fresh: the tag (grammar, annotated,
 naming the commit, on main), the notes, the `release` environment's reviewer rule, the kit version
@@ -83,8 +88,13 @@ evidence, and `verify` has no input for one.
 `verify` runs in the release workflow with `contents: read` and `actions: read`, `GITHUB_SHA` the
 release commit and `RELEASE_TAG` its tag. It reads only this repository's REST API through
 `gh api` (no other host, no cache), writes the [decision record](#the-decision-record) to standard
-output and to `--output`, prints one line, `release-evidence: reuse: ...` or
-`release-evidence: refuse: CODE: detail`, and exits 0 only on reuse.
+output and to `--output`, prints one line, `release-evidence: reuse: ...`,
+`release-evidence: validated, validation-only and never a publication decision: ...` or
+`release-evidence: refuse: CODE: detail`, and exits 0 on reuse or validated, 1 otherwise. Where
+`GITHUB_OUTPUT` is set it also writes the step outputs `decision` (`reuse`, `validated` or
+`refuse`) and `mode` (`publication`, `validation-only`, or empty when refused before the mode was
+known): a job that packages or publishes proceeds on `decision` `reuse` alone, never on the step's
+exit status.
 
 ## Configuration
 
@@ -99,6 +109,8 @@ naming it); `"$comment"` is allowed and ignored in any object whose members are 
 | `max_age_hours` | 1 to 48: the oldest selected attempt start the release takes |
 | `inputs` | pin files (repository paths) whose identity the evidence records, beside the manifest, the configuration, the gate and the workflow files, which are always recorded |
 | `fresh_at_release` | optional: the checks the release workflow runs itself, tag-sensitive ones among them; carried into the decision record so the log says what the gate does not stand for |
+| `tag.prerelease` | optional, default `false` (`tag` absent): `false` admits `vMAJOR.MINOR.PATCH` only; `true` also admits a SemVer prerelease suffix ([below](#prerelease-tags-and-dispatch-runs)) |
+| `dispatch.validates` | optional, default `none` (`dispatch` absent): a `workflow_dispatch` run of the release workflow does not use the gate and is refused; `branch-tip`: it validates the trusted branch's tip, validation-only ([below](#prerelease-tags-and-dispatch-runs)) |
 | `profiles.<name>.platform` | `RUNNER_OS`, `RUNNER_ARCH`, optionally `ImageOS`: what the job's runner must report |
 | `profiles.<name>.tools` | tool name to the command that prints its identity (`["go", "version"]`); each output is recorded and must not be empty |
 | `profiles.<name>.compare` | `release-runner`: the release job resolves the same profile on its own runner, and the evidence must match it exactly (image, version, OS release, every tool); for a leg on the release job's platform. `pins`: the recorded tools must equal `pins` exactly; for a leg the release job cannot resolve itself (another OS or architecture) |
@@ -111,6 +123,39 @@ naming it); `"$comment"` is allowed and ignored in any object whose members are 
 The job key names the artifact, so it is letters, digits, `-` and `_`. The template shows a Linux
 job compared with the release runner, a macOS matrix leg held to pins, a pull-request-only skipped
 job, a pin file and two tag-sensitive checks.
+
+## Prerelease tags and dispatch runs
+
+**The tag grammar.** By default the release tag is `vMAJOR.MINOR.PATCH` in ASCII digits with no
+leading zeroes, and nothing before or after it (`tag-syntax` otherwise). With
+`"tag": {"prerelease": true}` a SemVer prerelease suffix is admitted as well:
+`-<identifier>(.<identifier>)*`, each identifier ASCII letters, digits and hyphens, none empty, a
+numeric identifier without leading zeroes (`v0.22.0-alpha.1`, `v1.2.3-rc.1`, `v1.2.3-0`). Nothing
+else is: not `v1.2.3-`, `v1.2.3-01`, `v1.2.3-alpha..1`, an underscore or a non-ASCII letter, and
+never build metadata (`v1.2.3+build`, `v1.2.3-rc.1+build`). The grammar is the only difference: a
+prerelease tag must be annotated, must name the exact release commit, and is read again at the end
+like any other (`tag-annotated`, `tag-commit`, `tag-changed`). The release workflow's own tag
+admission (its trigger filter and syntax step) must admit the same grammar; the gate does not
+widen it.
+
+**What the run decides.** `verify` reads `GITHUB_EVENT_NAME` and `GITHUB_REF`:
+
+- every run but a `workflow_dispatch` one is a **publication** (`mode` `publication`): held to
+  `RELEASE_TAG` as above, and its passing decision is `reuse`;
+- a `workflow_dispatch` run, under the default `"dispatch": {"validates": "none"}`, does not use the
+  gate: it refuses (`dispatch-not-gated`) before any API read;
+- under `"dispatch": {"validates": "branch-tip"}`, a `workflow_dispatch` run on the trusted branch
+  (`GITHUB_REF` `refs/heads/<branch>`, else `dispatch-ref`) is **validation-only** (`mode`
+  `validation-only`). It validates the commit the dispatch ran for, `GITHUB_SHA`, the branch's tip
+  when it was dispatched, which the job must check out (`ref: ${{ github.sha }}`; another checkout
+  refuses with `checkout-sha`). It reads no tag (the record's `tag` is `null`), holds that commit's
+  evidence to every other check of the contract, and its passing decision is `validated`.
+
+`validated` is never a publication decision. The gate decides `reuse` only in mode `publication`,
+and a release workflow that has a dispatch trigger conditions every packaging and publishing job on
+the `decision` output being `reuse`, as the kit's own release does in its package job (which every
+later job needs): the exit status 0 of a validation run is not enough. A validation-only run is a
+check of the tip before tagging it; publishing still takes a tag push and its own run.
 
 ## Selection
 
@@ -168,9 +213,12 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
 log) and to `--output`; the kit's release keeps the file as the run's `release-evidence-<attempt>`
 artifact. It holds:
 
-- `decision`, and `refusal` (`code` and a short `detail`) or `null`;
-- `repository`, `repository_id`, `source` (the commit), `tag`, `tag_object`, `branch`,
-  `max_age_hours`, `checked_at`, `fresh_at_release`;
+- `decision` (`reuse`, `validated` or `refuse`), and `refusal` (`code` and a short `detail`) or
+  `null`;
+- `mode` (`publication`, `validation-only`, or `null` when refused before it was known), `event`
+  (the run's `GITHUB_EVENT_NAME`), `tag_prerelease` and `dispatch` (the configured rules);
+- `repository`, `repository_id`, `source` (the commit), `tag` (`null` in a validation-only run),
+  `tag_object` (a publication only), `branch`, `max_age_hours`, `checked_at`, `fresh_at_release`;
 - `inputs`: each recorded path's git object id;
 - per workflow: `workflow_id`, `path`, `name`, `events`, the number of runs at the commit and of
   applicable ones, the newest runs at the commit, scanned or not (id, attempt, event, branch,
@@ -197,6 +245,7 @@ repository metadata, ids, timestamps and tool versions only; command errors are 
 | changed inputs | `input-identity`, `runtime-identity`, `job-runner`, `evidence-identity` |
 | unavailable or stale evidence | `api-unavailable`, `pagination-*`, `artifact-expired`, `artifact-size`, `artifact-interval`, `artifact-digest`, `artifact-entries`, `run-age`, `timestamp`, `response-size`, `unavailable-or-malformed` |
 | tag movement | `tag-syntax`, `tag-annotated`, `tag-commit`, `tag-changed` |
+| the release run's event | `dispatch-not-gated`, `dispatch-ref`, `mode-unknown` |
 | the release checkout or configuration | `source-sha`, `git-unavailable`, `checkout-root`, `checkout-sha`, `checkout-changed`, `config-source`, `config-invalid`, `helper-source`, `input-missing`, `runner-identity`, `runner-platform`, `tool-identity`, `check-config` |
 
 `capture` refuses with `capture-ref`, `capture-event`, `capture-job`, `capture-workflow`,
@@ -238,6 +287,10 @@ Inventory of the checks at the release commit:
 | `tests` (`tests/run.sh`) | `tests`, run | `CI at the tag / tests`, run again | taken from `tests`' evidence |
 | toolchain | ubuntu-latest image, its bash, git, python3, go, shellcheck, rsync | the same image family, not compared | compared with the release runner (`release-runner`) |
 | tag, notes, environment reviewer, version and copies, package run, checksums, attestation, draft and published identity | not run | run | run (unchanged) |
+
+The kit's tags stay `vMAJOR.MINOR.PATCH` (no `tag` member) and its release workflow has no
+dispatch trigger (no `dispatch` member). Its package job begins by requiring the gate's `decision`
+output to be `reuse`.
 
 No `ci.yml` check depends on the tag: the release-specific checks are in the release workflow
 and stay there. The kit has no dependency or integration pins (standard library only).

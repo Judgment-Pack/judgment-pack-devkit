@@ -17,6 +17,24 @@
     "tag-history",
     "policy-tag-corpus"
   ],
+  "tag": {
+    "$comment": [
+      "Optional; absent is {\"prerelease\": false}: the release tag is vMAJOR.MINOR.PATCH, no leading zeroes.",
+      "true also admits a SemVer prerelease, vMAJOR.MINOR.PATCH-<identifier>(.<identifier>)*: identifiers of ASCII",
+      "letters, digits and hyphens, none empty, a numeric one without leading zeroes. Build metadata (+...) never.",
+      "Either way the tag must be annotated and name the exact release commit."
+    ],
+    "prerelease": false
+  },
+  "dispatch": {
+    "$comment": [
+      "Optional; absent is {\"validates\": \"none\"}: a workflow_dispatch run of the release workflow does not use",
+      "the gate and is refused (dispatch-not-gated). \"branch-tip\": a dispatch on the trusted branch validates the",
+      "commit it ran for, the branch's tip, reads no tag, and decides \"validated\", never \"reuse\": no",
+      "publishing job may take it. Every other run of the release workflow is a publication, held to its tag."
+    ],
+    "validates": "none"
+  },
   "profiles": {
     "linux": {
       "$comment": [
