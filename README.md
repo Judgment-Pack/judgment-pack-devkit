@@ -244,8 +244,8 @@ duplication: 1 duplicate pair (at least 70 tokens over at least 6 lines, 214 fil
 
 The kit runs the check on itself with `python3 lib/duplication.py`, over its Python and shell
 files at 100 tokens and 10 lines, and leaves out `scripts/dev/**`: those files are the vendored
-copies of `templates/check.sh`, `lib/generated_docs.py`, `lib/handover_check.sh` and
-`lib/changed_checks.py`, kept the same on purpose.
+copies of `templates/check.sh`, `lib/generated_docs.py`, `lib/handover_check.sh`,
+`lib/changed_checks.py` and `lib/release_evidence.py`, kept the same on purpose.
 
 The exit status is 0 when nothing is found or the check is off, 1 when a pair or an ignore marker
 problem is found, and 2 when the declaration is refused or the files in scope do not fit in
@@ -281,6 +281,10 @@ Python steps, and for other steps that invoke `python3`, name the interpreter us
 - `templates/check.sh`, `lib/handover_check.sh` and `lib/changed_checks.py`: the public checks a
   repository vendors as `scripts/dev/check.sh`, `scripts/dev/handover_check.sh` and
   `scripts/dev/changed_checks.py`.
+- `lib/release_evidence.py`, `templates/ci-evidence.json`: the release evidence gate a repository
+  vendors as `scripts/dev/release_evidence.py` with its configuration `.github/ci-evidence.json`:
+  a release takes the CI evidence main produced at the exact commit, or refuses
+  ([docs/ci-evidence.md](docs/ci-evidence.md)).
 - `templates/codex-brief.md`, `templates/codex-review-brief.md`: the build and review brief
   skeletons `jpdev codex brief-template` prints.
 - `templates/AGENTS.md`, `templates/CLAUDE.md`: the agent instructions (one text, generated from

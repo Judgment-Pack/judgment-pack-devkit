@@ -41,9 +41,10 @@ absent() {
   if grep -qE -- "$2" <<< "$3"; then bad "$1 (unexpected line matching: $2)" "$3"; else ok "$1"; fi
 }
 
-# The shared CI evidence CLI: handwritten API fixtures, never live-service evidence.
-out=$(python3 "$kit/tests/ci_evidence_test.py" 2>&1) && s=0 || s=$?
-expect "trusted CI evidence admission and collector fixtures" 0 'OK' "$out" "$s"
+# The release evidence gate (lib/release_evidence.py): handwritten API fixtures, never live-service
+# evidence. Each refusal class of docs/ci-evidence.md, the decision record and the public command.
+out=$(python3 "$kit/tests/release_evidence_test.py" 2>&1) && s=0 || s=$?
+expect "release evidence gate: exact-commit reuse and every refusal class over API fixtures" 0 'OK' "$out" "$s"
 
 # The duplication check: handwritten fixture repositories through its command line and the
 # template manifest's step; the schema and the command agree on every declaration vector.
@@ -428,6 +429,11 @@ changed_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $
 if [ "$changed_line2" = "$changed_want" ]; then ok "scripts/dev/changed_checks.py line 2 names the kit version and source"; else bad "scripts/dev/changed_checks.py line 2 names the kit version and source" "line 2: $changed_line2
 wanted: $changed_want"; fi
 if cmp -s "$kit/lib/changed_checks.py" <(sed 2d "$kit/scripts/dev/changed_checks.py" 2>/dev/null); then ok "scripts/dev/changed_checks.py is the library selection code but for its version line"; else bad "scripts/dev/changed_checks.py is the library selection code but for its version line"; fi
+evidence_line2=$(sed -n 2p "$kit/scripts/dev/release_evidence.py" 2>/dev/null)
+evidence_want="# from judgment-pack-devkit v$("$jpdev" --version | awk '{ print $2 }') (lib/release_evidence.py)"
+if [ "$evidence_line2" = "$evidence_want" ]; then ok "scripts/dev/release_evidence.py line 2 names the kit version and source"; else bad "scripts/dev/release_evidence.py line 2 names the kit version and source" "line 2: $evidence_line2
+wanted: $evidence_want"; fi
+if cmp -s "$kit/lib/release_evidence.py" <(sed 2d "$kit/scripts/dev/release_evidence.py" 2>/dev/null); then ok "scripts/dev/release_evidence.py is the library gate but for its version line"; else bad "scripts/dev/release_evidence.py is the library gate but for its version line"; fi
 
 # The release evidence hashes the runner and its selection code, which CI runs on pull requests.
 out=$(python3 -I -c 'import json, sys; inputs = json.load(open(sys.argv[1]))["inputs"]; missing = [p for p in ("scripts/dev/check.sh", "scripts/dev/changed_checks.py") if p not in inputs]; print("missing: " + " ".join(missing) if missing else "covered")' "$kit/.github/ci-evidence.json" 2>&1) && s=0 || s=$?

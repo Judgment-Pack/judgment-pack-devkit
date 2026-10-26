@@ -70,6 +70,12 @@ together (`check.sh --changed` refuses when it is absent, and the CI template us
 pull requests). A runner given an option it does not know names the release on its line 2, and
 `jpdev version` prints the installed kit's version with the commit a kit checkout is at.
 
+A repository whose release takes the CI evidence main already produced, instead of running CI
+again, also vendors `scripts/dev/release_evidence.py` (`lib/release_evidence.py` with the release on
+line 2, updated with the other vendored scripts) and writes `.github/ci-evidence.json` from
+`templates/ci-evidence.json`, in its own adoption issue: [the release evidence gate](ci-evidence.md)
+describes the contract, the capture step each CI job adds and the release step.
+
 `scripts/dev/check.sh [--setup] [--only A,B | --changed [BASE]] [--skip A,B] [--all]` runs the
 manifest with no caps and prints the summary block. `--changed` selects the checks as
 `jpdev check --changed` does (see [changed-path check selection](#changed-path-check-selection)),
@@ -114,7 +120,7 @@ the default branch and on a dispatch `scripts/dev/check.sh --all`. The pull requ
 mapping, the manifest or the runner changed, or when there is no mapping, so a repository without
 a `changed` mapping runs the whole list on every pull request as before. The default branch always
 runs the whole list, and only that run is the evidence a release takes (see
-[trusted CI evidence](ci-evidence.md)); a check a pull request did not select did not pass there,
+[the release evidence gate](ci-evidence.md)); a check a pull request did not select did not pass there,
 and the default-branch run is where a mapping that missed an effect shows. This is the
 [policy](policy.md#testing)'s split: CI owns every deterministic check, the scoped run is allowed on
 pull requests, and the full list is required on the default branch and before a release. The check

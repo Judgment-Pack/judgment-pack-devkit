@@ -49,7 +49,9 @@ the second.
      `# from judgment-pack-devkit v<version> (lib/handover_check.sh)` and copies the rest from
      `lib/handover_check.sh`; sets line 2 of `scripts/dev/changed_checks.py` to
      `# from judgment-pack-devkit v<version> (lib/changed_checks.py)`, the other lines being those
-     of `lib/changed_checks.py` (tests hold the vendored scripts to their sources and version);
+     of `lib/changed_checks.py`; sets line 2 of `scripts/dev/release_evidence.py` to
+     `# from judgment-pack-devkit v<version> (lib/release_evidence.py)`, the other lines being those
+     of `lib/release_evidence.py` (tests hold the vendored scripts to their sources and version);
    - writes `docs/releases/<tag>.md`: what the release holds and what it does not. It is the text
      the release page carries, and the first line ends with the tag's name, for example
      `# jpdev v0.2.0`.
@@ -59,7 +61,8 @@ the second.
    scripts/dev/check.sh
    ```
 
-3. Merge the pull request.
+3. Merge the pull request, and let main CI at the merge commit complete: its run is the evidence
+   the release takes.
 
 ## Tag
 
@@ -86,15 +89,17 @@ Every job works on the commit the run was started for, by its digest, not on the
 1. **Admits the tag.** It is in the grammar; it is an annotated tag; it names the commit the run
    was started for; that commit is on `main`; `docs/releases/<tag>.md` exists, is not empty and ends
    its first line with the tag; and the `release` environment has a reviewer rule.
-2. **Verifies trusted CI evidence at that commit.** The release uses the shared
-   [exact-source evidence gate](ci-evidence.md) for `lint` and `tests`, with independently
-   resolved workflow, source, runner, tool and check identities. The latest applicable main
-   run and its complete latest attempt must be successful and no more than 48 hours old.
-   Missing, inaccessible, changed or partial evidence refuses; a newer failed/canceled/running
-   run cannot be bypassed. One explicit full CI dispatch on main and one verification retry
-   is the bounded fresh route while main still names the target. PR CI and automatic main
-   validation keep every existing check and required status. The gate document records
-   API limits and measured baseline durations; candidate savings are not yet measured.
+2. **Takes the CI evidence main produced at that commit, or refuses** (`CI evidence at the tag`).
+   `scripts/dev/release_evidence.py verify`, the [release evidence gate](ci-evidence.md), reads
+   the Actions API for the `CI` runs at the exact commit: the newest applicable attempt (a push to
+   main, or a dispatch on main) must be complete and successful, at most 48 hours old, with `lint`
+   and `tests` successful on hosted `ubuntu-latest`, their evidence artifacts recording every
+   check passed, the commit's input identities and the image and tools this job's runner resolves.
+   A newer failed, cancelled or running attempt is never searched past, and the tag must name the
+   commit before and after. The decision record, reuse or refusal, is in the log and kept as the
+   run's `release-evidence-<attempt>` artifact. `ci.yml` is not run again; a refusal stops the
+   release, and the [fresh route](ci-evidence.md#the-fresh-route) is the operator's choice. Main CI
+   and pull request CI keep every check and required status.
 3. **Packages the kit.** It refuses unless `bin/jpdev --version` prints `jpdev <version>`, line 2 of
    each vendored script names `<tag>`, and each matches its source. Then
    `git archive` of the commit into `judgment-pack-devkit-<version>.tgz`, `checksums.txt` written
@@ -154,7 +159,8 @@ What to do with a draft depends on which job failed:
 
 | The job that failed | The draft | What to do |
 | --- | --- | --- |
-| Any job before `Attest and draft release` | none was made | re-run the failed jobs; where the version did not match the tag, fix it on `main` and release a new version |
+| `CI evidence at the tag` | none was made | read the refusal (the step's last line, or the `release-evidence-<attempt>` artifact). Take the [fresh route](ci-evidence.md#the-fresh-route) once: re-run all jobs of the main CI run at the commit (or dispatch `ci.yml` on main while main names it), then re-run the failed jobs. A second refusal: fix the cause on `main` and release a new version |
+| Any other job before `Attest and draft release` | none was made | re-run the failed jobs; where the version did not match the tag, fix it on `main` and release a new version |
 | `Attest and draft release` | may exist, and may lack assets | read it, delete it by hand, then re-run the failed jobs. The job refuses to run while a release under the tag exists, draft or published, and refuses when it cannot find out |
 | `Publish release`, before publication | needs looking at: it may be as it was made, changed, incomplete or gone | read why the job failed, and look at the Releases page. **Keep** a draft that is as it was made, and re-run the failed jobs: that job only publishes the release id the run drafted. Do not publish a draft that was changed or is incomplete. Where the draft cannot be published, release a new version |
 | `Publish release`, at `Require the published release to hold what this run wrote` | published, holding files this run did not write, or not published after the call | someone who can write to the repository changed the release in the window above. Treat it as an incident: tell the maintainers, point no one at the release, and release a new version from a new tag. Do not re-run |

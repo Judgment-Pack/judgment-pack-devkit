@@ -5,7 +5,8 @@ name: Release
 # (docs/releasing.md). No registry is involved: a person installs the attested tarball.
 #
 # A person decides there is a release, writes its notes (docs/releases/<tag>.md) and sets the kit's
-# version to the tag's. The workflow holds the tagged commit to CI, packages the kit from it,
+# version to the tag's. The workflow holds the tagged commit to the CI evidence main produced for
+# it (docs/ci-evidence.md), packages the kit from it,
 # attests the files, and publishes no release until a maintainer approves the `release`
 # environment.
 #
@@ -113,9 +114,11 @@ jobs:
             || { echo "The release environment could not be read; create it with a required reviewer (docs/releasing.md)" >&2; exit 1; }
           [ "${reviewers}" -ge 1 ] || { echo "The release environment requires no reviewer" >&2; exit 1; }
 
-  # Reuse only complete trusted-main evidence; tag-sensitive/package/publication gates stay fresh.
+  # The CI evidence main already produced at this exact commit, or a refusal (docs/ci-evidence.md).
+  # ci.yml is not called again here: a refusal stops the release, and the fresh route is the
+  # operator's choice. The tag, package and publication gates of the other jobs stay fresh.
   verify:
-    name: CI at the tag
+    name: CI evidence at the tag
     needs: admit
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -127,10 +130,18 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Require complete exact-source CI evidence
+      - name: Reuse exact-commit main CI evidence, or refuse
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 lib/ci_evidence.py verify
+        run: python3 scripts/dev/release_evidence.py verify --output "${{ runner.temp }}/release-evidence.json"
+      # The decision record, reuse or refusal, is also in the log of the step above.
+      - name: Keep the decision record
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence.json
+          if-no-files-found: error
 
   package:
     name: Package
@@ -172,6 +183,10 @@ jobs:
           want="# from judgment-pack-devkit ${RELEASE_TAG} (lib/changed_checks.py)"
           [ "${line}" = "${want}" ] || { echo "scripts/dev/changed_checks.py line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
           cmp -s <(head -n 1 lib/changed_checks.py; tail -n +2 lib/changed_checks.py) <(sed 2d scripts/dev/changed_checks.py) || { echo "scripts/dev/changed_checks.py is not a versioned copy of lib/changed_checks.py" >&2; exit 1; }
+          line="$(sed -n 2p scripts/dev/release_evidence.py)"
+          want="# from judgment-pack-devkit ${RELEASE_TAG} (lib/release_evidence.py)"
+          [ "${line}" = "${want}" ] || { echo "scripts/dev/release_evidence.py line 2 is '${line}'; the tag ${RELEASE_TAG} needs '${want}'" >&2; exit 1; }
+          cmp -s lib/release_evidence.py <(sed 2d scripts/dev/release_evidence.py) || { echo "scripts/dev/release_evidence.py is not a versioned copy of lib/release_evidence.py" >&2; exit 1; }
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       # git archive writes the named paths of the commit, with the commit's time and each file's
@@ -202,7 +217,7 @@ jobs:
           kit="${unpack}/judgment-pack-devkit-${VERSION}"
           [ "$("${kit}/bin/jpdev" --version)" = "jpdev ${VERSION}" ] || { echo "the packaged jpdev does not report ${VERSION}" >&2; exit 1; }
           "${kit}/bin/jpdev" env > /dev/null
-          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/dev/changed_checks.py scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
+          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/dev/changed_checks.py scripts/dev/release_evidence.py templates/ci-evidence.json scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
             test -e "${kit}/${path}" || { echo "the tarball does not hold ${path}" >&2; exit 1; }
           done
 

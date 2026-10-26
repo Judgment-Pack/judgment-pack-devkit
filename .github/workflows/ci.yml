@@ -4,13 +4,15 @@ name: CI
 # jobs keep their names, which branch protection requires: `lint` runs the cheap steps, `tests` the
 # kit's test run. A pull request runs, of each job's steps, those `check.sh --changed` selects
 # against the base branch (all of them when a path is unmapped or a selection input changed); a push
-# to main and a dispatch run every step, and only they record the evidence a release takes.
+# to main and a dispatch run every step, and only they record the evidence a release takes
+# (scripts/dev/release_evidence.py capture; docs/ci-evidence.md).
 
 on:
   push:
     branches: [main]
   pull_request:
-  # Explicit fresh validation on main is the bounded recovery route for missing evidence.
+  # A dispatch on main is the release's fresh route, which an operator chooses after a refusal
+  # (docs/ci-evidence.md); nothing dispatches it automatically.
   workflow_dispatch:
   workflow_call:
 
@@ -45,7 +47,7 @@ jobs:
 
       - name: Record exact CI inputs and coverage
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: python3 lib/ci_evidence.py capture --workflow ci --job lint --check-log "${{ runner.temp }}/checks.log" --output "${{ runner.temp }}/evidence.json"
+        run: python3 scripts/dev/release_evidence.py capture --workflow ci --job lint --check-log "${{ runner.temp }}/checks.log" --output "${{ runner.temp }}/evidence.json"
       - name: Upload immutable CI evidence
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -77,7 +79,7 @@ jobs:
 
       - name: Record exact CI inputs and coverage
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: python3 lib/ci_evidence.py capture --workflow ci --job tests --check-log "${{ runner.temp }}/checks.log" --output "${{ runner.temp }}/evidence.json"
+        run: python3 scripts/dev/release_evidence.py capture --workflow ci --job tests --check-log "${{ runner.temp }}/checks.log" --output "${{ runner.temp }}/evidence.json"
       - name: Upload immutable CI evidence
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
