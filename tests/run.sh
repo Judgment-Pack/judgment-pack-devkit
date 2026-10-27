@@ -60,6 +60,11 @@ expect "generated document scratch regeneration fixtures" 0 'OK' "$out" "$s"
 out=$(python3 "$kit/tests/changed_checks_test.py" 2>&1) && s=0 || s=$?
 expect "jpdev check --changed selects the mapped checks of fixture clones" 0 'OK' "$out" "$s"
 
+# Actual template and repository runner entrypoints: log persistence must not
+# report success when it prevented selected checks from running.
+out=$(python3 "$kit/tests/check_incomplete_test.py" 2>&1) && s=0 || s=$?
+expect "check.sh incomplete-checklist status and completed-step controls" 0 'OK' "$out" "$s"
+
 # --- the public runner, with no caps
 out=$("$kit/templates/check.sh" --manifest "$fixture" 2>/dev/null) && s=0 || s=$?
 # JPDEV_ROOT is unset: the template's own location is the kit, whose git root is this repository.
@@ -117,7 +122,7 @@ expect "the adopting guide gives the check log path" 0 '[$]JPDEV_SCRATCH/logs/<r
 expect "the adopting guide says a log holds the complete step output" 0 'complete step output' "$adopting" 0
 expect "the adopting guide says a persistence failure is separate" 0 'reports the persistence failure separately' "$adopting" 0
 expect "the adopting guide says later steps are not run" 0 'Remaining steps are marked not run' "$adopting" 0
-expect "the adopting guide says infrastructure does not change the status" 0 'infrastructure failure does' "$adopting" 0
+expect "the adopting guide preserves status when all selected steps completed" 0 'infrastructure failure does' "$adopting" 0
 
 out=$(JPDEV_FIXTURE_UNSET=1 "$kit/templates/check.sh" --manifest "$fixture" --only needs-variable 2>/dev/null) && s=0 || s=$?
 expect "check.sh runs a step whose variable is set" 0 'PASS +needs-variable' "$out" "$s"

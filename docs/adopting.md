@@ -91,8 +91,11 @@ selected for the current repository's manifest.
 `jpdev check` stores each step's complete step output (stdout and stderr combined) at
 `$JPDEV_SCRATCH/logs/<repository>-<timestamp>/<step>.log`. If that output cannot be persisted, the
 summary keeps the completed step's result and reports the persistence failure separately, naming
-the intended log target. Remaining steps are marked not run, and the infrastructure failure does
-not change the check-derived exit status. No log path is advertised unless a complete log exists.
+the intended log target. Remaining steps are marked not run. If any selected step is left not run,
+the runner exits nonzero even when every completed step passed; the completed PASS/FAIL rows and
+failed-check count remain unchanged. When all selected steps completed, the infrastructure failure does
+not change the check-derived exit status, including a passing single-step run. No command is replayed
+automatically, and no log path is advertised unless a complete log exists.
 
 ## 3. Add the agent instructions
 
