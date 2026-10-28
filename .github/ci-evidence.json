@@ -32,6 +32,10 @@
     "no existing release, draft identity",
     "published asset digests"
   ],
+  "revalidation": {
+    "$comment": "A hosted image rolled under the same label decides revalidate: release.yml runs dev.json's check list strictly on a release runner (docs/ci-evidence.md#revalidation).",
+    "allowed": true
+  },
   "profiles": {
     "kit": {
       "platform": {

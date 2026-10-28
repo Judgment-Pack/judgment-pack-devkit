@@ -76,8 +76,10 @@ line 2, updated with the other vendored scripts) and writes `.github/ci-evidence
 `templates/ci-evidence.json`, in its own adoption issue: [the release evidence gate](ci-evidence.md)
 describes the contract, the capture step each CI job adds and the release step.
 
-`scripts/dev/check.sh [--setup] [--only A,B | --changed [BASE]] [--skip A,B] [--all]` runs the
-manifest with no caps and prints the summary block. `--changed` selects the checks as
+`scripts/dev/check.sh [--setup] [--only A,B | --changed [BASE]] [--skip A,B] [--all] [--strict]` runs
+the manifest with no caps and prints the summary block. `--strict` counts a step skipped for an
+empty `requires_env` as a failure, `optional: true` or not: the form a release's fresh run of the
+list takes ([revalidation](ci-evidence.md#revalidation)). `--changed` selects the checks as
 `jpdev check --changed` does (see [changed-path check selection](#changed-path-check-selection)),
 with the same rules and the same report, through the vendored `scripts/dev/changed_checks.py`. Before a setup or check run, it creates a missing declared
 Python environment with `python3.X` on PATH, then the newest

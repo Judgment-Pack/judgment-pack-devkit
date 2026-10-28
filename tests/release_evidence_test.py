@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -172,6 +173,13 @@ class Gate(unittest.TestCase):
         record = {'workflows': {}, 'mode': mode}
         e.decide(self.api, self.config, copy.deepcopy(SOURCE), tag, NOW, record)
         self.record = record
+        if record['decision'] == 'revalidate':
+            # Only a publication revalidates, with no refusal and the drift recorded.
+            self.assertIsNone(record['refusal'])
+            self.assertEqual(mode, 'publication')
+            self.assertEqual(set(record['revalidation']), {'reason', 'jobs', 'differences'})
+            return record['decision']
+        self.assertNotIn('revalidation', record)
         if record['decision'] in ('reuse', 'validated'):
             self.assertIsNone(record['refusal'])
             # Only a publication reuses; only a validation-only run is validated.
@@ -589,12 +597,209 @@ class ChangedInputs(Gate):
         self.refuses('runtime-identity', lambda: self.evidence(1, lambda p: p['runtime']['runner'].update(RUNNER_ARCH='X64')))
 
     def test_a_runtime_record_that_is_missing_or_has_another_tool_set(self):
-        self.refuses('runtime-identity', lambda: self.evidence(0, lambda p: p.pop('runtime')))
+        self.refuses('runtime-identity', lambda: self.evidence(0, lambda p: p.update(runtime=None)))
+        self.assertIn('no runtime record', self.record['refusal']['detail'])
+        # The runtime identity is the job's last check: a missing member is the evidence's shape.
+        self.data = world()
+        self.refuses('evidence-identity', lambda: self.evidence(0, lambda p: p.pop('runtime')))
         self.data = world()
         self.refuses('runtime-identity', lambda: self.evidence(1, lambda p: p['runtime']['tools'].update(cc='clang')))
 
     def test_unexpected_members_in_the_evidence(self):
         self.refuses('evidence-identity', lambda: self.evidence(0, lambda p: p.update(green=True)))
+
+
+class Revalidation(Gate):
+    """The opt-in route: a publication whose one refusal is the release runner's drift decides
+    revalidate, after every other check of verify; no other refusal is turned."""
+
+    def setUp(self):
+        super().setUp()
+        self.config['revalidation'] = {'allowed': True}
+
+    def roll(self, **tools):
+        """The release runner drew a newer hosted image under the same label."""
+        self.here['runner']['ImageVersion'] = '20261027.2'
+        self.here['tools'].update(tools)
+
+    def test_a_rolled_image_is_revalidated_with_the_drift_recorded(self):
+        self.roll()
+        self.assertEqual(self.decide(), 'revalidate')
+        # Both sides of the drift, and only the differing key: the evidence's value and this runner's.
+        self.assertEqual(self.record['revalidation'], {
+            'reason': "test-linux: differs from this runner in ['ImageVersion']", 'jobs': ['test-linux'],
+            'differences': [{'workflow': 'ci', 'job': 'test-linux',
+                             'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+                             'tools': {}}]})
+        # Every other check ran: every leg's evidence is recorded, the tag read before and after.
+        ci = self.record['workflows']['ci']
+        self.assertEqual(sorted(ci['jobs']), ['test-linux', 'test-macos'])
+        self.assertEqual(ci['jobs']['test-linux']['runtime'], LINUX)
+        self.assertEqual(self.record['tag_object'], TAG_OBJECT)
+        self.assertEqual(self.api.calls.count('git/ref/tags/v1.2.3'), 2)
+
+    def test_two_drifting_legs_are_each_recorded_with_their_own_values(self):
+        self.config['workflows']['ci']['jobs']['lint-linux'] = {
+            'name': 'lint (ubuntu-latest)', 'job_id': 'lint', 'labels': ['ubuntu-latest'], 'profile': 'linux',
+            'checks': ['unit']}
+        older = copy.deepcopy(LINUX)
+        older['runner']['ImageVersion'] = '20261013.4'
+        self.set_jobs(self.jobs + [dict(JOB_LINUX, id=204, name='lint (ubuntu-latest)')])
+        artifact = dict(ARTIFACT_LINUX, id=304, name='ci-evidence-ci-lint-linux-1')
+        self.set_artifacts(self.artifacts + [artifact])
+        pack(self.data, self.artifacts[-1], dict(EVIDENCE_LINUX, job='lint-linux', runtime=older,
+                                                 coverage={'unit': 'PASS'}))
+        self.roll()
+        self.assertEqual(self.decide(), 'revalidate')
+        self.assertEqual(self.record['revalidation'], {
+            'reason': "test-linux: differs from this runner in ['ImageVersion']; "
+                      "lint-linux: differs from this runner in ['ImageVersion']",
+            'jobs': ['test-linux', 'lint-linux'],
+            'differences': [
+                {'workflow': 'ci', 'job': 'test-linux', 'tools': {},
+                 'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}}},
+                {'workflow': 'ci', 'job': 'lint-linux', 'tools': {},
+                 'runner': {'ImageVersion': {'recorded': '20261013.4', 'release_runner': '20261027.2'}}}]})
+
+    def test_the_jobs_are_every_release_runner_leg(self):
+        linux = self.config['workflows']['ci']['jobs']['test-linux']
+        self.config['workflows']['nightly'] = {
+            'path': '.github/workflows/ci.yml', 'name': 'CI', 'events': ['push'],
+            'skipped_jobs': ['PR sample'],
+            'jobs': {'test-linux': linux, 'test-macos': self.config['workflows']['ci']['jobs']['test-macos']}}
+        self.assertEqual(e.runner_bound_jobs(self.config), ['test-linux'])
+        self.config['workflows']['ci']['jobs']['lint'] = dict(linux, name='lint')
+        self.assertEqual(e.runner_bound_jobs(self.config), ['test-linux', 'lint'])
+
+    def test_a_tool_that_moved_with_the_image_is_revalidated(self):
+        self.config['profiles']['linux'].pop('pins')
+        self.roll(go='go version go1.26.6 linux/amd64')
+        self.assertEqual(self.decide(), 'revalidate')
+        self.assertIn("['ImageVersion', 'go']", self.record['revalidation']['reason'])
+        self.assertEqual(self.record['revalidation']['differences'], [{
+            'workflow': 'ci', 'job': 'test-linux',
+            'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+            'tools': {'go': {'recorded': 'go version go1.26.5 linux/amd64',
+                             'release_runner': 'go version go1.26.6 linux/amd64'}}}])
+
+    def test_the_drift_refuses_without_the_opt_in(self):
+        for revalidation in (None, {'allowed': False}):
+            with self.subTest(revalidation=revalidation):
+                self.setUp()
+                if revalidation is None:
+                    self.config.pop('revalidation')
+                else:
+                    self.config['revalidation'] = revalidation
+                self.roll()
+                self.refuses('runtime-identity')
+                self.assertIn("test-linux: differs from this runner in ['ImageVersion']",
+                              self.record['refusal']['detail'])
+
+    def test_a_validation_run_never_revalidates(self):
+        self.roll()
+        self.assertEqual(self.decide(None, 'validation-only'), 'runtime-identity')
+        self.assertIn('ImageVersion', self.record['refusal']['detail'])
+        for mode in (None, 'reuse', 'revalidate'):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.decide('v1.2.3', mode), 'mode-unknown')
+
+    def test_a_pin_that_does_not_match_refuses(self):
+        self.roll()
+        # A leg held to pins.
+        self.refuses('runtime-identity', lambda: self.evidence(1, lambda p: p['runtime']['tools'].update(
+            go='go version go1.26.4 darwin/arm64')))
+        self.assertIn('pinned', self.record['refusal']['detail'])
+        # A release-runner leg's own pin, in the evidence or on this runner.
+        self.data = world()
+        self.refuses('runtime-identity', lambda: self.evidence(0, lambda p: p['runtime']['tools'].update(
+            go='go version go1.26.4 linux/amd64')))
+        self.assertIn('pinned', self.record['refusal']['detail'])
+        self.data = world()
+        self.roll(go='go version go1.26.6 linux/amd64')
+        self.refuses('runtime-identity')
+        self.assertIn('pinned', self.record['refusal']['detail'])
+
+    def test_a_runtime_record_of_another_shape_refuses(self):
+        self.roll()
+        for change in (lambda p: p['runtime']['runner'].update(green='true'),
+                       lambda p: p['runtime']['runner'].pop('os_release'),
+                       lambda p: p['runtime']['runner'].update(ImageVersion=20261020),
+                       lambda p: p['runtime']['runner'].update(RUNNER_OS='macOS'),
+                       lambda p: p['runtime']['tools'].update(cc='clang'),
+                       lambda p: p.update(runtime=None)):
+            with self.subTest(change=change):
+                self.data = world()
+                self.refuses('runtime-identity', lambda: self.evidence(0, change))
+                self.assertNotIn('differs from this runner', self.record['refusal']['detail'])
+
+    def test_every_other_refusal_wins_over_the_drift(self):
+        cases = {
+            'run-result': lambda: self.both_runs(conclusion='failure'),
+            'run-age': lambda: self.both_runs(run_started_at='2026-10-23T11:59:59Z'),
+            'job-runner': lambda: self.jobs[0].update(runner_group_id=2, runner_group_name='Default'),
+            'artifact-digest': lambda: self.artifacts[0].update(digest='sha256:' + '0' * 64),
+            'input-identity': lambda: self.evidence(0, lambda p: p['inputs'].update({'dev.json': '9' * 40})),
+            'check-coverage': lambda: self.evidence(0, lambda p: p.update(coverage={'audit': 'SKIP'})),
+            'check-result': lambda: self.evidence(0, lambda p: p['coverage'].update(unit='FAIL')),
+            'evidence-identity': lambda: self.evidence(0, lambda p: p.update(green=True)),
+            'tag-commit': lambda: self.data['git/tags/' + TAG_OBJECT]['object'].update(sha=OTHER),
+        }
+        for code, change in cases.items():
+            with self.subTest(code=code):
+                self.setUp()
+                self.roll()
+                self.refuses(code, change)
+
+    def test_a_check_failure_wins_over_a_runtime_refusal_of_the_same_job(self):
+        def both(p):
+            p['coverage'].update(unit='FAIL')
+            p['runtime']['tools'].update(go='go version go1.26.4 linux/amd64')
+        self.refuses('check-result', lambda: self.evidence(0, both))
+
+    def test_a_newer_failed_or_cancelled_applicable_attempt_wins_over_the_drift(self):
+        for conclusion in ('failure', 'cancelled'):
+            # Listed from the start: the newer attempt is the selected one, and it did not succeed.
+            with self.subTest(conclusion=conclusion, when='listed'):
+                self.setUp()
+                self.roll()
+                newer = dict(RUN, id=101, event='workflow_dispatch', conclusion=conclusion,
+                             created_at='2026-10-25T11:00:00Z', run_started_at='2026-10-25T11:00:00Z')
+                self.add_run(newer)
+                self.data['actions/runs/101'] = newer
+                self.refuses('run-result')
+            # Appearing while the evidence is read, or after every workflow was read.
+            for listing_from, code in ((2, 'latest-changed'), (3, 'final-latest-changed')):
+                with self.subTest(conclusion=conclusion, when=code):
+                    self.setUp()
+                    self.roll()
+                    lists = []
+                    def listing(listing_from=listing_from, conclusion=conclusion):
+                        lists.append(1)
+                        runs = [RUN] + ([dict(RUN, id=101, event='workflow_dispatch', conclusion=conclusion,
+                                              run_started_at='2026-10-25T11:59:00Z')]
+                                        if len(lists) >= listing_from else [])
+                        return {'total_count': len(runs), 'workflow_runs': runs}
+                    self.data[RUNS] = listing
+                    self.refuses(code)
+
+    def test_a_new_attempt_or_a_moved_tag_wins_over_the_drift(self):
+        self.roll()
+        reads = []
+        def run():
+            reads.append(1)
+            return dict(RUN, run_attempt=1 if len(reads) == 1 else 2)
+        self.data['actions/runs/100'] = run
+        self.refuses('attempt-changed')
+        self.setUp()
+        self.roll()
+        tags = []
+        def reference():
+            tags.append(1)
+            return {'ref': 'refs/tags/v1.2.3',
+                    'object': {'type': 'tag', 'sha': TAG_OBJECT if len(tags) == 1 else 'u' * 40}}
+        self.data['git/ref/tags/v1.2.3'] = reference
+        self.data['git/tags/' + 'u' * 40] = {'object': {'type': 'commit', 'sha': SHA}}
+        self.refuses('tag-changed')
 
 
 class UnavailableEvidence(Gate):
@@ -939,10 +1144,21 @@ class Configuration(unittest.TestCase):
             'dispatch not an object': lambda c: c.update(dispatch='branch-tip'),
             'dispatch without validates': lambda c: c.update(dispatch={}),
             'dispatch validates the tag': lambda c: c.update(dispatch={'validates': 'tag'}),
+            'revalidation not an object': lambda c: c.update(revalidation=True),
+            'revalidation without allowed': lambda c: c.update(revalidation={}),
+            'revalidation allowed as text': lambda c: c.update(revalidation={'allowed': 'true'}),
+            'revalidation allowed as a number': lambda c: c.update(revalidation={'allowed': 1}),
+            'revalidation allowed null': lambda c: c.update(revalidation={'allowed': None}),
+            'revalidation with another member': lambda c: c.update(revalidation={'allowed': True, 'codes': ['run-age']}),
         }
         for name, change in cases.items():
             with self.subTest(case=name):
                 self.assertEqual(at(change), 'config-invalid')
+        config = copy.deepcopy(CONFIG)
+        config['revalidation'] = {'allowed': 'true'}
+        with self.assertRaises(e.Refusal) as refused:
+            e.check_config(config)
+        self.assertTrue(refused.exception.detail.startswith('config.revalidation'), refused.exception.detail)
 
     def test_optional_members_and_comments_are_accepted(self):
         config = copy.deepcopy(CONFIG)
@@ -956,6 +1172,17 @@ class Configuration(unittest.TestCase):
                               ({'prerelease': False, '$comment': 'x'}, {'validates': 'none', '$comment': 'y'})):
             with self.subTest(tag=tag, dispatch=dispatch):
                 self.assertEqual(self.outcome(dict(config, tag=tag, dispatch=dispatch)), 'valid')
+        for revalidation in ({'allowed': True}, {'allowed': False, '$comment': ['z']}):
+            with self.subTest(revalidation=revalidation):
+                self.assertEqual(self.outcome(dict(config, revalidation=revalidation)), 'valid')
+
+    def test_revalidation_is_off_unless_allowed(self):
+        config = copy.deepcopy(CONFIG)
+        self.assertFalse(e.revalidation_allowed(config))
+        self.assertFalse(e.revalidation_allowed(dict(config, revalidation={'allowed': False})))
+        self.assertTrue(e.revalidation_allowed(dict(config, revalidation={'allowed': True})))
+        template = json.loads((ROOT / 'templates/ci-evidence.json').read_text())
+        self.assertEqual(template['revalidation']['allowed'], False)
 
 
 class KitAdoption(unittest.TestCase):
@@ -987,26 +1214,111 @@ class KitAdoption(unittest.TestCase):
                       '          if-no-files-found: error\n', release)
         self.assertIn('cmp -s lib/release_evidence.py <(sed 2d scripts/dev/release_evidence.py)', release)
 
-    def test_the_publication_path_takes_only_a_reuse_decision(self):
+    def test_the_publication_path_takes_reuse_or_a_passed_revalidation(self):
         release = (ROOT / '.github/workflows/release.yml').read_text()
         self.assertIn('      - name: Reuse exact-commit main CI evidence, or refuse\n        id: gate\n', release)
-        self.assertIn('    outputs:\n      # reuse, refuse or validated; only reuse is a publication decision.\n'
+        self.assertIn('    outputs:\n      # reuse, revalidate, refuse or validated; reuse is a publication decision, '
+                      'and revalidate is\n      # one only with the success of the revalidate job.\n'
                       '      decision: ${{ steps.gate.outputs.decision }}\n', release)
         # The package job, which every publishing job needs, begins with the decision.
         package = release[release.index('\n  package:\n'):release.index('\n  attest-and-draft:\n')]
-        self.assertIn('      - verify\n', package)
+        self.assertIn('      - verify\n      - revalidate\n', package)
         steps = package[package.index('    steps:\n'):]
         head = '    steps:\n      # Only a publication decision'
         self.assertTrue(steps.startswith(head), steps[:200])
         self.assertIn('          DECISION: ${{ needs.verify.outputs.decision }}\n', steps)
+        self.assertIn('          REVALIDATED: ${{ needs.revalidate.result }}\n', steps)
         script = steps[steps.index('        run: |\n') + len('        run: |\n'):steps.index('\n\n')]
         script = '\n'.join(line[10:] for line in script.splitlines())
-        for decision, status in (('reuse', 0), ('validated', 1), ('refuse', 1), ('', 1), ('reuse ', 1)):
-            with self.subTest(decision=decision):
-                result = subprocess.run(['bash', '-c', script], env={'DECISION': decision, 'PATH': os.environ['PATH']},
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, timeout=30)
-                self.assertEqual(result.returncode, status, result.stderr)
+        cases = [(('reuse', 'skipped'), 0), (('revalidate', 'success'), 0)]
+        cases += [((decision, result), 1)
+                  for decision in ('reuse', 'revalidate', 'validated', 'refuse', '', 'reuse ', 'revalidate ')
+                  for result in ('skipped', 'success', 'failure', 'cancelled', '')
+                  if (decision, result) not in (('reuse', 'skipped'), ('revalidate', 'success'))]
+        for (decision, result), status in cases:
+            with self.subTest(decision=decision, revalidated=result):
+                outcome = subprocess.run(['bash', '-c', script],
+                                         env={'DECISION': decision, 'REVALIDATED': result, 'PATH': os.environ['PATH']},
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, timeout=30)
+                self.assertEqual(outcome.returncode, status, outcome.stderr)
+
+    # The fresh job, exactly as it must be: no continue-on-error on the job or a step, no shell
+    # option or command that keeps a failed check list from failing its step, and nothing but the
+    # setup steps and the whole list, run strictly. The checkout line is the one the workflow pins.
+    REVALIDATE_JOB = """  revalidate:
+    name: Check list on the release runner
+    needs: verify
+    if: ${{ needs.verify.outputs.decision == 'revalidate' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # The whole history, as main CI checks it out.
+      - uses: CHECKOUT
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Run the setup steps of dev.json
+        run: scripts/dev/check.sh --setup --strict
+      - name: Run every check of dev.json
+        run: |
+          echo "Release runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          scripts/dev/check.sh --all --strict
+"""
+
+    def test_a_revalidate_decision_runs_the_whole_check_list_on_a_release_runner(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        config = json.loads((ROOT / '.github/ci-evidence.json').read_text())
+        self.assertIs(config['revalidation']['allowed'], True)
+        begin = release.index('\n  revalidate:\n') + 1
+        job = release[begin:release.index('\n\n', begin) + 1]
+        checkout = re.search(r'\n      - uses: (actions/checkout@[0-9a-f]{40} # v\S+)\n', release).group(1)
+        self.assertEqual(job, self.REVALIDATE_JOB.replace('CHECKOUT', checkout))
+        # Nothing in the release workflow is allowed to fail, and no default changes the steps' shell
+        # (bash -e, which ends the step at the failing command).
+        self.assertNotIn('continue-on-error', release)
+        self.assertIsNone(re.search(r'^\s*(defaults|shell):', job, re.M))
+        self.assertIsNone(re.search(r'^defaults:', release, re.M))
+        # The package job reads the fresh job's own result, as the kit reads it.
+        self.assertIn('          REVALIDATED: ${{ needs.revalidate.result }}\n', release)
+        # Every check of dev.json is one the two CI jobs run between them, and the CI jobs run nothing
+        # outside the list: their commands are check.sh and the capture, their actions the checkout
+        # and the upload.
+        manifest = json.loads((ROOT / 'dev.json').read_text())
+        covered = [check for spec in config['workflows']['ci']['jobs'].values() for check in spec['checks']]
+        self.assertEqual(sorted(covered), sorted(row['name'] for row in manifest['checks']))
+        self.assertNotIn('setup', manifest)
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        commands, blocks = [], re.findall(r'\n        run: (\|\n(?:          .*\n)+|.*\n)', ci)
+        self.assertEqual(len(blocks), len(re.findall(r'^\s+(?:- )?run:', ci, re.M)))
+        for block in blocks:
+            lines = block[2:].splitlines() if block.startswith('|\n') else [block]
+            commands += [line.strip() for line in lines if line.strip()]
+        allowed = ('set -o pipefail', 'if [ "$EVENT" = pull_request ]; then', 'else', 'fi',
+                   'scripts/dev/check.sh ', 'python3 scripts/dev/release_evidence.py capture ')
+        self.assertGreaterEqual(len(commands), 10)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(command.startswith(allowed), command)
+        self.assertEqual(sorted(set(re.findall(r'uses: ([a-z-]+/[a-z-]+)@', ci))),
+                         ['actions/checkout', 'actions/upload-artifact'])
+        # Each job after the gate runs only when every job it needs succeeded (revalidate: or was
+        # skipped); none takes a skipped or failed job for a passed one.
+        conditions = {
+            'package': "    if: ${{ !cancelled() && needs.admit.result == 'success' && needs.verify.result == "
+                       "'success' && (needs.revalidate.result == 'success' || needs.revalidate.result == "
+                       "'skipped') }}\n",
+            'attest-and-draft': "    if: ${{ !cancelled() && needs.package.result == 'success' }}\n",
+            'publish': "    if: ${{ !cancelled() && needs.package.result == 'success' && "
+                       "needs.attest-and-draft.result == 'success' }}\n"}
+        for name, condition in conditions.items():
+            with self.subTest(job=name):
+                begin = release.index('\n  %s:\n' % name)
+                block = release[begin:release.index('\n    steps:\n', begin)]
+                self.assertIn(condition, block)
 
 
 class Boundaries(unittest.TestCase):
@@ -1068,6 +1380,9 @@ class RealCLI(unittest.TestCase):
         (cls.root / '.github/ci-evidence.json').write_text(json.dumps(cls.config, indent=2) + '\n')
         (cls.root / '.github/ci-evidence-dispatch.json').write_text(json.dumps(
             dict(cls.config, dispatch={'validates': 'branch-tip'}), indent=2) + '\n')
+        (cls.root / '.github/ci-evidence-revalidate.json').write_text(json.dumps(
+            dict(cls.config, revalidation={'allowed': True}, dispatch={'validates': 'branch-tip'}),
+            indent=2) + '\n')
         (cls.root / '.github/workflows/ci.yml').write_text('name: CI\non: push\njobs:\n  test: {}\n')
         (cls.root / 'dev.json').write_text('{"version": 1, "checks": [{"name": "unit"}, {"name": "audit"}]}\n')
         tool = bin_dir / 'release-evidence-fixture-tool'
@@ -1103,6 +1418,10 @@ class RealCLI(unittest.TestCase):
         ids = subprocess.check_output(['git', 'rev-parse'] + [cls.sha + ':' + path for path in paths],
                                       cwd=cls.root, text=True, stdin=subprocess.DEVNULL).split()
         cls.dispatch_inputs = dict(zip(paths, ids))
+        paths[0] = '.github/ci-evidence-revalidate.json'
+        ids = subprocess.check_output(['git', 'rev-parse'] + [cls.sha + ':' + path for path in paths],
+                                      cwd=cls.root, text=True, stdin=subprocess.DEVNULL).split()
+        cls.revalidate_inputs = dict(zip(paths, ids))
         cls.outputs = Path(scratch.name) / 'step-outputs'
         cls.env = dict(git_env, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
                        FIXTURE_API=str(cls.fixture_api), GITHUB_SHA=cls.sha,
@@ -1218,7 +1537,8 @@ class RealCLI(unittest.TestCase):
         self.assertEqual(self.outputs.read_text(), 'decision=reuse\nmode=publication\n')
         record = json.loads(path.read_text())
         self.assertEqual((record['mode'], record['event'], record['tag'], record['tag_prerelease'],
-                          record['dispatch']), ('publication', 'push', 'v1.2.3', False, 'none'))
+                          record['dispatch'], record['revalidation_allowed'], record['revalidation']),
+                         ('publication', 'push', 'v1.2.3', False, 'none', False, None))
         data = self.world()
         data['actions/runs/100']['conclusion'] = 'failure'
         self.assertEqual(self.cli(data, extra=extra).returncode, 1)
@@ -1264,6 +1584,46 @@ class RealCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         record = json.loads(path.read_text())
         self.assertEqual((record['mode'], record['refusal']['code']), ('publication', 'api-unavailable'))
+        self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=publication\n')
+
+    def test_verify_revalidates_a_rolled_image_where_allowed(self):
+        path, extra = self.record('revalidate.json')
+        extra = extra + ['--config', '.github/ci-evidence-revalidate.json']
+        rolled = {'ImageVersion': '20261027.2'}
+        world = lambda: self.world(dict(self.world_payload(), inputs=self.revalidate_inputs))
+        result = self.cli(world(), extra=extra, env=rolled)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(path.read_text())
+        self.assertEqual(json.loads(result.stdout), record)
+        self.assertEqual((record['decision'], record['refusal'], record['mode'], record['revalidation_allowed']),
+                         ('revalidate', None, 'publication', True))
+        self.assertEqual(record['revalidation'], {
+            'reason': "test: differs from this runner in ['ImageVersion']", 'jobs': ['test'],
+            'differences': [{'workflow': 'ci', 'job': 'test',
+                             'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+                             'tools': {}}]})
+        self.assertEqual(record['workflows']['ci']['jobs']['test']['runtime'], self.runtime)
+        self.assertEqual(self.outputs.read_text(), 'decision=revalidate\nmode=publication\n')
+        self.assertIn("release-evidence: revalidate: test: differs from this runner in "
+                      "['ImageVersion']", result.stderr)
+        # The same image, under the same configuration: reuse.
+        result = self.cli(world(), extra=extra)
+        self.assertEqual((result.returncode, self.outputs.read_text()), (0, 'decision=reuse\nmode=publication\n'))
+        self.assertIsNone(json.loads(path.read_text())['revalidation'])
+        # A dispatch validation run of the same commit on the rolled image: refused.
+        dispatch = dict(rolled, GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main')
+        result = self.cli(world(), extra=extra, env=dispatch)
+        self.assertEqual(result.returncode, 1)
+        record = json.loads(path.read_text())
+        self.assertEqual((record['decision'], record['refusal']['code'], record['mode'], record['revalidation']),
+                         ('refuse', 'runtime-identity', 'validation-only', None))
+        self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=validation-only\n')
+        # Another refusal beside the rolled image: refused with its own code.
+        data = world()
+        data['actions/runs/100']['conclusion'] = 'failure'
+        result = self.cli(data, extra=extra, env=rolled)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(path.read_text())['refusal']['code'], 'run-result')
         self.assertEqual(self.outputs.read_text(), 'decision=refuse\nmode=publication\n')
 
     def test_verify_refuses_a_changed_checkout(self):
