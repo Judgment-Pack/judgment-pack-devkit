@@ -6,8 +6,8 @@ name: Release
 #
 # A person decides there is a release, writes its notes (docs/releases/<tag>.md) and sets the kit's
 # version to the tag's. The workflow holds the tagged commit to the CI evidence main produced for
-# it (docs/ci-evidence.md), or, where only the hosted image moved since, runs the whole check list
-# again on its own runner; packages the kit from it, attests the files, and publishes no release
+# it (docs/ci-evidence.md), or, where only the hosted image moved since, runs dev.json's check list
+# strictly on its own runner; packages the kit from it, attests the files, and publishes no release
 # until a maintainer approves the `release` environment.
 #
 # Not secret before that approval: the files (an artifact of the run), their attestation (recorded
@@ -118,7 +118,7 @@ jobs:
   # ci.yml is not called again here: a refusal stops the release, and the fresh route is the
   # operator's choice. One refusal alone, the release runner's image or tools differing from the
   # evidence's after every other check passed, is decided "revalidate" (the configuration allows
-  # it): the next job runs the whole check list on a release runner. The tag, package and
+  # it): the next job runs dev.json's check list strictly on a release runner. The tag, package and
   # publication gates of the other jobs stay fresh.
   verify:
     name: CI evidence at the tag
@@ -152,8 +152,9 @@ jobs:
           if-no-files-found: error
 
   # Revalidation (docs/ci-evidence.md#revalidation): the evidence of lint and tests is not taken.
-  # Every check of dev.json runs on a release runner at the commit, the whole list that main CI's
-  # two jobs run between them, not only what the evidence covered. A failure stops the release.
+  # The check list dev.json declares, its setup steps and every check, runs strictly (a skipped
+  # step fails) on a release runner at the commit. Main CI's two jobs run nothing outside that
+  # list. A failure stops the release: nothing here masks an exit status.
   revalidate:
     name: Check list on the release runner
     needs: verify
@@ -169,10 +170,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
+      - name: Run the setup steps of dev.json
+        run: scripts/dev/check.sh --setup --strict
       - name: Run every check of dev.json
         run: |
           echo "Release runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
-          scripts/dev/check.sh --all
+          scripts/dev/check.sh --all --strict
 
   # A job that needs a skipped job (revalidate, on a reuse decision) is skipped unless its condition
   # says otherwise, and the default condition of a later job may look past its own needs to the
@@ -194,7 +197,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       # Only a publication decision is packaged and published: reuse (revalidate skipped), or
-      # revalidate once the whole check list passed on the release runner. A validation-only
+      # revalidate once the check list passed strictly on the release runner. A validation-only
       # decision ("validated", docs/ci-evidence.md), a revalidation that did not pass, or no
       # decision stops here.
       - name: Require a publication decision from the gate

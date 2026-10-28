@@ -132,6 +132,13 @@ out=$(CI=true "$kit/templates/check.sh" --manifest "$fixture" --only needs-varia
 expect "under CI a skipped step is a failure" 1 'FAIL +needs-variable +needs JPDEV_FIXTURE_UNSET, which CI must set' "$out" "$s"
 out=$(CI=true "$kit/templates/check.sh" --manifest "$fixture" --only optional-skip 2>/dev/null) && s=0 || s=$?
 expect "under CI a step marked optional may still be skipped" 0 'SKIP +optional-skip' "$out" "$s"
+# --strict, the form a release's fresh run of the list takes: a skip is a failure, optional or not.
+out=$(CI=true "$kit/templates/check.sh" --manifest "$fixture" --only optional-skip --strict 2>/dev/null) && s=0 || s=$?
+expect "under --strict an optional step skipped under CI is a failure" 1 'FAIL +optional-skip +needs JPDEV_FIXTURE_UNSET; --strict counts a skip as a failure' "$out" "$s"
+out=$("$kit/templates/check.sh" --manifest "$fixture" --only needs-variable,optional-skip --all --strict 2>/dev/null) && s=0 || s=$?
+expect "under --strict a skip outside CI is a failure too" 2 '== 0 passed, 2 failed, 0 skipped, 0 not run ==' "$out" "$s"
+out=$(JPDEV_FIXTURE_UNSET=1 CI=true "$kit/templates/check.sh" --manifest "$fixture" --only optional-skip --strict 2>/dev/null) && s=0 || s=$?
+expect "under --strict a step whose variable is set runs" 0 'PASS +optional-skip' "$out" "$s"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --only first,nosuchcheck 2>&1) && s=0 || s=$?
 expect "check.sh --only with an unknown name fails and names it" 2 'no step named nosuchcheck' "$out" "$s"
 out=$("$kit/templates/check.sh" --manifest "$fixture" --skip nosuchcheck 2>&1) && s=0 || s=$?

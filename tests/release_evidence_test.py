@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -176,7 +177,7 @@ class Gate(unittest.TestCase):
             # Only a publication revalidates, with no refusal and the drift recorded.
             self.assertIsNone(record['refusal'])
             self.assertEqual(mode, 'publication')
-            self.assertEqual(set(record['revalidation']), {'reason', 'jobs'})
+            self.assertEqual(set(record['revalidation']), {'reason', 'jobs', 'differences'})
             return record['decision']
         self.assertNotIn('revalidation', record)
         if record['decision'] in ('reuse', 'validated'):
@@ -624,14 +625,41 @@ class Revalidation(Gate):
     def test_a_rolled_image_is_revalidated_with_the_drift_recorded(self):
         self.roll()
         self.assertEqual(self.decide(), 'revalidate')
+        # Both sides of the drift, and only the differing key: the evidence's value and this runner's.
         self.assertEqual(self.record['revalidation'], {
-            'reason': "test-linux: differs from this runner in ['ImageVersion']", 'jobs': ['test-linux']})
+            'reason': "test-linux: differs from this runner in ['ImageVersion']", 'jobs': ['test-linux'],
+            'differences': [{'workflow': 'ci', 'job': 'test-linux',
+                             'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+                             'tools': {}}]})
         # Every other check ran: every leg's evidence is recorded, the tag read before and after.
         ci = self.record['workflows']['ci']
         self.assertEqual(sorted(ci['jobs']), ['test-linux', 'test-macos'])
         self.assertEqual(ci['jobs']['test-linux']['runtime'], LINUX)
         self.assertEqual(self.record['tag_object'], TAG_OBJECT)
         self.assertEqual(self.api.calls.count('git/ref/tags/v1.2.3'), 2)
+
+    def test_two_drifting_legs_are_each_recorded_with_their_own_values(self):
+        self.config['workflows']['ci']['jobs']['lint-linux'] = {
+            'name': 'lint (ubuntu-latest)', 'job_id': 'lint', 'labels': ['ubuntu-latest'], 'profile': 'linux',
+            'checks': ['unit']}
+        older = copy.deepcopy(LINUX)
+        older['runner']['ImageVersion'] = '20261013.4'
+        self.set_jobs(self.jobs + [dict(JOB_LINUX, id=204, name='lint (ubuntu-latest)')])
+        artifact = dict(ARTIFACT_LINUX, id=304, name='ci-evidence-ci-lint-linux-1')
+        self.set_artifacts(self.artifacts + [artifact])
+        pack(self.data, self.artifacts[-1], dict(EVIDENCE_LINUX, job='lint-linux', runtime=older,
+                                                 coverage={'unit': 'PASS'}))
+        self.roll()
+        self.assertEqual(self.decide(), 'revalidate')
+        self.assertEqual(self.record['revalidation'], {
+            'reason': "test-linux: differs from this runner in ['ImageVersion']; "
+                      "lint-linux: differs from this runner in ['ImageVersion']",
+            'jobs': ['test-linux', 'lint-linux'],
+            'differences': [
+                {'workflow': 'ci', 'job': 'test-linux', 'tools': {},
+                 'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}}},
+                {'workflow': 'ci', 'job': 'lint-linux', 'tools': {},
+                 'runner': {'ImageVersion': {'recorded': '20261013.4', 'release_runner': '20261027.2'}}}]})
 
     def test_the_jobs_are_every_release_runner_leg(self):
         linux = self.config['workflows']['ci']['jobs']['test-linux']
@@ -648,6 +676,11 @@ class Revalidation(Gate):
         self.roll(go='go version go1.26.6 linux/amd64')
         self.assertEqual(self.decide(), 'revalidate')
         self.assertIn("['ImageVersion', 'go']", self.record['revalidation']['reason'])
+        self.assertEqual(self.record['revalidation']['differences'], [{
+            'workflow': 'ci', 'job': 'test-linux',
+            'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+            'tools': {'go': {'recorded': 'go version go1.26.5 linux/amd64',
+                             'release_runner': 'go version go1.26.6 linux/amd64'}}}])
 
     def test_the_drift_refuses_without_the_opt_in(self):
         for revalidation in (None, {'allowed': False}):
@@ -1210,23 +1243,68 @@ class KitAdoption(unittest.TestCase):
                                          stderr=subprocess.PIPE, timeout=30)
                 self.assertEqual(outcome.returncode, status, outcome.stderr)
 
+    # The fresh job, exactly as it must be: no continue-on-error on the job or a step, no shell
+    # option or command that keeps a failed check list from failing its step, and nothing but the
+    # setup steps and the whole list, run strictly. The checkout line is the one the workflow pins.
+    REVALIDATE_JOB = """  revalidate:
+    name: Check list on the release runner
+    needs: verify
+    if: ${{ needs.verify.outputs.decision == 'revalidate' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # The whole history, as main CI checks it out.
+      - uses: CHECKOUT
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Run the setup steps of dev.json
+        run: scripts/dev/check.sh --setup --strict
+      - name: Run every check of dev.json
+        run: |
+          echo "Release runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          scripts/dev/check.sh --all --strict
+"""
+
     def test_a_revalidate_decision_runs_the_whole_check_list_on_a_release_runner(self):
         release = (ROOT / '.github/workflows/release.yml').read_text()
         config = json.loads((ROOT / '.github/ci-evidence.json').read_text())
         self.assertIs(config['revalidation']['allowed'], True)
-        job = release[release.index('\n  revalidate:\n'):release.index('\n  package:\n')]
-        self.assertIn('    needs: verify\n'
-                      "    if: ${{ needs.verify.outputs.decision == 'revalidate' }}\n"
-                      '    runs-on: ubuntu-latest\n', job)
-        self.assertIn('    permissions:\n      contents: read\n    steps:\n', job)
-        self.assertIn('          persist-credentials: false\n          ref: ${{ github.sha }}\n', job)
-        # The whole list, not the subset the evidence covered: no --only, --skip or --changed.
-        self.assertRegex(job, r'\n          scripts/dev/check\.sh --all\n')
-        self.assertNotRegex(job, r'--only|--skip|--changed')
-        # Every check of dev.json is one the two CI jobs run between them.
+        begin = release.index('\n  revalidate:\n') + 1
+        job = release[begin:release.index('\n\n', begin) + 1]
+        checkout = re.search(r'\n      - uses: (actions/checkout@[0-9a-f]{40} # v\S+)\n', release).group(1)
+        self.assertEqual(job, self.REVALIDATE_JOB.replace('CHECKOUT', checkout))
+        # Nothing in the release workflow is allowed to fail, and no default changes the steps' shell
+        # (bash -e, which ends the step at the failing command).
+        self.assertNotIn('continue-on-error', release)
+        self.assertIsNone(re.search(r'^\s*(defaults|shell):', job, re.M))
+        self.assertIsNone(re.search(r'^defaults:', release, re.M))
+        # The package job reads the fresh job's own result, as the kit reads it.
+        self.assertIn('          REVALIDATED: ${{ needs.revalidate.result }}\n', release)
+        # Every check of dev.json is one the two CI jobs run between them, and the CI jobs run nothing
+        # outside the list: their commands are check.sh and the capture, their actions the checkout
+        # and the upload.
         manifest = json.loads((ROOT / 'dev.json').read_text())
         covered = [check for spec in config['workflows']['ci']['jobs'].values() for check in spec['checks']]
         self.assertEqual(sorted(covered), sorted(row['name'] for row in manifest['checks']))
+        self.assertNotIn('setup', manifest)
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        commands, blocks = [], re.findall(r'\n        run: (\|\n(?:          .*\n)+|.*\n)', ci)
+        self.assertEqual(len(blocks), len(re.findall(r'^\s+(?:- )?run:', ci, re.M)))
+        for block in blocks:
+            lines = block[2:].splitlines() if block.startswith('|\n') else [block]
+            commands += [line.strip() for line in lines if line.strip()]
+        allowed = ('set -o pipefail', 'if [ "$EVENT" = pull_request ]; then', 'else', 'fi',
+                   'scripts/dev/check.sh ', 'python3 scripts/dev/release_evidence.py capture ')
+        self.assertGreaterEqual(len(commands), 10)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(command.startswith(allowed), command)
+        self.assertEqual(sorted(set(re.findall(r'uses: ([a-z-]+/[a-z-]+)@', ci))),
+                         ['actions/checkout', 'actions/upload-artifact'])
         # Each job after the gate runs only when every job it needs succeeded (revalidate: or was
         # skipped); none takes a skipped or failed job for a passed one.
         conditions = {
@@ -1241,6 +1319,7 @@ class KitAdoption(unittest.TestCase):
                 begin = release.index('\n  %s:\n' % name)
                 block = release[begin:release.index('\n    steps:\n', begin)]
                 self.assertIn(condition, block)
+
 
 class Boundaries(unittest.TestCase):
     def outcome(self, call):
@@ -1519,7 +1598,10 @@ class RealCLI(unittest.TestCase):
         self.assertEqual((record['decision'], record['refusal'], record['mode'], record['revalidation_allowed']),
                          ('revalidate', None, 'publication', True))
         self.assertEqual(record['revalidation'], {
-            'reason': "test: differs from this runner in ['ImageVersion']", 'jobs': ['test']})
+            'reason': "test: differs from this runner in ['ImageVersion']", 'jobs': ['test'],
+            'differences': [{'workflow': 'ci', 'job': 'test',
+                             'runner': {'ImageVersion': {'recorded': '20261020.1', 'release_runner': '20261027.2'}},
+                             'tools': {}}]})
         self.assertEqual(record['workflows']['ci']['jobs']['test']['runtime'], self.runtime)
         self.assertEqual(self.outputs.read_text(), 'decision=revalidate\nmode=publication\n')
         self.assertIn("release-evidence: revalidate: test: differs from this runner in "

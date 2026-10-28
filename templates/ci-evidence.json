@@ -40,8 +40,10 @@
       "Optional; absent is {\"allowed\": false}: evidence whose runner image or tools differ from what the",
       "release runner resolves refuses (runtime-identity). true: a publication refused for that alone, under a",
       "release-runner profile and after every other check passed, decides \"revalidate\": that evidence is not",
-      "taken, and the release workflow must run the whole check list on its own runner and publish only on that",
-      "run's success. A pin that does not match, a dispatch validation run and every other refusal still refuse."
+      "taken, and the release workflow must run the check list dev.json declares on its own runner, strictly",
+      "(check.sh --setup --strict, then --all --strict), and publish only on that run's success. Work a CI job",
+      "does outside the check list is not re-run: run it in the release workflow (fresh_at_release) or keep this",
+      "false. A pin that does not match, a dispatch validation run and every other refusal still refuse."
     ],
     "allowed": false
   },
