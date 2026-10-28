@@ -6,9 +6,9 @@ name: Release
 #
 # A person decides there is a release, writes its notes (docs/releases/<tag>.md) and sets the kit's
 # version to the tag's. The workflow holds the tagged commit to the CI evidence main produced for
-# it (docs/ci-evidence.md), packages the kit from it,
-# attests the files, and publishes no release until a maintainer approves the `release`
-# environment.
+# it (docs/ci-evidence.md), or, where only the hosted image moved since, runs the whole check list
+# again on its own runner; packages the kit from it, attests the files, and publishes no release
+# until a maintainer approves the `release` environment.
 #
 # Not secret before that approval: the files (an artifact of the run), their attestation (recorded
 # in a public log when made), and the draft (visible to those who can write to the repository).
@@ -116,7 +116,10 @@ jobs:
 
   # The CI evidence main already produced at this exact commit, or a refusal (docs/ci-evidence.md).
   # ci.yml is not called again here: a refusal stops the release, and the fresh route is the
-  # operator's choice. The tag, package and publication gates of the other jobs stay fresh.
+  # operator's choice. One refusal alone, the release runner's image or tools differing from the
+  # evidence's after every other check passed, is decided "revalidate" (the configuration allows
+  # it): the next job runs the whole check list on a release runner. The tag, package and
+  # publication gates of the other jobs stay fresh.
   verify:
     name: CI evidence at the tag
     needs: admit
@@ -126,7 +129,8 @@ jobs:
       contents: read
       actions: read
     outputs:
-      # reuse, refuse or validated; only reuse is a publication decision.
+      # reuse, revalidate, refuse or validated; reuse is a publication decision, and revalidate is
+      # one only with the success of the revalidate job.
       decision: ${{ steps.gate.outputs.decision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,11 +151,41 @@ jobs:
           path: ${{ runner.temp }}/release-evidence.json
           if-no-files-found: error
 
+  # Revalidation (docs/ci-evidence.md#revalidation): the evidence of lint and tests is not taken.
+  # Every check of dev.json runs on a release runner at the commit, the whole list that main CI's
+  # two jobs run between them, not only what the evidence covered. A failure stops the release.
+  revalidate:
+    name: Check list on the release runner
+    needs: verify
+    if: ${{ needs.verify.outputs.decision == 'revalidate' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # The whole history, as main CI checks it out.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Run every check of dev.json
+        run: |
+          echo "Release runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          scripts/dev/check.sh --all
+
+  # A job that needs a skipped job (revalidate, on a reuse decision) is skipped unless its condition
+  # says otherwise, and the default condition of a later job may look past its own needs to the
+  # skipped one. This job and the two after it therefore state their condition: every job they
+  # need succeeded, revalidate here having succeeded or been skipped. The first step holds the
+  # decision itself.
   package:
     name: Package
     needs:
       - admit
       - verify
+      - revalidate
+    if: ${{ !cancelled() && needs.admit.result == 'success' && needs.verify.result == 'success' && (needs.revalidate.result == 'success' || needs.revalidate.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -159,14 +193,20 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      # Only a publication decision is packaged and published: a validation-only decision
-      # ("validated", docs/ci-evidence.md) or no decision stops here.
+      # Only a publication decision is packaged and published: reuse (revalidate skipped), or
+      # revalidate once the whole check list passed on the release runner. A validation-only
+      # decision ("validated", docs/ci-evidence.md), a revalidation that did not pass, or no
+      # decision stops here.
       - name: Require a publication decision from the gate
         shell: bash
         env:
           DECISION: ${{ needs.verify.outputs.decision }}
+          REVALIDATED: ${{ needs.revalidate.result }}
         run: |
-          [ "${DECISION}" = "reuse" ] || { echo "The release evidence gate decided '${DECISION:-nothing}'; only reuse is a publication decision (docs/ci-evidence.md)" >&2; exit 1; }
+          case "${DECISION}/${REVALIDATED}" in
+            reuse/skipped | revalidate/success) ;;
+            *) echo "The release evidence gate decided '${DECISION:-nothing}', and the check list on the release runner is '${REVALIDATED:-nothing}'; only reuse, or revalidate with that check list passed, is a publication decision (docs/ci-evidence.md)" >&2; exit 1 ;;
+          esac
 
       - name: Check out the commit the run was started for
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -254,6 +294,7 @@ jobs:
   attest-and-draft:
     name: Attest and draft release
     needs: package
+    if: ${{ !cancelled() && needs.package.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -339,6 +380,7 @@ jobs:
     needs:
       - package
       - attest-and-draft
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs.attest-and-draft.result == 'success' }}
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 10

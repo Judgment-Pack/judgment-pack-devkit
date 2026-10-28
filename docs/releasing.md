@@ -98,7 +98,10 @@ Every job works on the commit the run was started for, by its digest, not on the
    A newer failed, cancelled or running attempt is never searched past, and the tag must name the
    commit before and after. The decision record, reuse or refusal, is in the log and kept as the
    run's `release-evidence-<attempt>` artifact. `ci.yml` is not run again; a refusal stops the
-   release, and the [fresh route](ci-evidence.md#the-fresh-route) is the operator's choice. Main CI
+   release, and the [fresh route](ci-evidence.md#the-fresh-route) is the operator's choice. When the
+   hosted image or its tools are all that differ from the evidence's, the gate decides `revalidate`
+   instead, and the `Check list on the release runner` job runs every check of `dev.json` at the
+   commit before anything is packaged ([revalidation](ci-evidence.md#revalidation)). Main CI
    and pull request CI keep every check and required status.
 3. **Packages the kit.** It refuses unless `bin/jpdev --version` prints `jpdev <version>`, line 2 of
    each vendored script names `<tag>`, and each matches its source. Then

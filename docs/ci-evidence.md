@@ -4,7 +4,9 @@ A release used to run the CI workflow again at a commit main had already passed.
 evidence gate lets a release workflow take the CI evidence main already produced at the **exact**
 release commit instead, and refuse when that evidence is missing, partial, stale, unreadable or
 different. A refusal stops the release; it never becomes a success, and nothing runs CI again on
-its own. The fresh route is the operator's choice ([below](#the-fresh-route)).
+its own. The fresh route is the operator's choice ([below](#the-fresh-route)). One refusal alone, a
+hosted image rolled since the CI run, can instead send the release through a fresh run of the whole
+check list on its own runner, where the repository opts in ([revalidation](#revalidation)).
 
 The gate is `lib/release_evidence.py` (devkit issue #37). A repository vendors it as
 `scripts/dev/release_evidence.py`, the library with the kit release on line 2, beside its
@@ -89,11 +91,13 @@ evidence, and `verify` has no input for one.
 release commit and `RELEASE_TAG` its tag. It reads only this repository's REST API through
 `gh api` (no other host, no cache), writes the [decision record](#the-decision-record) to standard
 output and to `--output`, prints one line, `release-evidence: reuse: ...`,
-`release-evidence: validated, validation-only and never a publication decision: ...` or
-`release-evidence: refuse: CODE: detail`, and exits 0 on reuse or validated, 1 otherwise. Where
-`GITHUB_OUTPUT` is set it also writes the step outputs `decision` (`reuse`, `validated` or
-`refuse`) and `mode` (`publication`, `validation-only`, or empty when refused before the mode was
-known): a job that packages or publishes proceeds on `decision` `reuse` alone, never on the step's
+`release-evidence: validated, validation-only and never a publication decision: ...`,
+`release-evidence: revalidate: JOB: differs from this runner in [...]; ...` or
+`release-evidence: refuse: CODE: detail`, and exits 0 on reuse, validated or revalidate, 1
+otherwise. Where `GITHUB_OUTPUT` is set it also writes the step outputs `decision` (`reuse`,
+`revalidate`, `validated` or `refuse`) and `mode` (`publication`, `validation-only`, or empty when
+refused before the mode was known): a job that packages or publishes proceeds on `decision` `reuse`,
+or on `revalidate` once the whole check list has passed on the release runner, never on the step's
 exit status.
 
 ## Configuration
@@ -111,6 +115,7 @@ naming it); `"$comment"` is allowed and ignored in any object whose members are 
 | `fresh_at_release` | optional: the checks the release workflow runs itself, tag-sensitive ones among them; carried into the decision record so the log says what the gate does not stand for |
 | `tag.prerelease` | optional, default `false` (`tag` absent): `false` admits `vMAJOR.MINOR.PATCH` only; `true` also admits a SemVer prerelease suffix ([below](#prerelease-tags-and-dispatch-runs)) |
 | `dispatch.validates` | optional, default `none` (`dispatch` absent): a `workflow_dispatch` run of the release workflow does not use the gate and is refused; `branch-tip`: it validates the trusted branch's tip, validation-only ([below](#prerelease-tags-and-dispatch-runs)) |
+| `revalidation.allowed` | optional, default `false` (`revalidation` absent): a release runner whose image or tools differ from the evidence's refuses (`runtime-identity`); `true`: a publication refused for that alone decides `revalidate`, and the release workflow runs the whole check list itself ([below](#revalidation)) |
 | `profiles.<name>.platform` | `RUNNER_OS`, `RUNNER_ARCH`, optionally `ImageOS`: what the job's runner must report |
 | `profiles.<name>.tools` | tool name to the command that prints its identity (`["go", "version"]`); each output is recorded and must not be empty |
 | `profiles.<name>.compare` | `release-runner`: the release job resolves the same profile on its own runner, and the evidence must match it exactly (image, version, OS release, every tool); for a leg on the release job's platform. `pins`: the recorded tools must equal `pins` exactly; for a leg the release job cannot resolve itself (another OS or architecture) |
@@ -195,9 +200,10 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
 
 - **Toolchain and image.** Under `release-runner`, a CI image or tool version that is not what the
   release job's runner resolves now refuses (`runtime-identity`, naming what differs): a newer
-  hosted image since the CI run means fresh evidence is needed. Under `pins`, the recorded tool
-  output must equal the pin, the platform must match, and `ImageOS` when pinned; the image
-  version is recorded but not compared.
+  hosted image since the CI run means fresh evidence is needed, or, where the configuration allows
+  it, a fresh run of the check list on the release runner ([revalidation](#revalidation)). Under
+  `pins`, the recorded tool output must equal the pin, the platform must match, and `ImageOS` when
+  pinned; the image version is recorded but not compared.
 - **Dependency and integration pins.** A pin file in `inputs` (a lock file, a companion version
   file) is bound by the commit. An input fetched at run time without a pin ("latest") is not
   reproducible and cannot be reused: pin it, or keep that check fresh at release.
@@ -209,14 +215,18 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
 
 ## The decision record
 
-`verify` writes one JSON record, decision `reuse` or `refuse`, to standard output (the release
-log) and to `--output`; the kit's release keeps the file as the run's `release-evidence-<attempt>`
-artifact. It holds:
+`verify` writes one JSON record, whatever the decision, to standard output (the release log) and
+to `--output`; the kit's release keeps the file as the run's `release-evidence-<attempt>` artifact.
+It holds:
 
-- `decision` (`reuse`, `validated` or `refuse`), and `refusal` (`code` and a short `detail`) or
-  `null`;
+- `decision` (`reuse`, `revalidate`, `validated` or `refuse`), and `refusal` (`code` and a short
+  `detail`) or `null`;
+- `revalidation`: on a `revalidate` decision, `reason` (each job whose recorded runtime differs
+  from the release runner's, and what differs) and `jobs` (the job keys whose profile compares with
+  the release runner); `null` otherwise;
 - `mode` (`publication`, `validation-only`, or `null` when refused before it was known), `event`
-  (the run's `GITHUB_EVENT_NAME`), `tag_prerelease` and `dispatch` (the configured rules);
+  (the run's `GITHUB_EVENT_NAME`), `tag_prerelease`, `dispatch` and `revalidation_allowed` (the
+  configured rules);
 - `repository`, `repository_id`, `source` (the commit), `tag` (`null` in a validation-only run),
   `tag_object` (a publication only), `branch`, `max_age_hours`, `checked_at`, `fresh_at_release`;
 - `inputs`: each recorded path's git object id;
@@ -252,6 +262,67 @@ repository metadata, ids, timestamps and tool versions only; command errors are 
 `capture-run`, `check-infrastructure`, `check-duplicate`, `check-coverage`, `check-result` and the
 checkout and runner codes above.
 
+## Revalidation
+
+GitHub rolls a hosted image under the same label, so a runner minutes after the CI run can resolve
+another `ImageVersion`, and other tool versions with it; under `release-runner` that difference
+refuses (`runtime-identity`) though nothing at the commit changed. With
+`"revalidation": {"allowed": true}` a publication refused for that alone decides `revalidate`, and
+the release workflow runs the repository's check list itself before anything is packaged:
+
+```yaml
+jobs:
+  verify:
+    # ... the gate step, id: gate, as above
+    outputs:
+      decision: ${{ steps.gate.outputs.decision }}
+
+  revalidate:
+    needs: verify
+    if: ${{ needs.verify.outputs.decision == 'revalidate' }}
+    runs-on: ubuntu-latest  # the platform of the release-runner profiles
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@<pinned commit>
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - run: scripts/dev/check.sh --all  # or jpdev check --all: the whole list
+
+  package:
+    needs: [verify, revalidate]
+    # revalidate is skipped on reuse: this job, and every later job, states its condition.
+    if: ${{ !cancelled() && needs.verify.result == 'success' && (needs.revalidate.result == 'success' || needs.revalidate.result == 'skipped') }}
+    steps:
+      - env:
+          DECISION: ${{ needs.verify.outputs.decision }}
+          REVALIDATED: ${{ needs.revalidate.result }}
+        run: |
+          case "${DECISION}/${REVALIDATED}" in
+            reuse/skipped | revalidate/success) ;;
+            *) echo "no publication decision: ${DECISION}/${REVALIDATED}" >&2; exit 1 ;;
+          esac
+  # A later publishing job: if: ${{ !cancelled() && needs.package.result == 'success' }}
+```
+
+**The bound.** The route admits one thing: a publication whose every other check of the contract
+has passed, in order (repository, branch, tag, workflow, selection, the run's result, age, jobs,
+artifacts, inputs, coverage, the attempt and selection read again, every workflow's final
+selection and the tag read at the end), and whose evidence differs only in a `release-runner`
+profile's recorded runner image or tool identity from what the release runner resolves; the
+runtime identity is each job's last check, and that difference is raised after the final reads,
+so any other refusal wins. It never admits a pin that does not match (under `pins`, or a
+`release-runner` profile's own pin, in the evidence or on the release runner), a runtime record of
+another shape or platform, another refusal code, or a validation-only dispatch run (each refuses
+as before), and it is off unless the configuration says `true`. The decision artifact records the
+drift: `revalidation.reason` names each job and what differs, `revalidation.jobs` the jobs whose
+evidence is bound to the release runner, each job's recorded runtime is under `workflows`, and
+`refusal` is `null`. The evidence of those jobs is not taken: the fresh run is the whole check list
+(`scripts/dev/check.sh --all` or `jpdev check --all`) on a release runner, not the subset the
+evidence covered, and a publishing job proceeds only on that run's success. A `pins` leg (another
+OS or architecture) is not run again; its evidence has passed every check, its pins included.
+
 ## The fresh route
 
 A refusal stops that release run. The operator reads the refusal and chooses; no workflow
@@ -261,7 +332,8 @@ dispatches or re-runs anything automatically, and no automatic CI is turned off.
    - re-run **all** jobs of the main CI run at the commit
      (`gh run rerun <run id> --repo <owner/name>`; a failed-jobs-only re-run leaves the other jobs'
      evidence in an earlier attempt and refuses). This also works after main moved on, and is the
-     route for `run-age` and a changed hosted image (`runtime-identity`);
+     route for `run-age` and a changed hosted image (`runtime-identity`), which a repository that
+     allows [revalidation](#revalidation) does not need for the image alone;
    - or, when main still names the commit, dispatch the CI workflow on main
      (`gh workflow run ci.yml --ref main --repo <owner/name>`) where `workflow_dispatch` is a
      configured event.
@@ -285,12 +357,14 @@ Inventory of the checks at the release commit:
 | --- | --- | --- | --- |
 | `diff-check`, `local-paths`, `agent-docs`, `bash-n`, `duplication`, `json`, `shellcheck` | `lint`, run | `CI at the tag / lint`, run again (duplication came after v0.7.0) | taken from `lint`'s evidence |
 | `tests` (`tests/run.sh`) | `tests`, run | `CI at the tag / tests`, run again | taken from `tests`' evidence |
-| toolchain | ubuntu-latest image, its bash, git, python3, go, shellcheck, rsync | the same image family, not compared | compared with the release runner (`release-runner`) |
+| toolchain | ubuntu-latest image, its bash, git, python3, go, shellcheck, rsync | the same image family, not compared | compared with the release runner (`release-runner`); a difference alone is revalidated: every check runs on a release runner |
 | tag, notes, environment reviewer, version and copies, package run, checksums, attestation, draft and published identity | not run | run | run (unchanged) |
 
 The kit's tags stay `vMAJOR.MINOR.PATCH` (no `tag` member) and its release workflow has no
-dispatch trigger (no `dispatch` member). Its package job begins by requiring the gate's `decision`
-output to be `reuse`.
+dispatch trigger (no `dispatch` member). It allows revalidation: on a `revalidate` decision its
+`Check list on the release runner` job runs `scripts/dev/check.sh --all` at the commit. Its package
+job begins by requiring the gate's `decision` output to be `reuse`, or `revalidate` with that job's
+success.
 
 No `ci.yml` check depends on the tag: the release-specific checks are in the release workflow
 and stay there. The kit has no dependency or integration pins (standard library only).

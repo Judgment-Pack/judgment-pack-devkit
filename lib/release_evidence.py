@@ -8,7 +8,10 @@ verify   Runs in the release workflow. Reads this repository's Actions API for t
          workflow's runs at the exact release commit, selects the newest applicable attempt,
          verifies it, and writes the decision record, reuse or refuse, to standard output and to a
          file. Missing, partial, stale, unreadable or different evidence refuses: nothing here
-         turns unavailable evidence into success.
+         turns unavailable evidence into success. Where the configuration allows revalidation, a
+         publication whose one refusal is the release runner's drift decides revalidate instead:
+         the release-runner jobs' evidence is not taken, and the release workflow runs the whole
+         check list fresh on its own runner.
 
 The configuration is .github/ci-evidence.json, schema 2 (docs/ci-evidence.md). There is no input
 for a local evidence file, another API host, a green flag or an age override.
@@ -66,6 +69,17 @@ class Refusal(Exception):
         super().__init__(code)
         self.code = code
         self.detail = detail
+
+
+class Drift(Refusal):
+    """runtime-identity because a "release-runner" profile's recorded runner or tool identity
+    differs from what this runner resolves (a hosted image rolled under the same label), and for
+    no other reason. verify raises it only after every other check has passed; a publication that
+    allows revalidation decides revalidate on it, and every other run refuses with its code."""
+
+    def __init__(self, detail, jobs):
+        super().__init__('runtime-identity', detail)
+        self.jobs = jobs
 
 
 def need(condition, code, detail=''):
@@ -186,7 +200,8 @@ def check_config(config):
             fail(where, 'a path without . or .. segments is required')
 
     fields(config, 'config', ['schema', 'repository', 'branch', 'max_age_hours', 'inputs',
-                              'profiles', 'workflows'], ['fresh_at_release', 'tag', 'dispatch'])
+                              'profiles', 'workflows'],
+           ['fresh_at_release', 'tag', 'dispatch', 'revalidation'])
     if config['schema'] != SCHEMA or type(config['schema']) is not int:
         fail('config.schema', 'must be %d' % SCHEMA)
     text(config['repository'], 'config.repository', REPOSITORY)
@@ -206,6 +221,10 @@ def check_config(config):
     fields(dispatch, 'config.dispatch', ['validates'])
     if dispatch['validates'] not in DISPATCH:
         fail('config.dispatch.validates', 'one of %s is required' % (DISPATCH,))
+    revalidation = config.get('revalidation', {'allowed': False})
+    fields(revalidation, 'config.revalidation', ['allowed'])
+    if type(revalidation['allowed']) is not bool:
+        fail('config.revalidation.allowed', 'true or false is required')
 
     named(config['profiles'], 'config.profiles')
     for name, profile in config['profiles'].items():
@@ -265,6 +284,12 @@ def check_config(config):
 def tag_grammar(config):
     """vMAJOR.MINOR.PATCH, and a SemVer prerelease only where the configuration allows one."""
     return TAG_PRERELEASE if config.get('tag', {}).get('prerelease') is True else TAG
+
+
+def revalidation_allowed(config):
+    """Whether a publication may decide revalidate on the release runner's drift: only where
+    revalidation.allowed is true. Absent, it is false."""
+    return config.get('revalidation', {}).get('allowed') is True
 
 
 def release_mode(config):
@@ -565,7 +590,11 @@ def read_artifact(api, artifact, run, job):
 
 
 def check_runtime(profile, recorded, here, job_key):
-    """Toolchain identity: the pinned values, and for "release-runner" what this runner resolves."""
+    """Toolchain identity. The record's shape, the platform, the tool set and every pin, in the
+    record or on this runner, refuse here (a pin that does not match is a configuration fact, not
+    an image roll). For "release-runner", a record that differs from what this runner resolves is
+    returned as the drift's detail, None when it is the same: verify refuses it only after every
+    other check has passed."""
     need(isinstance(recorded, dict) and set(recorded) == {'runner', 'tools'} and
          isinstance(recorded['runner'], dict) and isinstance(recorded['tools'], dict),
          'runtime-identity', job_key + ': no runtime record')
@@ -578,15 +607,23 @@ def check_runtime(profile, recorded, here, job_key):
     for tool, pin in sorted(profile.get('pins', {}).items()):
         need(tools[tool] == pin, 'runtime-identity', '%s: %s is %r, pinned %r' % (
             job_key, tool, tools[tool], pin))
-    if profile['compare'] == 'release-runner':
+    if profile['compare'] == 'release-runner' and recorded != here:
+        for tool, pin in sorted(profile.get('pins', {}).items()):
+            need(here['tools'].get(tool) == pin, 'runtime-identity',
+                 "%s: this runner's %s is %r, pinned %r" % (job_key, tool, here['tools'].get(tool), pin))
+        # A drift is a record of the same shape with other values; another set of runner keys, or a
+        # value that is not text, is a malformed record and refuses here.
+        need(set(runner) == set(here['runner']) and
+             all(isinstance(value, str) for value in list(runner.values()) + list(tools.values())),
+             'runtime-identity', job_key + ": a runtime record of another shape than this runner's")
         changed = sorted(key for key in set(runner) | set(here['runner'])
                          if runner.get(key) != here['runner'].get(key))
         changed += sorted(tool for tool in tools if tools[tool] != here['tools'].get(tool))
-        need(recorded == here, 'runtime-identity', '%s: differs from this runner in %s' % (
-            job_key, changed))
+        return '%s: differs from this runner in %s' % (job_key, changed)
+    return None
 
 
-def verify_workflow(api, config, source, key, now, here, trail):
+def verify_workflow(api, config, source, key, now, here, trail, drift):
     workflow, branch = config['workflows'][key], config['branch']
     resolved = api.get('actions/workflows/' + quote(Path(workflow['path']).name, safe=''))
     need(resolved['path'] == workflow['path'] and resolved['name'] == workflow['name'] and
@@ -631,12 +668,16 @@ def verify_workflow(api, config, source, key, now, here, trail):
              'input-identity', '%s: %s' % (job_key, sorted(
                  path for path in set(source['inputs']) | set(recorded_inputs or {})
                  if (recorded_inputs or {}).get(path) != source['inputs'].get(path))))
+        validate_coverage(spec, payload.get('coverage'))
+        need(payload == expected, 'evidence-identity', job_key + ': unexpected members')
+        # The runtime identity is the job's last check, so that any other refusal of the job wins
+        # over it; a drift from this runner is only collected, for the end of verify.
         profile = config['profiles'][spec['profile']]
         if profile['compare'] == 'release-runner' and spec['profile'] not in here:
             here[spec['profile']] = runtime(profile)
-        check_runtime(profile, payload.get('runtime'), here.get(spec['profile']), job_key)
-        validate_coverage(spec, payload.get('coverage'))
-        need(payload == expected, 'evidence-identity', job_key + ': unexpected members')
+        differs = check_runtime(profile, payload.get('runtime'), here.get(spec['profile']), job_key)
+        if differs:
+            drift.append(differs)
         trail['jobs'][job_key] = {
             'name': spec['name'], 'job_id': job['id'], 'result': job['conclusion'],
             'labels': job['labels'], 'started_at': job['started_at'],
@@ -657,6 +698,16 @@ def verify_workflow(api, config, source, key, now, here, trail):
     return resolved['id'], run
 
 
+def runner_bound_jobs(config):
+    """The job keys, in configuration order, whose profile compares with the release runner."""
+    jobs = []
+    for workflow in config['workflows'].values():
+        for job_key, spec in workflow['jobs'].items():
+            if config['profiles'][spec['profile']]['compare'] == 'release-runner' and job_key not in jobs:
+                jobs.append(job_key)
+    return jobs
+
+
 def verify(api, config, source, release_tag, now, record):
     """A publication is held to its tag; a validation-only run reads no tag: its commit is the
     trusted branch's tip the dispatch ran for, and its decision is never a publication's."""
@@ -670,16 +721,21 @@ def verify(api, config, source, release_tag, now, record):
     if publication:
         first_tag = tag_object(api, release_tag, source['source'], grammar)
         record['tag_object'] = first_tag
-    here, chosen = {}, {}
+    here, chosen, drift = {}, {}, []
     for key in config['workflows']:
         record['workflows'][key] = {}
-        chosen[key] = verify_workflow(api, config, source, key, now, here, record['workflows'][key])
+        chosen[key] = verify_workflow(api, config, source, key, now, here, record['workflows'][key],
+                                      drift)
     # Collection takes time: every workflow's selection, then the tag, once more at the end.
     for key, (workflow_id, run) in chosen.items():
         final = select(api, source, config['workflows'][key], workflow_id, branch)
         need(selection(final) == selection(run), 'final-latest-changed', key)
     if publication:
         need(tag_object(api, release_tag, source['source'], grammar) == first_tag, 'tag-changed')
+    # Last of all, after every other check has passed: the release runner's drift from the
+    # evidence's image or tools.
+    if drift:
+        raise Drift('; '.join(drift), runner_bound_jobs(config))
 
 
 # Malformed or missing API data or files: a refusal like any other, never a success.
@@ -698,13 +754,21 @@ def refusal_of(error):
 
 def decide(api, config, source, release_tag, now, record):
     """The decision is reuse only for a publication whose every check of verify passed; a
-    validation-only run that passes is validated, which no publication takes."""
+    validation-only run that passes is validated, which no publication takes. A publication whose
+    one refusal is the release runner's drift (Drift: every other check has passed) decides
+    revalidate where the configuration allows it: the release-runner jobs' evidence is not taken,
+    and the release workflow must run the whole check list on its own runner before anything is
+    published. Every other refusal, a validation-only run's drift included, refuses."""
     try:
         need(record.get('mode') in PASSED, 'mode-unknown', str(record.get('mode')))
         passed = PASSED[record['mode']]
         verify(api, config, source, release_tag, now, record)
     except (Refusal,) + MALFORMED as error:
-        record['decision'], record['refusal'] = 'refuse', refusal_of(error)
+        if isinstance(error, Drift) and record['mode'] == 'publication' and revalidation_allowed(config):
+            record['decision'], record['refusal'] = 'revalidate', None
+            record['revalidation'] = {'reason': error.detail, 'jobs': error.jobs}
+        else:
+            record['decision'], record['refusal'] = 'refuse', refusal_of(error)
     else:
         record['decision'], record['refusal'] = passed, None
     return record
@@ -712,7 +776,8 @@ def decide(api, config, source, release_tag, now, record):
 
 def write_outputs(record):
     """The decision and mode as step outputs, for the jobs after the gate: a publishing job
-    proceeds on decision "reuse" alone. Both values are from fixed sets."""
+    proceeds on decision "reuse", or on "revalidate" once the whole check list has passed on the
+    release runner. Both values are from fixed sets."""
     name = os.environ.get('GITHUB_OUTPUT')
     if name:
         with open(name, 'a', encoding='utf-8') as output:
@@ -722,8 +787,8 @@ def write_outputs(record):
 def run_verify(args):
     now = dt.datetime.now(dt.timezone.utc)
     output = Path(args.output or 'release-evidence.json')
-    record = {'schema': SCHEMA, 'decision': 'refuse', 'refusal': None, 'mode': None,
-              'event': os.environ.get('GITHUB_EVENT_NAME', ''),
+    record = {'schema': SCHEMA, 'decision': 'refuse', 'refusal': None, 'revalidation': None,
+              'mode': None, 'event': os.environ.get('GITHUB_EVENT_NAME', ''),
               'tag': os.environ.get('RELEASE_TAG', ''), 'checked_at': now.isoformat(),
               'workflows': {}}
     try:
@@ -733,7 +798,8 @@ def run_verify(args):
                       max_age_hours=config['max_age_hours'],
                       fresh_at_release=config.get('fresh_at_release', []),
                       tag_prerelease=tag_grammar(config) is TAG_PRERELEASE,
-                      dispatch=config.get('dispatch', {}).get('validates', 'none'))
+                      dispatch=config.get('dispatch', {}).get('validates', 'none'),
+                      revalidation_allowed=revalidation_allowed(config))
         record['mode'] = release_mode(config)
     except (Refusal,) + MALFORMED as error:
         record['refusal'] = refusal_of(error)
@@ -757,6 +823,11 @@ def run_verify(args):
                   '%s run %s attempt %s' % (key, value['run_id'], value['attempt'])
                   for key, value in record['workflows'].items()), record['source'], output),
               file=sys.stderr)
+        return 0
+    if record['decision'] == 'revalidate':
+        print('release-evidence: revalidate: %s; every other check passed, and only the whole check list '
+              'run on the release runner may admit this publication (decision record: %s)' % (
+                  record['revalidation']['reason'], output), file=sys.stderr)
         return 0
     if record['decision'] != 'reuse':
         refusal = record['refusal']
