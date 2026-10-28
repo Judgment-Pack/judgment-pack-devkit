@@ -190,6 +190,15 @@ whatever happened to be merged. The release review, the tag and the release note
 (`docs/releases/vX.Y.Z.md`) belong to the same decision. Attested release artifacts are
 verified before the release is announced.
 
+A pre-release takes one of two SemVer forms, and the form states what it is. `vX.Y.Z-rc.N` is a
+release candidate: the complete milestone, published as a pre-release so adopters can read it,
+and graduated to `vX.Y.Z` with no code change when nothing is found. `vX.Y.Z-alpha.N` is a scoped
+pre-release cut for a named consumer, feature-incomplete by declaration: its notes say which
+milestone it does not complete and for whom it was cut; it never graduates, and the final's notes
+list what the alphas carried. The release evidence gate accepts both forms under
+`tag.prerelease: true`; neither is marked latest. A repository's `releasing.md` names the form it
+uses where it describes its tags.
+
 ## Public text
 
 Tracked files, commit messages, pull request bodies and issue comments carry no
