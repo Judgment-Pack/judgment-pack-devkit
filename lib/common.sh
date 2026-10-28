@@ -3,7 +3,7 @@
 # Sourced by bin/jpdev and lib/wrap.sh. Needs bash 5.
 
 # shellcheck disable=SC2034  # read by bin/jpdev
-JPDEV_VERSION=0.11.0
+JPDEV_VERSION=0.12.0
 
 # Every setting jpdev reads. The environment wins over the config file, the config file over the default.
 JPDEV_SETTINGS=(JPDEV_SCRATCH JPDEV_LOCK JPDEV_NODE_RSS_MB JPDEV_NODE_TIMEOUT_S JPDEV_GO_ULIMIT_KB
