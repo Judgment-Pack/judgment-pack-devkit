@@ -35,7 +35,7 @@ or their protection and evidence configurations must change together in adoption
 | [judgment-pack-exchange `4fc303651498`](https://github.com/Judgment-Pack/judgment-pack-exchange/tree/4fc303651498a9a01810c2fcccfe484d4b0f78bd) | `ci.yml`: entries Linux x64. `release.yml`: evidence, fresh entries verification, package. | `scripts/dev/release_evidence.py`, schema 2. Tree-only checks compare with the release evidence runner; tag/history-sensitive entry checks run again at the tag and cannot be replaced by main evidence. |
 
 The judgment-pack-devkit baseline is
-[`dd362e3f45b6f481ff3f5bd948c18184201b66e77`](https://github.com/Judgment-Pack/judgment-pack-devkit/tree/dd362e3f45b6f481ff3f5bd948c18184201b66e77):
+[`d362e3f45b6f481ff3f5bd948c18184201b66e77`](https://github.com/Judgment-Pack/judgment-pack-devkit/tree/d362e3f45b6f481ff3f5bd948c18184201b66e77):
 Linux lint/tests produce schema-2 evidence; release can explicitly revalidate after
 an image-only mismatch. That opt-in fresh route is not silent evidence reuse.
 The common verifier is `lib/release_evidence.py`; adoption does not replace the
