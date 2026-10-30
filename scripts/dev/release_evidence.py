@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # from judgment-pack-devkit v0.12.0 (lib/release_evidence.py)
-"""release_evidence.py capture|verify: reuse the CI evidence main produced at the release commit.
+"""release_evidence.py capture|verify|reuse: reuse the CI evidence main produced at the release commit.
 
 capture  Runs in a CI job on the trusted branch, after the job's checks. Writes evidence.json for
          the job's artifact: the commit, its input identities, the runner and tool identity and
@@ -22,6 +22,12 @@ image identity its standard GitHub-hosted runner reports: the image name and ver
 architecture, the OS-release digest, the tools and the actions its workflow names, under one
 variant of the manifest. It is a reported image identity, not a pinned VM image: the gate compares
 what runners report and refuses a missing, unexpected or changed identity.
+
+reuse    Where a workflow configures pull_request_reuse, runs in a CI job on a push to the trusted
+         branch, before its checks, and decides which of the job's tree-only checks the evidence of
+         the merged pull request's newest run already covers (reuse), or none (fresh). Capture on
+         the pull request records that evidence; capture on the branch records what was reused, and
+         verify admits it again at the release. Tree equality alone never qualifies a result.
 """
 import argparse
 import datetime as dt
@@ -98,6 +104,15 @@ LOCAL_ACTIONS = 32
 # The manifest revisions this gate ships (templates/runner-identity.json), by the SHA-256 of their
 # exact bytes: the policy is shared, so a locally edited manifest is not one of them.
 IDENTITY_REVISIONS = {'1': '333c3ffe1f5d93a863298133ad15717c384146797c0cc88f2463a361e1e358da'}
+
+# Pull-request-to-branch reuse (pull_request_reuse): the merge ref a pull request run checks out,
+# the environment variable names a configuration may bind, and what a branch job records of the
+# pull request evidence it reused.
+PULL_MERGE_REF = re.compile(r'refs/pull/([1-9][0-9]*)/merge')
+ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,127}')
+REUSED = ('pull_request', 'head', 'merge', 'base', 'tree', 'run_id', 'attempt', 'job_id', 'artifact',
+          'checks')
+PLAN_SCHEMA = 1
 
 
 class Refusal(Exception):
@@ -306,12 +321,19 @@ def check_config(config):
     named(config['workflows'], 'config.workflows')
     for key, workflow in config['workflows'].items():
         where = 'config.workflows.' + key
-        fields(workflow, where, ['path', 'name', 'events', 'jobs'], ['skipped_jobs'])
+        fields(workflow, where, ['path', 'name', 'events', 'jobs'], ['skipped_jobs', 'pull_request_reuse'])
         path(workflow['path'], where + '.path', WORKFLOW_PATH)
         text(workflow['name'], where + '.name')
         texts(workflow['events'], where + '.events', empty=False)
         if not set(workflow['events']) <= set(EVENTS):
             fail(where + '.events', 'only %s are trusted-branch events' % (EVENTS,))
+        reuse = workflow.get('pull_request_reuse')
+        if reuse is not None:
+            fields(reuse, where + '.pull_request_reuse', ['checks'], ['environment'])
+            texts(reuse['checks'], where + '.pull_request_reuse.checks', empty=False)
+            texts(reuse.get('environment', []), where + '.pull_request_reuse.environment', ENV_NAME)
+            if 'push' not in workflow['events']:
+                fail(where + '.pull_request_reuse', 'reuse is planned on a push: events must hold push')
         texts(workflow.get('skipped_jobs', []), where + '.skipped_jobs')
         named(workflow['jobs'], where + '.jobs')
         names = list(workflow.get('skipped_jobs', []))
@@ -613,7 +635,7 @@ def required_checks(spec):
     return result
 
 
-def coverage(spec, logs):
+def log_rows(logs):
     result = {}
     for kind, path in logs:
         text = Path(path).read_text(encoding='utf-8')
@@ -622,56 +644,147 @@ def coverage(spec, logs):
             key = ('setup:' if kind == 'setup' else '') + name
             need(key not in result, 'check-duplicate', key)
             result[key] = status
-    validate_coverage(spec, result)
     return result
 
 
-def validate_coverage(spec, result):
+def coverage(spec, logs, reused=()):
+    """The job's check results from its logs; a check the pull request evidence covered (reused)
+    must not have run here, and is recorded as REUSED."""
+    result = log_rows(logs)
+    need(not set(reused) & set(result), 'check-coverage', 'reused checks also ran: %s' % sorted(
+        set(reused) & set(result)))
+    result.update({name: 'REUSED' for name in reused})
+    validate_coverage(spec, result, reused)
+    return result
+
+
+def validate_coverage(spec, result, reused=()):
+    """Every required check, each PASS, SKIP where the configuration allows it, or REUSED where the
+    job's pull request evidence covered it."""
     need(isinstance(result, dict), 'check-coverage')
     required = set(required_checks(spec))
     need(set(result) == required, 'check-coverage', 'missing %s, unexpected %s' % (
         sorted(required - set(result)), sorted(set(result) - required)))
     for name, status in sorted(result.items()):
+        need(status == 'PASS' or (status == 'SKIP' and name in spec.get('optional_skips', [])) or
+             (status == 'REUSED' and name in reused), 'check-result', '%s %s' % (status, name))
+
+
+def validate_scoped_coverage(spec, result):
+    """A pull request job's results: the checks its scoped selection ran, each a required check of
+    the job, PASS or a permitted SKIP. A check it did not run is absent, and covers nothing."""
+    need(isinstance(result, dict), 'check-coverage')
+    required = set(required_checks(spec))
+    need(set(result) <= required, 'check-coverage', 'unexpected %s' % sorted(set(result) - required))
+    for name, status in sorted(result.items()):
         need(status == 'PASS' or (status == 'SKIP' and name in spec.get('optional_skips', [])),
              'check-result', '%s %s' % (status, name))
 
 
+def environment_of(workflow):
+    """The SHA-256 of each configured environment variable's value on this runner, null when unset:
+    the flags a check reads from its environment, bound without being written down."""
+    names = workflow.get('pull_request_reuse', {}).get('environment', [])
+    return {name: digest(os.environ[name].encode()) if name in os.environ else None for name in names}
+
+
 def evidence(source, workflow_key, workflow, job_key, run_id, attempt, event, branch, runtime_identity,
-             check_results, identity=None):
+             check_results, identity=None, ref=None, extra=None):
     """The one shape of a job's evidence: what capture writes and what verify expects. Under the
-    identity policy it also holds the job's identity record."""
+    identity policy it also holds the job's identity record; under pull_request_reuse, extra holds
+    the environment and either what was reused (a branch run) or the pull request (its run)."""
     result = dict(source, workflow=workflow_key, workflow_path=workflow['path'],
                   workflow_name=workflow['name'], job=job_key, run_id=run_id, attempt=attempt,
-                  event=event, ref='refs/heads/' + branch, runtime=runtime_identity,
+                  event=event, ref=ref or 'refs/heads/' + branch, runtime=runtime_identity,
                   coverage=check_results)
     if identity is not None:
         result['identity'] = identity
+    result.update(extra or {})
     return result
 
 
-def capture(config, source, workflow_key, job_key, logs):
+def capture_context(config, source, workflow_key, job_key):
+    """The configured workflow and job this capture or plan runs in, and the ref it runs on: the
+    trusted branch, or, on a pull_request run of a workflow that configures pull_request_reuse, the
+    pull request's merge ref into the trusted branch. The running workflow file is the configured
+    one, at the commit being recorded."""
     workflow = config['workflows'].get(workflow_key)
     need(workflow is not None, 'capture-job', 'no workflow %s' % workflow_key)
     spec = workflow['jobs'].get(job_key)
     need(spec is not None, 'capture-job', 'no job %s' % job_key)
-    ref = 'refs/heads/' + config['branch']
-    need(os.environ.get('GITHUB_REF') == ref, 'capture-ref')
-    need(os.environ.get('GITHUB_EVENT_NAME') in workflow['events'], 'capture-event')
+    event = os.environ.get('GITHUB_EVENT_NAME')
+    if event == 'pull_request':
+        need('pull_request_reuse' in workflow, 'capture-event', 'the workflow configures no pull_request_reuse')
+        ref = os.environ.get('GITHUB_REF', '')
+        need(PULL_MERGE_REF.fullmatch(ref) and os.environ.get('GITHUB_BASE_REF') == config['branch'],
+             'capture-ref', 'a pull request into %s, at its merge ref' % config['branch'])
+    else:
+        ref = 'refs/heads/' + config['branch']
+        need(os.environ.get('GITHUB_REF') == ref, 'capture-ref')
+        need(event in workflow['events'], 'capture-event')
     need(os.environ.get('GITHUB_JOB') == spec['job_id'], 'capture-job')
-    # The workflow file that is running is the configured one, at the commit being recorded.
     need(os.environ.get('GITHUB_WORKFLOW_REF') == '%s/%s@%s' % (source['repository'],
                                                                 workflow['path'], ref) and
          os.environ.get('GITHUB_WORKFLOW_SHA') == source['source'], 'capture-workflow')
     run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
     need(positive(run_id) and positive(attempt), 'capture-run')
+    return workflow, spec, event, ref, run_id, attempt
+
+
+def job_runtime(config, source, workflow_key, spec):
+    """This runner's runtime for the job's profile and, under the identity policy, its identity."""
     profile = config['profiles'][spec['profile']]
     identity, variant = None, None
     if 'identity' in config:
         context = identity_context(config, source['source'])
         identity, variant = job_identity(context, profile, workflow_key), context['variants'][profile['variant']]
-    return evidence(source, workflow_key, workflow, job_key, run_id, attempt,
-                    os.environ['GITHUB_EVENT_NAME'], config['branch'],
-                    runtime(profile, variant), coverage(spec, logs), identity)
+    return runtime(profile, variant), identity
+
+
+def merge_parents(sha):
+    """The pull request merge commit's tree and parents, base first, then the pull request head."""
+    parents = git('rev-parse', sha + '^@', code='capture-merge').decode().split()
+    need(len(parents) == 2 and all(SHA.fullmatch(parent) for parent in parents), 'capture-merge',
+         'the checkout is not a merge commit with its two parents (fetch-depth 2 at least)')
+    tree = git('rev-parse', sha + '^{tree}', code='capture-merge').decode().strip()
+    return tree, parents
+
+
+def read_plan(path, source, workflow_key, job_key, attempt):
+    """The reuse decision this job's reuse step wrote: the checks it covered and their provenance,
+    or nothing on a fresh decision. The plan is the same job's, for the same commit and attempt."""
+    if path is None:
+        return None
+    plan = json.loads(Path(path).read_text(encoding='utf-8'))
+    need(isinstance(plan, dict) and plan.get('schema') == PLAN_SCHEMA and
+         (plan.get('source'), plan.get('workflow'), plan.get('job'), plan.get('attempt')) ==
+         (source['source'], workflow_key, job_key, attempt) and plan.get('decision') in ('reuse', 'fresh'),
+         'capture-plan', 'the reuse plan is not this job\'s')
+    return plan['reused'] if plan['decision'] == 'reuse' else None
+
+
+def capture(config, source, workflow_key, job_key, logs, plan_path=None):
+    workflow, spec, event, ref, run_id, attempt = capture_context(config, source, workflow_key, job_key)
+    runtime_identity, identity = job_runtime(config, source, workflow_key, spec)
+    extra = None
+    if event == 'pull_request':
+        # The pull request's evidence: the checks its scoped selection ran, the merge commit's tree
+        # and parents, and the environment; never evidence for a release by itself.
+        need(plan_path is None, 'capture-plan', 'a pull request run plans no reuse')
+        tree, parents = merge_parents(source['source'])
+        results = log_rows(logs)
+        validate_scoped_coverage(spec, results)
+        extra = {'pull_request': {'number': int(PULL_MERGE_REF.fullmatch(ref).group(1)), 'base': parents[0],
+                                  'head': parents[1], 'tree': tree},
+                 'environment': environment_of(workflow)}
+    else:
+        reused = read_plan(plan_path, source, workflow_key, job_key, attempt)
+        need(reused is None or 'pull_request_reuse' in workflow, 'capture-plan')
+        results = coverage(spec, logs, reused['checks'] if reused else ())
+        if 'pull_request_reuse' in workflow:
+            extra = {'environment': environment_of(workflow), 'reused': reused}
+    return evidence(source, workflow_key, workflow, job_key, run_id, attempt, event, config['branch'],
+                    runtime_identity, results, identity, ref, extra)
 
 
 # --- the release's verification -----------------------------------------------------------------
@@ -873,14 +986,218 @@ def check_runtime(profile, recorded, here, job_key):
     return None
 
 
-def verify_workflow(api, config, source, key, now, here, trail, drift, identity=None):
-    """identity, under the policy: the context at the commit and the runtimes collected per variant
-    and profile."""
-    workflow, branch = config['workflows'][key], config['branch']
+def resolve_workflow(api, workflow):
     resolved = api.get('actions/workflows/' + quote(Path(workflow['path']).name, safe=''))
     need(resolved['path'] == workflow['path'] and resolved['name'] == workflow['name'] and
          positive(resolved['id']) and resolved['state'] == 'active', 'workflow-identity',
          '%s is %s (%s)' % (workflow['path'], resolved.get('name'), resolved.get('state')))
+    return resolved
+
+
+# --- pull-request-to-branch reuse --------------------------------------------------------------
+
+def pull_request_of(api, config, source):
+    """The commit through the API (its tree and parents) and the one pull request of this
+    repository merged into the trusted branch as this commit. A fork's pull request is never
+    reused."""
+    sha = source['source']
+    commit = api.get('git/commits/' + sha)
+    need(commit['sha'] == sha and commit['parents'], 'reuse-pull-request', 'commit %s' % sha)
+    pulls = api.get('commits/%s/pulls?per_page=100' % sha)
+    need(isinstance(pulls, list) and len(pulls) < 100, 'reuse-pull-request', 'the pull request listing')
+    merged = [pull for pull in pulls if pull['merge_commit_sha'] == sha and pull['merged_at']]
+    need(len(merged) == 1, 'reuse-pull-request', '%d pull requests were merged as %s' % (len(merged), sha))
+    pull = merged[0]
+    need(pull['state'] == 'closed' and pull['base']['ref'] == config['branch'] and
+         pull['base']['repo']['id'] == source['repository_id'] and positive(pull['number']) and
+         SHA.fullmatch(pull['head']['sha']), 'reuse-pull-request',
+         'pull request %s is not merged into %s here' % (pull.get('number'), config['branch']))
+    need((pull['head']['repo'] or {}).get('id') == source['repository_id'], 'reuse-pull-request',
+         'pull request %s comes from another repository' % pull['number'])
+    return pull, commit
+
+
+def admit_pull_request(api, config, source, key, job_key, now):
+    """The evidence of one job of the merged pull request's newest run, admitted for this commit,
+    or a reuse-* refusal: no backward search, no older attempt. A refusal that is not reuse-* (the
+    API, an artifact) is reuse-unavailable."""
+    try:
+        return admitted_pull_request(api, config, source, key, job_key, now)
+    except Refusal as error:
+        if error.code.startswith('reuse-'):
+            raise
+        raise Refusal('reuse-unavailable', '%s: %s' % (error.code, error.detail)) from error
+    except MALFORMED as error:
+        raise Refusal('reuse-unavailable', type(error).__name__) from error
+
+
+def admitted_pull_request(api, config, source, key, job_key, now):
+    workflow, branch = config['workflows'][key], config['branch']
+    spec, allowed = workflow['jobs'][job_key], workflow['pull_request_reuse']['checks']
+    pull, commit = pull_request_of(api, config, source)
+    number, head, head_ref = pull['number'], pull['head']['sha'], pull['head']['ref']
+    resolved = resolve_workflow(api, workflow)
+
+    def newest():
+        runs = api.pages('actions/workflows/%d/runs?head_sha=%s' % (resolved['id'], head), 'workflow_runs')
+        applicable = [run for run in runs if run.get('event') == 'pull_request' and
+                      run.get('head_branch') == head_ref and
+                      (run.get('head_repository') or {}).get('id') == source['repository_id']]
+        need(applicable, 'reuse-run-missing', 'no pull_request run of %s at %s' % (workflow['path'], head))
+        unfinished = [run['id'] for run in applicable if run['status'] != 'completed']
+        need(not unfinished, 'reuse-unfinished', 'pull request runs %s have not completed' % unfinished)
+        # The newest attempt, whatever its result: never an older green one.
+        return max(applicable, key=attempt_order)
+
+    chosen = newest()
+    need(chosen['conclusion'] == 'success', 'reuse-result', 'the newest pull request run %s attempt %s: %s' % (
+        chosen['id'], chosen['run_attempt'], chosen['conclusion']))
+    run = api.get('actions/runs/%d' % chosen['id'])
+    need(run['repository']['id'] == source['repository_id'] and
+         run['head_repository']['id'] == source['repository_id'] and run['head_sha'] == head and
+         run['head_branch'] == head_ref and run['event'] == 'pull_request' and
+         run['workflow_id'] == resolved['id'] and run['path'] == workflow['path'] and
+         positive(run['id']) and positive(run['run_attempt']), 'reuse-evidence', 'run %s' % run.get('id'))
+    need(selection(run) == selection(chosen), 'reuse-race', 'run %d' % run['id'])
+    age = (now - timestamp(run['run_started_at'])).total_seconds()
+    need(0 <= age <= config['max_age_hours'] * 3600, 'reuse-age',
+         'pull request run %d started %.1f hours ago; the limit is %d' % (run['id'], age / 3600,
+                                                                          config['max_age_hours']))
+    jobs = api.pages('actions/runs/%d/attempts/%d/jobs' % (run['id'], run['run_attempt']), 'jobs')
+    matching = [job for job in jobs if job['name'] == spec['name']]
+    need(len(matching) == 1, 'reuse-job', '%d jobs named %s' % (len(matching), spec['name']))
+    job = matching[0]
+    need(job['run_id'] == run['id'] and job['run_attempt'] == run['run_attempt'] and job['head_sha'] == head and
+         job['workflow_name'] == workflow['name'] and job['labels'] == spec['labels'] and
+         (job['runner_group_id'], job['runner_group_name']) == HOSTED, 'reuse-job', spec['name'])
+    need(job['status'] == 'completed' and job['conclusion'] == 'success', 'reuse-result',
+         '%s: %s' % (spec['name'], job['conclusion']))
+    name = 'ci-evidence-%s-%s-%d' % (key, job_key, run['run_attempt'])
+    artifacts = [artifact for artifact in api.pages('actions/runs/%d/artifacts' % run['id'], 'artifacts')
+                 if artifact['name'] == name]
+    need(len(artifacts) == 1, 'reuse-artifact', '%d artifacts named %s' % (len(artifacts), name))
+    payload = read_artifact(api, artifacts[0], run, job)
+
+    # What the job says it checked out is held to the API: a merge commit of this pull request's
+    # head onto the commit's own first parent, with the commit's tree.
+    merge, recorded = payload.get('source'), payload.get('pull_request')
+    need(isinstance(merge, str) and SHA.fullmatch(merge) and isinstance(recorded, dict) and
+         set(recorded) == {'number', 'base', 'head', 'tree'} and recorded['number'] == number and
+         recorded['head'] == head, 'reuse-evidence', job_key + ': the pull request record')
+    merged = api.get('git/commits/' + merge)
+    need(merged['sha'] == merge and [parent['sha'] for parent in merged['parents']] == [recorded['base'], head] and
+         merged['tree']['sha'] == recorded['tree'], 'reuse-evidence',
+         '%s: the merge commit %s is not that pull request\'s' % (job_key, merge))
+    need(recorded['tree'] == commit['tree']['sha'], 'reuse-tree', '%s: the pull request tested tree %s, %s is %s' % (
+        job_key, recorded['tree'], source['source'], commit['tree']['sha']))
+    need(recorded['base'] == commit['parents'][0]['sha'], 'reuse-base',
+         '%s: the pull request was tested on %s, %s follows %s' % (
+             job_key, recorded['base'], source['source'], commit['parents'][0]['sha']))
+    need(payload.get('inputs') == source['inputs'], 'reuse-inputs', job_key)
+    try:
+        validate_scoped_coverage(spec, payload.get('coverage'))
+    except Refusal as error:
+        raise Refusal('reuse-coverage', '%s: %s' % (job_key, error.detail)) from error
+    environment = payload.get('environment')
+    need(isinstance(environment, dict) and set(environment) == set(
+        workflow['pull_request_reuse'].get('environment', [])), 'reuse-evidence', job_key + ': the environment')
+    identity = None
+    if 'identity' in config:
+        identity = job_identity(identity_context(config, source['source']),
+                                config['profiles'][spec['profile']], key)
+        need(payload.get('identity') == identity, 'reuse-runtime', job_key + ': the identity record')
+    base = {'schema': SCHEMA, 'repository': source['repository'], 'repository_id': source['repository_id'],
+            'source': merge, 'inputs': source['inputs']}
+    expected = evidence(base, key, workflow, job_key, run['id'], run['run_attempt'], 'pull_request', branch,
+                        payload.get('runtime'), payload.get('coverage'), identity,
+                        'refs/pull/%d/merge' % number, {'pull_request': recorded, 'environment': environment})
+    need(payload == expected, 'reuse-evidence', job_key + ': the evidence is not of that run, job and shape')
+
+    # Still the newest attempt, unchanged, after collection.
+    fields = ('id', 'run_attempt', 'status', 'conclusion', 'run_started_at', 'updated_at')
+    after = api.get('actions/runs/%d' % run['id'])
+    need({field: after.get(field) for field in fields} == {field: run.get(field) for field in fields} and
+         selection(newest()) == selection(run), 'reuse-race', 'run %d' % run['id'])
+    return {'pull_request': number, 'head': head, 'merge': merge, 'base': recorded['base'],
+            'tree': recorded['tree'], 'run_id': run['id'], 'attempt': run['run_attempt'], 'job_id': job['id'],
+            'artifact': {'id': artifacts[0]['id'], 'name': name, 'digest': artifacts[0]['digest']},
+            'run_started_at': run['run_started_at'], 'runtime': payload['runtime'], 'environment': environment,
+            'covered': sorted(name for name, status in payload['coverage'].items()
+                              if status == 'PASS' and name in allowed)}
+
+
+def plan(api, config, source, key, job_key, now):
+    """The reuse decision of a branch job before its checks: reuse, with the checks the merged pull
+    request's newest run passed that this job may take, or fresh, with the reason. Only a first
+    attempt of a push run is planned: a re-run or a dispatch, the fresh route, runs the whole list."""
+    record = {'schema': PLAN_SCHEMA, 'decision': 'fresh', 'refusal': None, 'source': source['source'],
+              'workflow': key, 'job': job_key, 'attempt': None, 'covered': [], 'reused': None,
+              'checked_at': now.isoformat()}
+    try:
+        workflow, spec, event, _, _, attempt = capture_context(config, source, key, job_key)
+        record['attempt'] = attempt
+        need('pull_request_reuse' in workflow, 'reuse-off', 'the workflow configures no pull_request_reuse')
+        need(event == 'push' and attempt == 1, 'reuse-event',
+             'only the first attempt of a push is planned; this is %s attempt %d' % (event, attempt))
+        admitted = admit_pull_request(api, config, source, key, job_key, now)
+        here, _ = job_runtime(config, source, key, spec)
+        need(admitted['runtime'] == here, 'reuse-runtime', 'the pull request job ran with another image or tools')
+        need(admitted['environment'] == environment_of(workflow), 'reuse-environment',
+             'the pull request job ran with another environment')
+        required = set(required_checks(spec))
+        covered = [name for name in admitted['covered'] if name in required]
+        need(covered, 'reuse-coverage', 'the pull request run passed none of this job\'s reusable checks')
+        record.update(decision='reuse', covered=covered,
+                      reused=dict({field: admitted[field] for field in REUSED if field != 'checks'},
+                                  checks=covered))
+    except (Refusal,) + MALFORMED as error:
+        record.update(decision='fresh', covered=[], reused=None, refusal=refusal_of(error))
+    return record
+
+
+def check_reused(workflow, payload, job_key):
+    """A branch job's record of its environment and of what it reused: the shape, and the checks,
+    each one the configuration lets a pull request cover. The checks it reused, or none."""
+    reuse = workflow['pull_request_reuse']
+    environment, reused = payload.get('environment'), payload.get('reused')
+    need('reused' in payload, 'evidence-identity', job_key + ': no reused member')
+    need(isinstance(environment, dict) and set(environment) == set(reuse.get('environment', [])) and
+         all(value is None or (isinstance(value, str) and DIGEST.fullmatch(value))
+             for value in environment.values()), 'evidence-identity', job_key + ': the environment')
+    if reused is None:
+        return ()
+    need(isinstance(reused, dict) and set(reused) == set(REUSED) and isinstance(reused['checks'], list) and
+         reused['checks'] and len(set(reused['checks'])) == len(reused['checks']) and
+         set(reused['checks']) <= set(reuse['checks']), 'reuse-coverage',
+         job_key + ': the reused record or its checks')
+    return reused['checks']
+
+
+def readmit(api, config, source, key, job_key, now, run, payload):
+    """At the release, the pull request evidence a branch job reused, admitted again: the same
+    selection, run, job and artifact, still the newest attempt, still fresh enough, still covering
+    each reused check, with the branch job's own image, tools and environment."""
+    reused = payload['reused']
+    need(run['event'] == 'push' and run['run_attempt'] == 1, 'reuse-event',
+         'run %d attempt %d (%s) recorded a reuse' % (run['id'], run['run_attempt'], run['event']))
+    admitted = admit_pull_request(api, config, source, key, job_key, now)
+    changed = sorted(field for field in REUSED if field != 'checks' and admitted[field] != reused[field])
+    need(not changed, 'reuse-changed', '%s: %s differ from what the branch job reused' % (job_key, changed))
+    need(set(reused['checks']) <= set(admitted['covered']), 'reuse-coverage',
+         '%s: %s were not passed by the pull request run' % (
+             job_key, sorted(set(reused['checks']) - set(admitted['covered']))))
+    need(admitted['runtime'] == payload['runtime'], 'reuse-runtime',
+         job_key + ': the pull request job ran with another image or tools')
+    need(admitted['environment'] == payload['environment'], 'reuse-environment',
+         job_key + ': the pull request job ran with another environment')
+    return dict(reused, run_started_at=admitted['run_started_at'])
+
+
+def verify_workflow(api, config, source, key, now, here, trail, drift, identity=None):
+    """identity, under the policy: the context at the commit and the runtimes collected per variant
+    and profile."""
+    workflow, branch = config['workflows'][key], config['branch']
+    resolved = resolve_workflow(api, workflow)
     trail.update(workflow_id=resolved['id'], path=workflow['path'], name=workflow['name'],
                  events=workflow['events'])
     chosen = select(api, source, workflow, resolved['id'], branch, trail)
@@ -911,7 +1228,9 @@ def verify_workflow(api, config, source, key, now, here, trail, drift, identity=
         payload = read_artifact(api, matching[0], run, job)
         expected = evidence(source, key, workflow, job_key, run['id'], run['run_attempt'], run['event'],
                             branch, payload.get('runtime'), payload.get('coverage'),
-                            payload.get('identity') if identity else None)
+                            payload.get('identity') if identity else None, None,
+                            {'environment': payload.get('environment'), 'reused': payload.get('reused')}
+                            if 'pull_request_reuse' in workflow else None)
         for field in ('schema', 'repository', 'repository_id', 'source', 'workflow', 'workflow_path',
                       'workflow_name', 'job', 'run_id', 'attempt', 'event', 'ref'):
             need(payload.get(field) == expected[field], 'evidence-identity',
@@ -921,7 +1240,8 @@ def verify_workflow(api, config, source, key, now, here, trail, drift, identity=
              'input-identity', '%s: %s' % (job_key, sorted(
                  path for path in set(source['inputs']) | set(recorded_inputs or {})
                  if (recorded_inputs or {}).get(path) != source['inputs'].get(path))))
-        validate_coverage(spec, payload.get('coverage'))
+        reused = check_reused(workflow, payload, job_key) if 'pull_request_reuse' in workflow else ()
+        validate_coverage(spec, payload.get('coverage'), reused)
         profile = config['profiles'][spec['profile']]
         variant = None
         if identity:
@@ -932,6 +1252,9 @@ def verify_workflow(api, config, source, key, now, here, trail, drift, identity=
                 ('%s/%s' % (key, job_key), payload['runtime']))
             variant = identity['context']['variants'][profile['variant']]
         need(payload == expected, 'evidence-identity', job_key + ': unexpected members')
+        # A check this job took from the merged pull request's run stands only if that evidence is
+        # admitted again now (a refusal, never a drift).
+        reused_trail = readmit(api, config, source, key, job_key, now, run, payload) if reused else None
         # The runtime identity is the job's last check, so that any other refusal of the job wins
         # over it; a drift from this runner is only collected, for the end of verify.
         if profile['compare'] == 'release-runner' and spec['profile'] not in here:
@@ -945,6 +1268,8 @@ def verify_workflow(api, config, source, key, now, here, trail, drift, identity=
             'completed_at': job['completed_at'],
             'artifact': {'id': matching[0]['id'], 'name': name, 'digest': matching[0]['digest']},
             'runtime': payload['runtime'], 'coverage': payload['coverage']}
+        if 'pull_request_reuse' in workflow:
+            trail['jobs'][job_key]['reused'] = reused_trail
     trail['skipped_jobs'] = {name: by_name[name]['conclusion']
                              for name in workflow.get('skipped_jobs', [])}
 
@@ -1129,7 +1454,7 @@ def run_capture(args):
         config, source = source_context(args.config)
         result = capture(config, source, args.workflow, args.job,
                          [('check', path) for path in args.check_log] +
-                         [('setup', path) for path in args.setup_log])
+                         [('setup', path) for path in args.setup_log], args.reuse_plan)
         Path(args.output or 'evidence.json').write_text(json.dumps(result, sort_keys=True) + '\n',
                                                         encoding='utf-8')
         return 0
@@ -1140,17 +1465,55 @@ def run_capture(args):
         return 1
 
 
+def run_reuse(args):
+    """The reuse decision, written whatever it is; a fresh decision is never a failure. Only a
+    record or step outputs that cannot be written fail the step."""
+    now = dt.datetime.now(dt.timezone.utc)
+    output = Path(args.output or 'reuse-plan.json')
+    try:
+        config, source = source_context(args.config)
+    except (Refusal,) + MALFORMED as error:
+        record = {'schema': PLAN_SCHEMA, 'decision': 'fresh', 'refusal': refusal_of(error),
+                  'source': os.environ.get('GITHUB_SHA', ''), 'workflow': args.workflow, 'job': args.job,
+                  'attempt': None, 'covered': [], 'reused': None, 'checked_at': now.isoformat()}
+    else:
+        record = plan(API(source['repository']), config, source, args.workflow, args.job, now)
+    text = json.dumps(record, indent=2, sort_keys=True)
+    print(text)
+    try:
+        output.write_text(text + '\n', encoding='utf-8')
+        name = os.environ.get('GITHUB_OUTPUT')
+        if name:
+            # Fixed values: a decision, and check names from the configuration.
+            with open(name, 'a', encoding='utf-8') as handle:
+                handle.write('decision=%s\ncovered=%s\n' % (record['decision'], ','.join(record['covered'])))
+    except OSError:
+        print('release-evidence: reuse: the plan or the step outputs could not be written', file=sys.stderr)
+        return 1
+    if record['decision'] == 'reuse':
+        print('release-evidence: reuse: %s from pull request %s run %s attempt %s; every other check runs '
+              '(plan: %s)' % (','.join(record['covered']), record['reused']['pull_request'],
+                              record['reused']['run_id'], record['reused']['attempt'], output), file=sys.stderr)
+    else:
+        print('release-evidence: fresh: %s%s; every check runs (plan: %s)' % (
+            record['refusal']['code'], ': ' + record['refusal']['detail'] if record['refusal']['detail'] else '',
+            output), file=sys.stderr)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='release_evidence.py', description=__doc__.splitlines()[0])
-    parser.add_argument('mode', choices=['capture', 'verify'])
+    parser.add_argument('mode', choices=['capture', 'verify', 'reuse'])
     parser.add_argument('--config', default='.github/ci-evidence.json')
-    parser.add_argument('--workflow', help='capture: the workflow key of the configuration')
-    parser.add_argument('--job', help='capture: the job key (one per matrix leg)')
+    parser.add_argument('--workflow', help='capture, reuse: the workflow key of the configuration')
+    parser.add_argument('--job', help='capture, reuse: the job key (one per matrix leg)')
     parser.add_argument('--check-log', action='append', default=[])
     parser.add_argument('--setup-log', action='append', default=[])
-    parser.add_argument('--output', help='capture: evidence.json; verify: release-evidence.json')
+    parser.add_argument('--reuse-plan', help='capture on the branch: the plan the job\'s reuse step wrote')
+    parser.add_argument('--output', help='capture: evidence.json; verify: release-evidence.json; '
+                                         'reuse: reuse-plan.json')
     args = parser.parse_args(argv)
-    return run_capture(args) if args.mode == 'capture' else run_verify(args)
+    return {'capture': run_capture, 'verify': run_verify, 'reuse': run_reuse}[args.mode](args)
 
 
 if __name__ == '__main__':

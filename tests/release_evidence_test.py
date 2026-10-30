@@ -2168,5 +2168,582 @@ class IdentityCLI(unittest.TestCase):
                 self.assertIn('capture refused: ' + code, result.stderr)
 
 
+# --- pull-request-to-branch reuse (devkit #60): tree equality alone never qualifies a result ------
+
+BASE = 'e' * 40      # the branch commit the pull request was tested on, and the commit's first parent
+HEAD = 'b' * 40      # the pull request's head
+MERGE = 'd' * 40     # the merge commit its run checked out
+TREE = '7' * 40      # the commit's tree, and the merge commit's
+GOFLAGS = hashlib.sha256(b'-count=1').hexdigest()
+PULL = {'number': 7, 'state': 'closed', 'merged_at': '2026-10-25T09:55:00Z', 'merge_commit_sha': SHA,
+        'head': {'sha': HEAD, 'ref': 'feature', 'repo': {'id': REPO_ID}},
+        'base': {'ref': 'main', 'repo': {'id': REPO_ID}}}
+PR_RUNS = 'actions/workflows/9/runs?head_sha=' + HEAD + '&per_page=100&page=1'
+PR_JOBS = 'actions/runs/50/attempts/1/jobs?per_page=100&page=1'
+PR_ARTIFACTS = 'actions/runs/50/artifacts?per_page=100&page=1'
+PR_RUN = dict(RUN, id=50, event='pull_request', head_branch='feature', head_sha=HEAD,
+              pull_requests=[{'number': 7}], created_at='2026-10-25T09:00:00Z',
+              run_started_at='2026-10-25T09:00:00Z', updated_at='2026-10-25T09:05:00Z')
+PR_JOB = dict(JOB_LINUX, id=151, run_id=50, head_sha=HEAD, head_branch='feature',
+              started_at='2026-10-25T09:00:05Z', completed_at='2026-10-25T09:04:00Z')
+PR_ORIGIN = dict(ORIGIN, id=50, head_sha=HEAD, head_branch='feature')
+PR_ARTIFACT = dict(ARTIFACT_LINUX, id=351, created_at='2026-10-25T09:03:59Z', workflow_run=PR_ORIGIN)
+PR_EVIDENCE = dict(EVIDENCE_LINUX, source=MERGE, run_id=50, event='pull_request', ref='refs/pull/7/merge',
+                   coverage={'unit': 'PASS'},
+                   pull_request={'number': 7, 'base': BASE, 'head': HEAD, 'tree': TREE},
+                   environment={'GOFLAGS': GOFLAGS})
+
+
+class ReuseFixtures(Gate):
+    """A branch run whose Linux job took `unit` from the merged pull request's run."""
+
+    def setUp(self):
+        super().setUp()
+        self.config['workflows']['ci']['pull_request_reuse'] = {'checks': ['unit'], 'environment': ['GOFLAGS']}
+        e.check_config(self.config)
+        data = json.loads(json.dumps({
+            'git/commits/' + SHA: {'sha': SHA, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}]},
+            'git/commits/' + MERGE: {'sha': MERGE, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}, {'sha': HEAD}]},
+            'commits/%s/pulls?per_page=100' % SHA: [PULL],
+            PR_RUNS: {'total_count': 1, 'workflow_runs': [PR_RUN]},
+            'actions/runs/50': PR_RUN,
+            PR_JOBS: {'total_count': 1, 'jobs': [PR_JOB]},
+            PR_ARTIFACTS: {'total_count': 1, 'artifacts': [PR_ARTIFACT]}}))
+        self.data.update(data)
+        pack(self.data, self.data[PR_ARTIFACTS]['artifacts'][0], copy.deepcopy(PR_EVIDENCE))
+        artifact = self.data[PR_ARTIFACTS]['artifacts'][0]
+        self.reused = {'pull_request': 7, 'head': HEAD, 'merge': MERGE, 'base': BASE, 'tree': TREE, 'run_id': 50,
+                       'attempt': 1, 'job_id': 151,
+                       'artifact': {'id': 351, 'name': 'ci-evidence-ci-test-linux-1', 'digest': artifact['digest']},
+                       'checks': ['unit']}
+        self.evidence(0, lambda payload: payload.update(
+            coverage={'unit': 'REUSED', 'audit': 'SKIP'}, environment={'GOFLAGS': GOFLAGS},
+            reused=copy.deepcopy(self.reused)))
+        self.evidence(1, lambda payload: payload.update(environment={'GOFLAGS': GOFLAGS}, reused=None))
+
+    def pr_evidence(self, change):
+        artifact = self.data[PR_ARTIFACTS]['artifacts'][0]
+        payload = copy.deepcopy(PR_EVIDENCE)
+        change(payload)
+        pack(self.data, artifact, payload)
+        # The branch job recorded the artifact it read: the same bytes.
+        self.evidence(0, lambda main: main['reused']['artifact'].update(digest=artifact['digest']))
+
+    def pr_runs(self, *runs):
+        self.data[PR_RUNS] = {'total_count': len(runs), 'workflow_runs': list(runs)}
+
+
+class PullRequestReuse(ReuseFixtures):
+    """The release: the branch job's reuse is admitted again, or refused."""
+
+    def test_a_reused_check_is_admitted_again_and_recorded(self):
+        self.assertEqual(self.decide(), 'reuse')
+        jobs = self.record['workflows']['ci']['jobs']
+        self.assertEqual(jobs['test-linux']['coverage'], {'unit': 'REUSED', 'audit': 'SKIP'})
+        self.assertEqual(jobs['test-linux']['reused'], dict(self.reused, run_started_at='2026-10-25T09:00:00Z'))
+        self.assertIsNone(jobs['test-macos']['reused'])
+        # The pull request's run is read again at the release, whole, and its selection twice.
+        self.assertEqual(self.api.calls.count(PR_RUNS), 2)
+        self.assertIn('actions/artifacts/351/zip', self.api.calls)
+
+    def test_tree_equality_alone_never_qualifies(self):
+        # The same tree, tested on another base: the base relationship differs, even where the branch
+        # job's record names that base.
+        self.pr_evidence(lambda payload: payload['pull_request'].update(base='f' * 40))
+        self.data['git/commits/' + MERGE]['parents'][0]['sha'] = 'f' * 40
+        self.assertEqual(self.decide(), 'reuse-base')
+        self.evidence(0, lambda payload: payload['reused'].update(base='f' * 40))
+        self.assertEqual(self.decide(), 'reuse-base')
+        # The same tree claimed by a merge commit that is not this pull request's.
+        self.setUp()
+        self.data['git/commits/' + MERGE]['parents'][1]['sha'] = OTHER
+        self.assertEqual(self.decide(), 'reuse-evidence')
+        self.setUp()
+        self.data['git/commits/' + MERGE]['tree']['sha'] = '8' * 40
+        self.assertEqual(self.decide(), 'reuse-evidence')
+        # Another tree.
+        self.setUp()
+        self.pr_evidence(lambda payload: payload['pull_request'].update(tree='8' * 40))
+        self.data['git/commits/' + MERGE]['tree']['sha'] = '8' * 40
+        self.evidence(0, lambda payload: payload['reused'].update(tree='8' * 40))
+        self.assertEqual(self.decide(), 'reuse-tree')
+
+    def test_the_trusted_pull_request_relationship(self):
+        for change in (lambda: self.data['commits/%s/pulls?per_page=100' % SHA].clear(),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0].update(merge_commit_sha=OTHER),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0].update(merged_at=None),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA].append(dict(PULL, number=8)),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['base'].update(ref='release'),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['head'].update(repo={'id': 99}),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['head'].update(repo=None)):
+            with self.subTest():
+                self.setUp()
+                change()
+                self.assertEqual(self.decide(), 'reuse-pull-request')
+
+    def test_the_pull_request_event_and_ref(self):
+        for change, code in ((lambda payload: payload.update(ref='refs/pull/8/merge'), 'reuse-evidence'),
+                             (lambda payload: payload.update(event='push'), 'reuse-evidence'),
+                             (lambda payload: payload['pull_request'].update(number=8), 'reuse-evidence'),
+                             (lambda payload: payload.update(job='test-macos'), 'reuse-evidence'),
+                             (lambda payload: payload.update(extra='member'), 'reuse-evidence')):
+            with self.subTest(code=code):
+                self.setUp()
+                self.pr_evidence(change)
+                self.assertEqual(self.decide(), code)
+        for change in (dict(event='push', head_branch='main'), dict(event='pull_request_target'),
+                       dict(head_branch='other'), dict(head_repository={'id': 99, 'full_name': 'fork/project'})):
+            with self.subTest(change=change):
+                self.setUp()
+                self.pr_runs(dict(PR_RUN, **change))
+                self.assertEqual(self.decide(), 'reuse-run-missing')
+
+    def test_only_a_first_attempt_push_reuses(self):
+        self.both_runs(event='workflow_dispatch')
+        self.evidence(0, lambda payload: payload.update(event='workflow_dispatch'))
+        self.evidence(1, lambda payload: payload.update(event='workflow_dispatch'))
+        self.assertEqual(self.decide(), 'reuse-event')
+
+    def test_changed_inputs_tools_images_or_environment(self):
+        for change, code in (
+                (lambda payload: payload['inputs'].update({'dev.json': '9' * 40}), 'reuse-inputs'),
+                (lambda payload: payload['runtime']['runner'].update(ImageVersion='20261026.180.1'), 'reuse-runtime'),
+                (lambda payload: payload['runtime']['tools'].update(go='go version go1.26.4 linux/amd64'),
+                 'reuse-runtime'),
+                (lambda payload: payload['runtime']['runner'].update(os_release='d' * 64), 'reuse-runtime'),
+                (lambda payload: payload.update(environment={'GOFLAGS': None}), 'reuse-environment'),
+                (lambda payload: payload.update(environment={}), 'reuse-evidence')):
+            with self.subTest(code=code):
+                self.setUp()
+                self.pr_evidence(change)
+                self.assertEqual(self.decide(), code)
+
+    def test_scope_limited_evidence_covers_only_what_it_passed(self):
+        for change, code in (
+                # Not run by the pull request's scoped selection: it covers nothing.
+                (lambda payload: payload.update(coverage={}), 'reuse-coverage'),
+                (lambda payload: payload.update(coverage={'unit': 'FAIL'}), 'reuse-coverage'),
+                (lambda payload: payload.update(coverage={'unit': 'NOT RUN'}), 'reuse-coverage'),
+                (lambda payload: payload.update(coverage={'unit': 'SKIP'}), 'reuse-coverage'),
+                (lambda payload: payload.update(coverage={'unit': 'PASS', 'lint': 'PASS'}), 'reuse-coverage')):
+            with self.subTest(code=code):
+                self.setUp()
+                self.pr_evidence(change)
+                self.assertEqual(self.decide(), code)
+        # A check the configuration does not let a pull request cover.
+        self.setUp()
+        self.evidence(0, lambda payload: (payload['reused'].update(checks=['unit', 'audit']),
+                                          payload.update(coverage={'unit': 'REUSED', 'audit': 'REUSED'})))
+        self.assertEqual(self.decide(), 'reuse-coverage')
+        self.assertIn('the reused record or its checks', self.record['refusal']['detail'])
+        # A permitted skip in the pull request run covers nothing, even where the check may be reused.
+        self.setUp()
+        self.config['workflows']['ci']['pull_request_reuse']['checks'] = ['unit', 'audit']
+        self.pr_evidence(lambda payload: payload.update(coverage={'unit': 'PASS', 'audit': 'SKIP'}))
+        self.evidence(0, lambda payload: (payload['reused'].update(checks=['unit', 'audit']),
+                                          payload.update(coverage={'unit': 'REUSED', 'audit': 'REUSED'})))
+        self.assertEqual(self.decide(), 'reuse-coverage')
+        self.assertIn("['audit'] were not passed", self.record['refusal']['detail'])
+        # REUSED for a check the job did not record as reused, or a reused check missing.
+        self.setUp()
+        self.evidence(1, lambda payload: payload.update(coverage={'unit': 'REUSED'}))
+        self.assertEqual(self.decide(), 'check-result')
+        self.setUp()
+        self.evidence(0, lambda payload: payload.update(coverage={'audit': 'SKIP'}))
+        self.assertEqual(self.decide(), 'check-coverage')
+
+    def test_unexpected_skips_and_failed_cancelled_or_incomplete_attempts(self):
+        for job in (dict(PR_JOB, conclusion='skipped'), dict(PR_JOB, conclusion='failure'),
+                    dict(PR_JOB, status='in_progress', conclusion=None)):
+            with self.subTest(job=job['conclusion']):
+                self.setUp()
+                self.data[PR_JOBS] = {'total_count': 1, 'jobs': [job]}
+                self.assertEqual(self.decide(), 'reuse-result')
+        self.setUp()
+        self.data[PR_JOBS] = {'total_count': 0, 'jobs': []}
+        self.assertEqual(self.decide(), 'reuse-job')
+        for conclusion in ('failure', 'cancelled'):
+            with self.subTest(conclusion=conclusion):
+                self.setUp()
+                self.pr_runs(dict(PR_RUN, conclusion=conclusion))
+                self.data['actions/runs/50'] = dict(PR_RUN, conclusion=conclusion)
+                self.assertEqual(self.decide(), 'reuse-result')
+        self.setUp()
+        self.pr_runs(dict(PR_RUN, status='in_progress', conclusion=None))
+        self.assertEqual(self.decide(), 'reuse-unfinished')
+
+    def test_a_newer_attempt_is_never_searched_past(self):
+        # An older green run beside a newer failed one: the newer is selected, and refuses.
+        older = dict(PR_RUN, id=49, created_at='2026-10-25T08:00:00Z', run_started_at='2026-10-25T08:00:00Z')
+        newer = dict(PR_RUN, id=52, conclusion='failure', created_at='2026-10-25T09:30:00Z',
+                     run_started_at='2026-10-25T09:30:00Z')
+        self.pr_runs(older, PR_RUN, newer)
+        self.assertEqual(self.decide(), 'reuse-result')
+        # A newer successful attempt that is not the one the branch job reused: incompatible.
+        self.setUp()
+        rerun = dict(PR_RUN, run_attempt=2, run_started_at='2026-10-25T09:40:00Z')
+        self.pr_runs(rerun)
+        self.data['actions/runs/50'] = rerun
+        self.data['actions/runs/50/attempts/2/jobs?per_page=100&page=1'] = {
+            'total_count': 1, 'jobs': [dict(PR_JOB, run_attempt=2)]}
+        artifact = dict(PR_ARTIFACT, id=352, name='ci-evidence-ci-test-linux-2')
+        self.data[PR_ARTIFACTS] = {'total_count': 2, 'artifacts': [self.data[PR_ARTIFACTS]['artifacts'][0], artifact]}
+        pack(self.data, self.data[PR_ARTIFACTS]['artifacts'][1], dict(PR_EVIDENCE, attempt=2))
+        self.assertEqual(self.decide(), 'reuse-changed')
+        # The attempt moves while the release reads it.
+        self.setUp()
+        moved = iter([PR_RUN, dict(PR_RUN, run_attempt=2)])
+        self.data['actions/runs/50'] = lambda: next(moved)
+        self.assertEqual(self.decide(), 'reuse-race')
+
+    def test_stale_or_inaccessible_evidence(self):
+        self.pr_runs(dict(PR_RUN, run_started_at='2026-10-23T11:00:00Z'))
+        self.data['actions/runs/50'] = dict(PR_RUN, run_started_at='2026-10-23T11:00:00Z')
+        self.assertEqual(self.decide(), 'reuse-age')
+        for change in (lambda: self.data[PR_ARTIFACTS]['artifacts'][0].update(expired=True),
+                       lambda: self.data.pop('actions/artifacts/351/zip'),
+                       lambda: self.data.pop('commits/%s/pulls?per_page=100' % SHA),
+                       lambda: self.data.pop('git/commits/' + MERGE),
+                       lambda: self.data[PR_RUNS].update(total_count=2)):
+            with self.subTest():
+                self.setUp()
+                change()
+                self.assertEqual(self.decide(), 'reuse-unavailable')
+        self.setUp()
+        self.data[PR_ARTIFACTS] = {'total_count': 0, 'artifacts': []}
+        self.assertEqual(self.decide(), 'reuse-artifact')
+
+    def test_a_reuse_refusal_wins_over_a_drift(self):
+        self.config['revalidation'] = {'allowed': True}
+        self.here['runner']['ImageVersion'] = '20261026.180.1'
+        self.data.pop('actions/artifacts/351/zip')
+        self.assertEqual(self.decide(), 'reuse-unavailable')
+
+    def test_branch_reuse_records_are_held_to_their_shape(self):
+        for change, code in (
+                (lambda payload: payload.pop('reused'), 'evidence-identity'),
+                (lambda payload: payload.pop('environment'), 'evidence-identity'),
+                (lambda payload: payload.update(environment={'GOFLAGS': 'x'}), 'evidence-identity'),
+                (lambda payload: payload['reused'].pop('merge'), 'reuse-coverage'),
+                (lambda payload: payload['reused'].update(checks=[]), 'reuse-coverage'),
+                (lambda payload: payload['reused'].update(run_id=49), 'reuse-changed'),
+                (lambda payload: payload['reused']['artifact'].update(digest='sha256:' + '0' * 64), 'reuse-changed')):
+            with self.subTest(code=code):
+                self.setUp()
+                self.evidence(0, change)
+                self.assertEqual(self.decide(), code)
+
+    def test_without_the_member_nothing_of_a_pull_request_is_read_or_taken(self):
+        self.config['workflows']['ci'].pop('pull_request_reuse')
+        self.assertEqual(self.decide(), 'check-result')
+        self.evidence(0, lambda payload: payload.update(coverage={'unit': 'PASS', 'audit': 'SKIP'}))
+        self.assertEqual(self.decide(), 'evidence-identity')
+        self.data = world()
+        self.assertEqual(self.decide(), 'reuse')
+        self.assertFalse([call for call in self.api.calls if call.startswith(('commits/', 'git/commits/'))])
+
+
+class ReusePlan(ReuseFixtures):
+    """The branch job's reuse step, before its checks, over the same fixtures."""
+
+    ENV = {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/main', 'GITHUB_JOB': 'test',
+           'GITHUB_RUN_ID': '100', 'GITHUB_RUN_ATTEMPT': '1',
+           'GITHUB_WORKFLOW_REF': REPO + '/.github/workflows/ci.yml@refs/heads/main', 'GITHUB_WORKFLOW_SHA': SHA,
+           'GOFLAGS': '-count=1'}
+
+    def plan(self, job='test-linux', **env):
+        self.api = FakeAPI(self.data)
+        with patch.dict(os.environ, dict(self.ENV, **env)):
+            self.record = e.plan(self.api, self.config, copy.deepcopy(SOURCE), 'ci', job, NOW)
+        refusal = self.record['refusal']
+        return self.record['decision'] if refusal is None else refusal['code']
+
+    def test_a_plan_reuses_what_the_pull_request_run_passed(self):
+        self.assertEqual(self.plan(), 'reuse')
+        self.assertEqual((self.record['covered'], self.record['reused']), (['unit'], self.reused))
+        self.assertEqual(self.record['attempt'], 1)
+
+    def test_a_plan_never_reuses_on_tree_equality_alone(self):
+        self.pr_evidence(lambda payload: payload['pull_request'].update(base='f' * 40))
+        self.data['git/commits/' + MERGE]['parents'][0]['sha'] = 'f' * 40
+        self.assertEqual(self.plan(), 'reuse-base')
+        self.setUp()
+        self.pr_evidence(lambda payload: payload['pull_request'].update(tree='8' * 40))
+        self.data['git/commits/' + MERGE]['tree']['sha'] = '8' * 40
+        self.assertEqual(self.plan(), 'reuse-tree')
+
+    def test_a_plan_is_fresh_on_the_fresh_route_or_any_refusal(self):
+        self.assertEqual(self.plan(GITHUB_EVENT_NAME='workflow_dispatch'), 'reuse-event')
+        self.assertEqual(self.plan(GITHUB_RUN_ATTEMPT='2'), 'reuse-event')
+        self.assertEqual(self.plan(GOFLAGS='-count=2'), 'reuse-environment')
+        self.assertEqual(self.plan(job='test-macos'), 'reuse-job')
+        self.here['runner']['ImageVersion'] = '20261026.180.1'
+        self.assertEqual(self.plan(), 'reuse-runtime')
+        self.setUp()
+        self.pr_evidence(lambda payload: payload.update(coverage={'audit': 'SKIP'}))
+        self.assertEqual(self.plan(), 'reuse-coverage')
+        self.setUp()
+        self.config['workflows']['ci'].pop('pull_request_reuse')
+        self.assertEqual(self.plan(), 'reuse-off')
+        for code in ('reuse-event', 'reuse-off'):
+            self.assertEqual((self.record['decision'], self.record['covered'], self.record['reused']),
+                             ('fresh', [], None))
+
+
+class ReuseUnderIdentity(ReuseFixtures):
+    """Reuse where the repository also holds its evidence to the runner identity policy: the pull
+    request job's identity record must be the commit's, beside its runtime."""
+
+    def setUp(self):
+        super().setUp()
+        reuse = self.config['workflows']['ci']['pull_request_reuse']
+        self.config = identity_config(self.config)
+        self.config['workflows']['ci']['pull_request_reuse'] = reuse
+        variants = e.parse_identity_manifest(MANIFEST_BYTES)['variants']
+        for name, target in (('identity_context', lambda config, sha: {
+                                 'record': dict(IDENTITY_RECORD), 'variants': copy.deepcopy(variants),
+                                 'actions': {'ci': [CHECKOUT, UPLOAD]}}),
+                             ('release_workflow_actions', lambda source: {
+                                 'path': '.github/workflows/release.yml', 'actions': [CHECKOUT]})):
+            patcher = patch.object(e, name, side_effect=target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.linux = dict(IDENTITY_RECORD, variant='linux-x64', actions=[CHECKOUT, UPLOAD])
+        self.pr_evidence(lambda payload: None)
+        self.evidence(0, lambda payload: payload.update(identity=copy.deepcopy(self.linux)))
+        self.evidence(1, lambda payload: (payload.update(
+            identity=dict(IDENTITY_RECORD, variant='macos-arm64', actions=[CHECKOUT, UPLOAD])),
+            payload['runtime']['runner'].update(os_release='e' * 64)))
+
+    def pr_evidence(self, change):
+        super().pr_evidence(lambda payload: (payload.update(identity=copy.deepcopy(self.linux)), change(payload)))
+
+    def test_the_pull_request_identity_is_the_commits(self):
+        self.assertEqual(self.decide(), 'reuse')
+        for change in (lambda payload: payload.pop('identity'),
+                       lambda payload: payload['identity'].update(actions=[CHECKOUT]),
+                       lambda payload: payload['identity'].update(revision='2')):
+            with self.subTest():
+                self.setUp()
+                self.pr_evidence(change)
+                self.assertEqual(self.decide(), 'reuse-runtime')
+
+
+class ReuseCLI(unittest.TestCase):
+    """capture on the pull request, reuse and capture on the branch, verify at the release: the
+    public command end to end over one fixture repository (a squash merge of a pull request) and a
+    stand-in gh. What each step wrote is what the next one takes."""
+
+    @classmethod
+    def setUpClass(cls):
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-reuse-')
+        cls.addClassCleanup(scratch.cleanup)
+        cls.scratch = Path(scratch.name)
+        cls.root = cls.scratch / 'repo'
+        cls.root.mkdir()
+        config = {
+            'schema': 2, 'repository': REPO, 'branch': 'main', 'max_age_hours': 48, 'inputs': [],
+            'profiles': {'kit': {'platform': {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64'},
+                                 'compare': 'release-runner', 'tools': {'python': [sys.executable, '--version']}}},
+            'workflows': {'ci': {'path': '.github/workflows/ci.yml', 'name': 'CI',
+                                 'events': ['push', 'workflow_dispatch'],
+                                 'pull_request_reuse': {'checks': ['unit'], 'environment': ['GOFLAGS']},
+                                 'jobs': {'test': {'name': 'tests', 'job_id': 'test', 'labels': ['ubuntu-latest'],
+                                                   'profile': 'kit', 'checks': ['unit', 'lint']}}}}}
+        cls.base = git_fixture(cls.root, {
+            '.github/ci-evidence.json': json.dumps(config, indent=2) + '\n',
+            '.github/workflows/ci.yml': 'name: CI\non: [push, pull_request]\njobs:\n  test: {}\n',
+            'dev.json': '{"version": 1, "checks": [{"name": "unit"}, {"name": "lint"}]}\n',
+            'release_evidence.py': HELPER.read_bytes(), 'src.txt': 'one\n'})
+        cls.git_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                           GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                           GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+        cls.git('checkout', '-q', '-b', 'feature')
+        (cls.root / 'src.txt').write_text('two\n')
+        cls.git('commit', '-qam', 'the pull request')
+        cls.head = cls.git('rev-parse', 'HEAD')
+        # The merge commit a pull_request run checks out: the head merged onto the base.
+        cls.git('checkout', '-q', '--detach', cls.base)
+        cls.git('merge', '-q', '--no-ff', '-m', 'merge', cls.head)
+        cls.merge = cls.git('rev-parse', 'HEAD')
+        # The squash merge that lands on main: one parent, the base, and the same tree.
+        cls.git('checkout', '-q', 'main')
+        cls.git('merge', '-q', '--squash', cls.head)
+        cls.git('commit', '-qm', 'squash')
+        cls.sha = cls.git('rev-parse', 'HEAD')
+        cls.tree = cls.git('rev-parse', cls.sha + '^{tree}')
+        assert cls.tree == cls.git('rev-parse', cls.merge + '^{tree}')
+        cls.bin = cls.scratch / 'bin'
+        cls.bin.mkdir()
+        fake_gh(cls.bin)
+
+    @classmethod
+    def git(cls, *args):
+        return subprocess.run(['git', *args], cwd=cls.root, env=cls.git_env, check=True, text=True,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL).stdout.strip()
+
+    def run_helper(self, at, mode, extra, env, data=None):
+        self.git('checkout', '-q', '--detach', at)
+        api = self.scratch / 'api.json'
+        write_api(api, data or {})
+        outputs = self.scratch / 'outputs'
+        outputs.write_text('')
+        environment = dict(self.git_env, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
+                           FIXTURE_API=str(api), GITHUB_OUTPUT=str(outputs), GITHUB_SHA=at,
+                           GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID), ImageOS='ubuntu24',
+                           ImageVersion='20261020.1', RUNNER_OS='Linux', RUNNER_ARCH='X64', GITHUB_JOB='test',
+                           GITHUB_RUN_ATTEMPT='1', GOFLAGS='-count=1')
+        environment.update(env)
+        result = subprocess.run([sys.executable, str(self.root / 'release_evidence.py'), mode, *extra],
+                                cwd=self.root, env=environment, text=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return result, outputs.read_text()
+
+    def pr_env(self, **env):
+        return dict({'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF': 'refs/pull/7/merge', 'GITHUB_BASE_REF': 'main',
+                     'GITHUB_RUN_ID': '50',
+                     'GITHUB_WORKFLOW_REF': REPO + '/.github/workflows/ci.yml@refs/pull/7/merge',
+                     'GITHUB_WORKFLOW_SHA': self.merge}, **env)
+
+    def push_env(self, **env):
+        return dict({'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/main', 'GITHUB_RUN_ID': '100',
+                     'GITHUB_WORKFLOW_REF': REPO + '/.github/workflows/ci.yml@refs/heads/main',
+                     'GITHUB_WORKFLOW_SHA': self.sha}, **env)
+
+    def log(self, name, text):
+        path = self.scratch / name
+        path.write_text(text)
+        return str(path)
+
+    def capture_pr(self, text='PASS     unit 1s\n', at=None, **env):
+        output = self.scratch / 'pr-evidence.json'
+        result, _ = self.run_helper(at or self.merge, 'capture', ['--workflow', 'ci', '--job', 'test', '--check-log',
+                                                                  self.log('pr.log', text), '--output', str(output)],
+                                    self.pr_env(**env))
+        return result, output
+
+    def pr_world(self, pr_evidence):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def iso(seconds):
+            return (now + dt.timedelta(seconds=seconds)).isoformat().replace('+00:00', 'Z')
+        run = dict(PR_RUN, head_sha=self.head, created_at=iso(-1200), run_started_at=iso(-1200), updated_at=iso(-900))
+        job = dict(PR_JOB, name='tests', head_sha=self.head, started_at=iso(-1190), completed_at=iso(-900))
+        artifact = dict(PR_ARTIFACT, name='ci-evidence-ci-test-1', created_at=iso(-901),
+                        workflow_run=dict(PR_ORIGIN, head_sha=self.head))
+        data = {'git/commits/' + self.sha: {'sha': self.sha, 'tree': {'sha': self.tree}, 'parents': [{'sha': self.base}]},
+                'git/commits/' + self.merge: {'sha': self.merge, 'tree': {'sha': self.tree},
+                                              'parents': [{'sha': self.base}, {'sha': self.head}]},
+                'commits/%s/pulls?per_page=100' % self.sha: [dict(PULL, merge_commit_sha=self.sha,
+                                                                  head=dict(PULL['head'], sha=self.head))],
+                'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},
+                'actions/workflows/9/runs?head_sha=%s&per_page=100&page=1' % self.head:
+                    {'total_count': 1, 'workflow_runs': [run]},
+                'actions/runs/50': run, PR_JOBS: {'total_count': 1, 'jobs': [job]},
+                PR_ARTIFACTS: {'total_count': 1, 'artifacts': [artifact]}}
+        pack(data, artifact, pr_evidence)
+        return data
+
+    def test_end_to_end(self):
+        result, output = self.capture_pr()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pr_evidence = json.loads(output.read_text())
+        self.assertEqual((pr_evidence['source'], pr_evidence['event'], pr_evidence['ref']),
+                         (self.merge, 'pull_request', 'refs/pull/7/merge'))
+        self.assertEqual(pr_evidence['pull_request'], {'number': 7, 'base': self.base, 'head': self.head,
+                                                       'tree': self.tree})
+        self.assertEqual(pr_evidence['coverage'], {'unit': 'PASS'})
+        self.assertEqual(pr_evidence['environment'], {'GOFLAGS': GOFLAGS})
+
+        world = self.pr_world(pr_evidence)
+        plan_path = self.scratch / 'plan.json'
+        result, outputs = self.run_helper(self.sha, 'reuse', ['--workflow', 'ci', '--job', 'test', '--output',
+                                                              str(plan_path)], self.push_env(), world)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads(plan_path.read_text())
+        self.assertEqual((plan['decision'], plan['covered']), ('reuse', ['unit']), plan['refusal'])
+        self.assertEqual(outputs, 'decision=reuse\ncovered=unit\n')
+        self.assertIn('release-evidence: reuse: unit from pull request 7 run 50 attempt 1', result.stderr)
+
+        output = self.scratch / 'evidence.json'
+        result, _ = self.run_helper(self.sha, 'capture', ['--workflow', 'ci', '--job', 'test', '--check-log',
+                                                          self.log('main.log', 'PASS     lint 1s\n'), '--reuse-plan',
+                                                          str(plan_path), '--output', str(output)],
+                                    self.push_env(), world)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(output.read_text())
+        self.assertEqual(evidence['coverage'], {'unit': 'REUSED', 'lint': 'PASS'})
+        self.assertEqual(evidence['reused'], plan['reused'])
+
+        data = dict(world, **cli_world(self.sha, evidence))
+        record_path = self.scratch / 'release-evidence.json'
+        result, outputs = self.run_helper(self.sha, 'verify', ['--output', str(record_path)],
+                                          {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/tags/v1.2.3',
+                                           'RELEASE_TAG': 'v1.2.3'}, data)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record['decision'], 'reuse')
+        self.assertEqual(record['workflows']['ci']['jobs']['test']['reused']['run_id'], 50)
+
+        # The release refuses once the pull request run moved on to a newer attempt that failed.
+        runs = 'actions/workflows/9/runs?head_sha=%s&per_page=100&page=1' % self.head
+        newer = dict(data[runs]['workflow_runs'][0], run_attempt=2, conclusion='failure',
+                     run_started_at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00', 'Z'))
+        result, _ = self.run_helper(self.sha, 'verify', ['--output', str(record_path)],
+                                    {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/tags/v1.2.3',
+                                     'RELEASE_TAG': 'v1.2.3'}, dict(data, **{runs: {'total_count': 1,
+                                                                                    'workflow_runs': [newer]}}))
+        self.assertEqual((result.returncode, (json.loads(record_path.read_text())['refusal'] or {}).get('code')),
+                         (1, 'reuse-result'))
+
+    def test_the_fresh_route_plans_no_reuse(self):
+        plan_path = self.scratch / 'fresh.json'
+        for env in ({'GITHUB_EVENT_NAME': 'workflow_dispatch'}, {'GITHUB_RUN_ATTEMPT': '2'}):
+            with self.subTest(env=env):
+                result, outputs = self.run_helper(self.sha, 'reuse', ['--workflow', 'ci', '--job', 'test', '--output',
+                                                                      str(plan_path)], self.push_env(**env))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(outputs, 'decision=fresh\ncovered=\n')
+                self.assertEqual(json.loads(plan_path.read_text())['refusal']['code'], 'reuse-event')
+
+    def test_pull_request_capture_refusals(self):
+        for env, text, at, code in (
+                ({'GITHUB_BASE_REF': 'release'}, None, None, 'capture-ref'),
+                ({'GITHUB_REF': 'refs/heads/feature'}, None, None, 'capture-ref'),
+                ({'GITHUB_WORKFLOW_SHA': 'f' * 40}, None, None, 'capture-workflow'),
+                ({}, 'FAIL     unit 1s\n', None, 'check-result'),
+                ({}, 'PASS     deploy 1s\n', None, 'check-coverage'),
+                ({}, 'NOT RUN  unit\n', None, 'check-result')):
+            with self.subTest(code=code, env=env):
+                result, _ = self.capture_pr(text or 'PASS     unit 1s\n', at, **env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('capture refused: ' + code, result.stderr)
+        # A checkout of the head itself, not the merge commit: no base relationship to record.
+        result, _ = self.capture_pr(at=self.head, GITHUB_WORKFLOW_SHA=self.head)
+        self.assertIn('capture refused: capture-merge', result.stderr)
+
+    def test_branch_capture_takes_only_its_own_plan(self):
+        plan = {'schema': 1, 'decision': 'reuse', 'source': self.sha, 'workflow': 'ci', 'job': 'test',
+                'attempt': 1, 'covered': ['unit'],
+                'reused': {'pull_request': 7, 'head': self.head, 'merge': self.merge, 'base': self.base,
+                           'tree': self.tree, 'run_id': 50, 'attempt': 1, 'job_id': 151,
+                           'artifact': {'id': 351, 'name': 'ci-evidence-ci-test-1', 'digest': 'sha256:' + '0' * 64},
+                           'checks': ['unit']}}
+        for change, text, code in ((dict(job='other'), 'PASS     lint 1s\n', 'capture-plan'),
+                                   (dict(attempt=2), 'PASS     lint 1s\n', 'capture-plan'),
+                                   (dict(source=self.base), 'PASS     lint 1s\n', 'capture-plan'),
+                                   ({}, 'PASS     lint 1s\nPASS     unit 1s\n', 'check-coverage')):
+            with self.subTest(code=code, change=change):
+                path = self.scratch / 'plan.json'
+                path.write_text(json.dumps(dict(plan, **change)))
+                result, _ = self.run_helper(self.sha, 'capture', ['--workflow', 'ci', '--job', 'test', '--check-log',
+                                                                  self.log('main.log', text), '--reuse-plan', str(path),
+                                                                  '--output', str(self.scratch / 'e.json')],
+                                            self.push_env())
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('capture refused: ' + code, result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
