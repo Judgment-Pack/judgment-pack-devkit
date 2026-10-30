@@ -16,6 +16,12 @@ verify   Runs in the release workflow. Reads this repository's Actions API for t
 
 The configuration is .github/ci-evidence.json, schema 2 (docs/ci-evidence.md). There is no input
 for a local evidence file, another API host, a green flag or an age override.
+
+Where the configuration names a runner identity manifest (identity), every job also records the
+image identity its standard GitHub-hosted runner reports: the image name and version, the OS and
+architecture, the OS-release digest, the tools and the actions its workflow names, under one
+variant of the manifest. It is a reported image identity, not a pinned VM image: the gate compares
+what runners report and refuses a missing, unexpected or changed identity.
 """
 import argparse
 import datetime as dt
@@ -63,6 +69,35 @@ DISPATCH = ('none', 'branch-tip')
 PASSED = {'publication': 'reuse', 'validation-only': 'validated'}
 SHA = re.compile(r'[0-9a-f]{40}')
 OBJECT_ID = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
+DIGEST = re.compile(r'[0-9a-f]{64}')
+
+# The runner identity manifest (templates/runner-identity.json), version 1: what a standard
+# GitHub-hosted runner reports about its image, per variant. "reported" is the only identity kind:
+# a hosted label is an address, and the runner's report is not a pinned VM image.
+IDENTITY_VERSION = 1
+IDENTITY_KIND = 'reported'
+IDENTITY_RUNNER = ['ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH', 'os_release']
+IDENTITY_ACTIONS = 'full-commit-sha'
+IDENTITY_OS = ('Linux', 'macOS', 'Windows')
+IDENTITY_ARCH = ('X64', 'ARM64')
+# What a job's evidence records of the manifest and its own variant and actions.
+IDENTITY_BLOCK = ('manifest', 'sha256', 'revision', 'kind', 'variant', 'actions')
+IDENTITY_LIMIT = 64 * 1024
+# The form of the ImageVersion a hosted runner reports (20261026.180.1); "latest", a wildcard or
+# any other form is not a reported image version.
+IMAGE_VERSION = re.compile(r'[0-9]+(\.[0-9]+)+')
+REVISION = re.compile(r'[A-Za-z0-9._-]{1,64}')
+# A `uses:` key at the start of a block-style YAML line, and its value, bare or quoted. Every other
+# "uses:" outside a comment line (a flow mapping, an expression) is a value the reader cannot place.
+USES_KEY = re.compile(r'^[ \t]*(?:-[ \t]+)?\buses:(.*)$', re.M)
+USES_VALUE = re.compile(r'''[ \t]*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))[ \t]*(?:#.*)?''')
+USES_ANY = re.compile(r'^(?![ \t]*#).*\buses:', re.M)
+PINNED_ACTION = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}')
+PINNED_IMAGE = re.compile(r'docker://[^@\s]+@sha256:[0-9a-f]{64}')
+LOCAL_ACTIONS = 32
+# The manifest revisions this gate ships (templates/runner-identity.json), by the SHA-256 of their
+# exact bytes: the policy is shared, so a locally edited manifest is not one of them.
+IDENTITY_REVISIONS = {'1': '333c3ffe1f5d93a863298133ad15717c384146797c0cc88f2463a361e1e358da'}
 
 
 class Refusal(Exception):
@@ -204,7 +239,7 @@ def check_config(config):
 
     fields(config, 'config', ['schema', 'repository', 'branch', 'max_age_hours', 'inputs',
                               'profiles', 'workflows'],
-           ['fresh_at_release', 'tag', 'dispatch', 'revalidation'])
+           ['fresh_at_release', 'tag', 'dispatch', 'revalidation', 'identity'])
     if config['schema'] != SCHEMA or type(config['schema']) is not int:
         fail('config.schema', 'must be %d' % SCHEMA)
     text(config['repository'], 'config.repository', REPOSITORY)
@@ -228,12 +263,29 @@ def check_config(config):
     fields(revalidation, 'config.revalidation', ['allowed'])
     if type(revalidation['allowed']) is not bool:
         fail('config.revalidation.allowed', 'true or false is required')
+    identity = config.get('identity')
+    if identity is not None:
+        fields(identity, 'config.identity', ['manifest', 'sha256'])
+        path(identity['manifest'], 'config.identity.manifest')
+        text(identity['sha256'], 'config.identity.sha256', DIGEST)
 
     named(config['profiles'], 'config.profiles')
     for name, profile in config['profiles'].items():
         where = 'config.profiles.' + name
-        fields(profile, where, ['platform', 'compare', 'tools'], ['pins'])
+        fields(profile, where, ['platform', 'compare', 'tools'], ['pins', 'variant'])
         fields(profile['platform'], where + '.platform', ['RUNNER_OS', 'RUNNER_ARCH'], ['ImageOS'])
+        # Under the identity policy each profile names its manifest variant and pins the image name
+        # its runner reports; without it a variant means nothing and is refused.
+        if identity is None and 'variant' in profile:
+            fail(where + '.variant', 'a variant needs config.identity')
+        if identity is not None:
+            if 'variant' not in profile:
+                fail(where + '.variant', 'config.identity needs a variant for every profile')
+            text(profile['variant'], where + '.variant', KEY)
+            if 'ImageOS' not in profile['platform']:
+                fail(where + '.platform.ImageOS', 'config.identity needs the image name for every profile')
+            if not profile['tools']:
+                fail(where + '.tools', 'config.identity needs at least one tool for every profile')
         for key, value in profile['platform'].items():
             if key != '$comment':
                 text(value, '%s.platform.%s' % (where, key))
@@ -336,25 +388,209 @@ def source_context(config_path):
     need(Path(helper).read_bytes() == git('show', sha + ':' + helper, code='helper-source'),
          'helper-source')
     # The manifest, the configuration, the helper and each workflow file are inputs whatever the
-    # configuration lists; each is identified by its git object id at the commit.
+    # configuration lists, and so is the runner identity manifest where one is named; each is
+    # identified by its git object id at the commit.
     paths = sorted(set(config['inputs']) | {config_path, 'dev.json', helper} |
-                   {workflow['path'] for workflow in config['workflows'].values()})
+                   {workflow['path'] for workflow in config['workflows'].values()} |
+                   ({config['identity']['manifest']} if 'identity' in config else set()))
     ids = git('rev-parse', *[sha + ':' + path for path in paths], code='input-missing').decode().split()
     need(len(ids) == len(paths) and all(OBJECT_ID.fullmatch(oid) for oid in ids), 'input-missing')
     return config, {'schema': SCHEMA, 'repository': config['repository'],
                     'repository_id': repository_id, 'source': sha, 'inputs': dict(zip(paths, ids))}
 
 
+# --- the runner identity manifest ----------------------------------------------------------------
+
+def unique_members(pairs):
+    names = [name for name, _ in pairs]
+    need(len(names) == len(set(names)), 'identity-config', 'a member is repeated')
+    return dict(pairs)
+
+
+def parse_identity_manifest(raw):
+    """The manifest's bytes, refused unless they are exactly a version 1 manifest: bounded, UTF-8
+    JSON with no repeated member, no unknown or missing member, the identity kind "reported", the
+    fixed runner fields and action rule, and each variant an OS, an architecture and the absolute
+    path of the file whose digest is the OS-release identity (null where the OS has none)."""
+    def fail(where, why):
+        raise Refusal('identity-config', where + ': ' + why)
+
+    def fields(value, where, required):
+        if not isinstance(value, dict):
+            fail(where, 'an object is required')
+        unknown = sorted(set(value) - set(required) - {'$comment'})
+        missing = sorted(set(required) - set(value))
+        if unknown or missing:
+            fail(where, 'unknown %s, missing %s' % (unknown, missing))
+
+    need(len(raw) <= IDENTITY_LIMIT, 'identity-config', 'the manifest is over %d bytes' % IDENTITY_LIMIT)
+    try:
+        manifest = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_members)
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise Refusal('identity-config', 'the manifest is not JSON') from error
+    fields(manifest, 'manifest', ['manifestVersion', 'revision', 'identity', 'runner', 'actions',
+                                  'variants'])
+    if type(manifest['manifestVersion']) is not int or manifest['manifestVersion'] != IDENTITY_VERSION:
+        fail('manifest.manifestVersion', 'must be %d' % IDENTITY_VERSION)
+    if not isinstance(manifest['revision'], str) or not REVISION.fullmatch(manifest['revision']):
+        fail('manifest.revision', 'a string matching %s is required' % REVISION.pattern)
+    if manifest['identity'] != IDENTITY_KIND:
+        fail('manifest.identity', 'must be "%s": a hosted runner reports its image, nothing pins it'
+             % IDENTITY_KIND)
+    if manifest['runner'] != IDENTITY_RUNNER:
+        fail('manifest.runner', 'must be %s' % IDENTITY_RUNNER)
+    if manifest['actions'] != IDENTITY_ACTIONS:
+        fail('manifest.actions', 'must be "%s"' % IDENTITY_ACTIONS)
+    variants = manifest['variants']
+    if not isinstance(variants, dict) or not variants:
+        fail('manifest.variants', 'an object with at least one member is required')
+    for name, variant in variants.items():
+        where = 'manifest.variants.' + name
+        if not KEY.fullmatch(name):
+            fail(where, 'a variant name matches %s' % KEY.pattern)
+        fields(variant, where, ['RUNNER_OS', 'RUNNER_ARCH', 'os_release'])
+        if variant['RUNNER_OS'] not in IDENTITY_OS:
+            fail(where + '.RUNNER_OS', 'one of %s is required' % (IDENTITY_OS,))
+        if variant['RUNNER_ARCH'] not in IDENTITY_ARCH:
+            fail(where + '.RUNNER_ARCH', 'one of %s is required' % (IDENTITY_ARCH,))
+        release = variant['os_release']
+        if release is not None and not (isinstance(release, str) and release.startswith('/') and
+                                        '..' not in release.split('/') and '\n' not in release):
+            fail(where + '.os_release', 'an absolute path or null is required')
+    return manifest
+
+
+def workflow_actions(sha, path, seen):
+    """Every action and reusable workflow the file names at the commit, local ones followed: a local
+    path (bound by the commit), an action or workflow at a full commit id, or a container image by
+    digest. A tag, a branch, an expression or a container tag refuses: its resolution can change
+    while the file does not."""
+    if path in seen:
+        return set()
+    seen.add(path)
+    need(len(seen) <= LOCAL_ACTIONS, 'identity-unexpected', 'more than %d local actions' % LOCAL_ACTIONS)
+    text = git('show', sha + ':' + path, code='identity-unexpected').decode('utf-8', 'replace')
+    keys = USES_KEY.findall(text)
+    need(len(keys) == len(USES_ANY.findall(text)), 'identity-unexpected',
+         '%s has a uses: that is not a block-style key of its own line' % path)
+    found = set()
+    for value in keys:
+        match = USES_VALUE.fullmatch(value)
+        need(match is not None, 'identity-unexpected', '%s: uses:%s cannot be read' % (path, value))
+        ref = next(group for group in match.groups() if group is not None)
+        if ref.startswith('./'):
+            local = ref[2:].rstrip('/')
+            need(PATH.fullmatch(local) and not {'.', '..'} & set(local.split('/')), 'identity-unexpected',
+                 '%s names the local action %r' % (path, ref))
+            found.add(ref)
+            if WORKFLOW_PATH.fullmatch(local):
+                found |= workflow_actions(sha, local, seen)
+                continue
+            listed = git('ls-tree', '--name-only', sha, '--', local + '/action.yml', local + '/action.yaml',
+                         code='identity-unexpected').decode().split()
+            need(len(listed) == 1, 'identity-unexpected', '%s: no single action.yml in %s' % (path, local))
+            found |= workflow_actions(sha, listed[0], seen)
+        else:
+            need(PINNED_ACTION.fullmatch(ref) or PINNED_IMAGE.fullmatch(ref), 'identity-unexpected',
+                 '%s names %s, which is not pinned to a full commit (or an image digest)' % (path, ref))
+            found.add(ref)
+    return found
+
+
+def actions_of(sha, path):
+    return sorted(workflow_actions(sha, path, set()))
+
+
+def identity_context(config, sha):
+    """The identity policy at the commit: the manifest, held to the digest the configuration pins,
+    its record, each profile's variant (the profile's platform is the variant's), and the actions
+    each configured workflow names, every one pinned."""
+    setting = config['identity']
+    raw = git('show', sha + ':' + setting['manifest'], code='identity-config')
+    need(digest(raw) == setting['sha256'], 'identity-config',
+         '%s is not the manifest the configuration pins' % setting['manifest'])
+    manifest = parse_identity_manifest(raw)
+    need(IDENTITY_REVISIONS.get(manifest['revision']) == setting['sha256'], 'identity-config',
+         'revision %s with these bytes is not a manifest revision this gate ships' % manifest['revision'])
+    for name, profile in config['profiles'].items():
+        variant = manifest['variants'].get(profile['variant'])
+        need(variant is not None, 'identity-config', '%s names no variant of the manifest' % name)
+        need(all(profile['platform'][key] == variant[key] for key in ('RUNNER_OS', 'RUNNER_ARCH')),
+             'identity-config', '%s: its platform is not the variant %s' % (name, profile['variant']))
+    return {'record': {'manifest': setting['manifest'], 'sha256': setting['sha256'],
+                       'revision': manifest['revision'], 'kind': manifest['identity']},
+            'variants': manifest['variants'],
+            'actions': {key: actions_of(sha, workflow['path'])
+                        for key, workflow in config['workflows'].items()}}
+
+
+def release_workflow_actions(source):
+    """The actions of the release workflow that is running (GITHUB_WORKFLOW_REF), every one pinned."""
+    ref = os.environ.get('GITHUB_WORKFLOW_REF', '')
+    prefix = source['repository'] + '/'
+    path = ref[len(prefix):].split('@', 1)[0] if ref.startswith(prefix) else ''
+    need(WORKFLOW_PATH.fullmatch(path), 'identity-missing', 'GITHUB_WORKFLOW_REF names no workflow file')
+    return {'path': path, 'actions': actions_of(source['source'], path)}
+
+
+def job_identity(context, profile, workflow_key):
+    """What a job's evidence records of the policy: the manifest, its variant and its actions."""
+    return dict(context['record'], variant=profile['variant'], actions=context['actions'][workflow_key])
+
+
+def check_identity(context, profile, payload, workflow_key, job_key):
+    """The job's recorded identity, before its runtime is compared: every field the variant has,
+    each of the form a hosted runner reports, the image name the profile pins and the variant's
+    platform, under the manifest and actions of the commit. A missing field is identity-missing,
+    any other value identity-unexpected; neither is a drift, and neither is revalidated."""
+    block = payload.get('identity')
+    need(isinstance(block, dict) and set(block) == set(IDENTITY_BLOCK), 'identity-missing',
+         job_key + ': no identity record')
+    expected = job_identity(context, profile, workflow_key)
+    need(block == expected, 'identity-unexpected', '%s: %s differ from the commit\'s' % (
+        job_key, sorted(key for key in IDENTITY_BLOCK if block.get(key) != expected[key])))
+    variant = context['variants'][profile['variant']]
+    recorded = payload.get('runtime')
+    runner = recorded.get('runner') if isinstance(recorded, dict) else None
+    tools = recorded.get('tools') if isinstance(recorded, dict) else None
+    need(isinstance(runner, dict) and isinstance(tools, dict), 'identity-missing', job_key + ': no runtime record')
+    wanted = [key for key in IDENTITY_RUNNER if key != 'os_release' or variant['os_release'] is not None]
+    missing = [key for key in wanted if not isinstance(runner.get(key), str) or not runner.get(key)]
+    need(not missing, 'identity-missing', '%s: %s' % (job_key, missing))
+    need(set(runner) == set(wanted), 'identity-unexpected', '%s: runner fields %s' % (job_key, sorted(runner)))
+    need(tools and all(isinstance(value, str) and value for value in tools.values()), 'identity-missing',
+         job_key + ': the tools')
+    need(runner['ImageOS'] == profile['platform']['ImageOS'], 'identity-unexpected',
+         '%s: ImageOS is %s, the profile pins %s' % (job_key, runner['ImageOS'], profile['platform']['ImageOS']))
+    need((runner['RUNNER_OS'], runner['RUNNER_ARCH']) == (variant['RUNNER_OS'], variant['RUNNER_ARCH']),
+         'identity-unexpected', '%s: %s %s is not the variant %s' % (
+             job_key, runner['RUNNER_OS'], runner['RUNNER_ARCH'], profile['variant']))
+    need(IMAGE_VERSION.fullmatch(runner['ImageVersion']), 'identity-unexpected',
+         '%s: ImageVersion %r is not a reported image version' % (job_key, runner['ImageVersion']))
+    need(variant['os_release'] is None or DIGEST.fullmatch(runner['os_release']), 'identity-unexpected',
+         job_key + ': os_release is not a digest')
+
+
 # --- the evidence a CI job records --------------------------------------------------------------
 
-def runtime(profile):
-    """This runner's image, platform and tool identity, for a profile."""
+def runtime(profile, variant=None):
+    """This runner's image, platform and tool identity, for a profile. Under the identity policy
+    (a variant), the image version must have the form a hosted runner reports, and the OS-release
+    digest is that of the variant's file, on every OS that has one."""
     runner = {key: os.environ.get(key, '') for key in RUNNER_KEYS}
     need(all(runner.values()), 'runner-identity')
     for key, value in profile['platform'].items():
         if key != '$comment':
             need(runner[key] == value, 'runner-platform', '%s is %s, not %s' % (key, runner[key], value))
-    if runner['RUNNER_OS'] == 'Linux':
+    if variant is not None:
+        need(IMAGE_VERSION.fullmatch(runner['ImageVersion']), 'identity-unexpected',
+             'ImageVersion %r is not a reported image version' % runner['ImageVersion'])
+        if variant['os_release'] is not None:
+            try:
+                runner['os_release'] = digest(Path(variant['os_release']).read_bytes())
+            except OSError as error:
+                raise Refusal('identity-missing', 'no OS-release file ' + variant['os_release']) from error
+    elif runner['RUNNER_OS'] == 'Linux':
         runner['os_release'] = digest(Path('/etc/os-release').read_bytes())
     tools = {name: command(argv, 'tool-identity', 65536).decode().strip()
              for name, argv in profile['tools'].items()}
@@ -401,12 +637,16 @@ def validate_coverage(spec, result):
 
 
 def evidence(source, workflow_key, workflow, job_key, run_id, attempt, event, branch, runtime_identity,
-             check_results):
-    """The one shape of a job's evidence: what capture writes and what verify expects."""
-    return dict(source, workflow=workflow_key, workflow_path=workflow['path'],
-                workflow_name=workflow['name'], job=job_key, run_id=run_id, attempt=attempt,
-                event=event, ref='refs/heads/' + branch, runtime=runtime_identity,
-                coverage=check_results)
+             check_results, identity=None):
+    """The one shape of a job's evidence: what capture writes and what verify expects. Under the
+    identity policy it also holds the job's identity record."""
+    result = dict(source, workflow=workflow_key, workflow_path=workflow['path'],
+                  workflow_name=workflow['name'], job=job_key, run_id=run_id, attempt=attempt,
+                  event=event, ref='refs/heads/' + branch, runtime=runtime_identity,
+                  coverage=check_results)
+    if identity is not None:
+        result['identity'] = identity
+    return result
 
 
 def capture(config, source, workflow_key, job_key, logs):
@@ -424,9 +664,14 @@ def capture(config, source, workflow_key, job_key, logs):
          os.environ.get('GITHUB_WORKFLOW_SHA') == source['source'], 'capture-workflow')
     run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
     need(positive(run_id) and positive(attempt), 'capture-run')
+    profile = config['profiles'][spec['profile']]
+    identity, variant = None, None
+    if 'identity' in config:
+        context = identity_context(config, source['source'])
+        identity, variant = job_identity(context, profile, workflow_key), context['variants'][profile['variant']]
     return evidence(source, workflow_key, workflow, job_key, run_id, attempt,
                     os.environ['GITHUB_EVENT_NAME'], config['branch'],
-                    runtime(config['profiles'][spec['profile']]), coverage(spec, logs))
+                    runtime(profile, variant), coverage(spec, logs), identity)
 
 
 # --- the release's verification -----------------------------------------------------------------
@@ -628,7 +873,9 @@ def check_runtime(profile, recorded, here, job_key):
     return None
 
 
-def verify_workflow(api, config, source, key, now, here, trail, drift):
+def verify_workflow(api, config, source, key, now, here, trail, drift, identity=None):
+    """identity, under the policy: the context at the commit and the runtimes collected per variant
+    and profile."""
     workflow, branch = config['workflows'][key], config['branch']
     resolved = api.get('actions/workflows/' + quote(Path(workflow['path']).name, safe=''))
     need(resolved['path'] == workflow['path'] and resolved['name'] == workflow['name'] and
@@ -663,7 +910,8 @@ def verify_workflow(api, config, source, key, now, here, trail, drift):
         need(len(matching) == 1, 'artifact-coverage', '%d artifacts named %s' % (len(matching), name))
         payload = read_artifact(api, matching[0], run, job)
         expected = evidence(source, key, workflow, job_key, run['id'], run['run_attempt'], run['event'],
-                            branch, payload.get('runtime'), payload.get('coverage'))
+                            branch, payload.get('runtime'), payload.get('coverage'),
+                            payload.get('identity') if identity else None)
         for field in ('schema', 'repository', 'repository_id', 'source', 'workflow', 'workflow_path',
                       'workflow_name', 'job', 'run_id', 'attempt', 'event', 'ref'):
             need(payload.get(field) == expected[field], 'evidence-identity',
@@ -674,12 +922,20 @@ def verify_workflow(api, config, source, key, now, here, trail, drift):
                  path for path in set(source['inputs']) | set(recorded_inputs or {})
                  if (recorded_inputs or {}).get(path) != source['inputs'].get(path))))
         validate_coverage(spec, payload.get('coverage'))
+        profile = config['profiles'][spec['profile']]
+        variant = None
+        if identity:
+            # A missing or unexpected identity refuses here, before the runtime is compared: it is
+            # never a drift, and never revalidated.
+            check_identity(identity['context'], profile, payload, key, job_key)
+            identity['groups'].setdefault((profile['variant'], spec['profile']), []).append(
+                ('%s/%s' % (key, job_key), payload['runtime']))
+            variant = identity['context']['variants'][profile['variant']]
         need(payload == expected, 'evidence-identity', job_key + ': unexpected members')
         # The runtime identity is the job's last check, so that any other refusal of the job wins
         # over it; a drift from this runner is only collected, for the end of verify.
-        profile = config['profiles'][spec['profile']]
         if profile['compare'] == 'release-runner' and spec['profile'] not in here:
-            here[spec['profile']] = runtime(profile)
+            here[spec['profile']] = runtime(profile, variant)
         differs = check_runtime(profile, payload.get('runtime'), here.get(spec['profile']), job_key)
         if differs:
             drift.append((differs[0], dict(workflow=key, job=job_key, **differs[1])))
@@ -726,11 +982,30 @@ def verify(api, config, source, release_tag, now, record):
     if publication:
         first_tag = tag_object(api, release_tag, source['source'], grammar)
         record['tag_object'] = first_tag
+    identity = None
+    if 'identity' in config:
+        identity = {'context': identity_context(config, source['source']), 'groups': {}}
+        record['identity'] = dict(identity['context']['record'],
+                                  statement='a reported hosted-runner image identity, not a pinned VM image',
+                                  release_workflow=release_workflow_actions(source), groups={})
     here, chosen, drift = {}, {}, []
     for key in config['workflows']:
         record['workflows'][key] = {}
         chosen[key] = verify_workflow(api, config, source, key, now, here, record['workflows'][key],
-                                      drift)
+                                      drift, identity)
+    if identity:
+        # Identity is compared per variant and profile, never across them. Jobs of a "pins" profile
+        # (a leg the release runner cannot resolve) must have reported one identity between them;
+        # a "release-runner" profile's jobs are each compared with this runner at the end.
+        for (variant, name), members in sorted(identity['groups'].items()):
+            same = all(runtime_identity == members[0][1] for _, runtime_identity in members)
+            record['identity']['groups']['%s/%s' % (variant, name)] = {
+                'compare': config['profiles'][name]['compare'], 'jobs': [job for job, _ in members],
+                'runtime': members[0][1] if same else None}
+            need(same or config['profiles'][name]['compare'] != 'pins', 'identity-changed',
+                 'the %s jobs of variant %s report different identities: %s' % (
+                     name, variant, '; '.join('%s %s' % (job, runtime_identity['runner'].get('ImageVersion'))
+                                              for job, runtime_identity in members)))
     # Collection takes time: every workflow's selection, then the tag, once more at the end.
     for key, (workflow_id, run) in chosen.items():
         final = select(api, source, config['workflows'][key], workflow_id, branch)
@@ -796,7 +1071,7 @@ def run_verify(args):
     now = dt.datetime.now(dt.timezone.utc)
     output = Path(args.output or 'release-evidence.json')
     record = {'schema': SCHEMA, 'decision': 'refuse', 'refusal': None, 'revalidation': None,
-              'mode': None, 'event': os.environ.get('GITHUB_EVENT_NAME', ''),
+              'identity': None, 'mode': None, 'event': os.environ.get('GITHUB_EVENT_NAME', ''),
               'tag': os.environ.get('RELEASE_TAG', ''), 'checked_at': now.isoformat(),
               'workflows': {}}
     try:

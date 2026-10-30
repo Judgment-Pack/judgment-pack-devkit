@@ -163,7 +163,7 @@ class Gate(unittest.TestCase):
         self.data = world()
         self.config = copy.deepcopy(CONFIG)
         self.here = copy.deepcopy(LINUX)
-        resolve = patch.object(e, 'runtime', side_effect=lambda profile: copy.deepcopy(self.here))
+        resolve = patch.object(e, 'runtime', side_effect=lambda profile, variant=None: copy.deepcopy(self.here))
         resolve.start()
         self.addCleanup(resolve.stop)
         self.api = None
@@ -1354,6 +1354,54 @@ class Boundaries(unittest.TestCase):
         self.assertEqual(self.outcome(lambda: e.required_checks({'checks': ['unit', 'unit']})), 'check-config')
 
 
+def fake_gh(bin_dir):
+    """A gh on PATH that answers this repository's API reads from the FIXTURE_API file."""
+    gh = bin_dir / 'gh'
+    gh.write_text('#!' + sys.executable + ' -I\n'
+                  'import base64, json, os, sys\n'
+                  'data = json.load(open(os.environ["FIXTURE_API"]))\n'
+                  'path, base = sys.argv[-1], "repos/' + REPO + '"\n'
+                  'key = "" if path == base else path[len(base) + 1:]\n'
+                  'if not path.startswith(base) or key not in data:\n'
+                  '    sys.exit(1)\n'
+                  'value = data[key]\n'
+                  'if isinstance(value, dict) and "_binary" in value:\n'
+                  '    sys.stdout.buffer.write(base64.b64decode(value["_binary"]))\n'
+                  'else:\n'
+                  '    print(json.dumps(value))\n')
+    gh.chmod(0o755)
+
+
+def write_api(path, data):
+    path.write_text(json.dumps({
+        key: {'_binary': base64.b64encode(value).decode()} if isinstance(value, bytes) else value
+        for key, value in data.items()}))
+
+
+def cli_world(sha, payload):
+    """The API answers for one push run of CI at sha, one job (tests) and its evidence, ten minutes
+    old, and the annotated tag v1.2.3 naming sha."""
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def iso(seconds):
+        return (now + dt.timedelta(seconds=seconds)).isoformat().replace('+00:00', 'Z')
+    run = dict(RUN, head_sha=sha, created_at=iso(-600), run_started_at=iso(-600), updated_at=iso(-300))
+    job = dict(JOB_LINUX, name='tests', head_sha=sha, started_at=iso(-590), completed_at=iso(-300))
+    artifact = dict(ARTIFACT_LINUX, name='ci-evidence-ci-test-1', created_at=iso(-301),
+                    workflow_run=dict(ORIGIN, head_sha=sha))
+    data = {'': {'id': REPO_ID, 'full_name': REPO, 'default_branch': 'main'},
+            'git/ref/tags/v1.2.3': {'ref': 'refs/tags/v1.2.3', 'object': {'type': 'tag', 'sha': TAG_OBJECT}},
+            'git/tags/' + TAG_OBJECT: {'object': {'type': 'commit', 'sha': sha}},
+            'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},
+            'actions/workflows/9/runs?head_sha=%s&per_page=100&page=1' % sha:
+                {'total_count': 1, 'workflow_runs': [run]},
+            'actions/runs/100': run,
+            JOBS: {'total_count': 1, 'jobs': [job]},
+            ARTIFACTS: {'total_count': 1, 'artifacts': [artifact]}}
+    pack(data, artifact, payload)
+    return data
+
+
 class RealCLI(unittest.TestCase):
     """The public command, as the workflows run it: a fixture repository, a fake gh on PATH."""
 
@@ -1388,20 +1436,7 @@ class RealCLI(unittest.TestCase):
         tool = bin_dir / 'release-evidence-fixture-tool'
         tool.write_text('#!/bin/sh\necho "fixture-tool 1.0"\n')
         tool.chmod(0o755)
-        gh = bin_dir / 'gh'
-        gh.write_text('#!' + sys.executable + ' -I\n'
-                      'import base64, json, os, sys\n'
-                      'data = json.load(open(os.environ["FIXTURE_API"]))\n'
-                      'path, base = sys.argv[-1], "repos/' + REPO + '"\n'
-                      'key = "" if path == base else path[len(base) + 1:]\n'
-                      'if not path.startswith(base) or key not in data:\n'
-                      '    sys.exit(1)\n'
-                      'value = data[key]\n'
-                      'if isinstance(value, dict) and "_binary" in value:\n'
-                      '    sys.stdout.buffer.write(base64.b64decode(value["_binary"]))\n'
-                      'else:\n'
-                      '    print(json.dumps(value))\n')
-        gh.chmod(0o755)
+        fake_gh(bin_dir)
         git_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
         for argv in (['git', 'init', '-q', '-b', 'main'], ['git', 'add', '.'],
                      ['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
@@ -1447,32 +1482,11 @@ class RealCLI(unittest.TestCase):
                 'coverage': {'unit': 'PASS', 'audit': 'SKIP'}}
 
     def world(self, payload=None):
-        now = dt.datetime.now(dt.timezone.utc)
-        def iso(seconds):
-            return (now + dt.timedelta(seconds=seconds)).isoformat().replace('+00:00', 'Z')
-        run = dict(RUN, head_sha=self.sha, created_at=iso(-600), run_started_at=iso(-600),
-                   updated_at=iso(-300))
-        job = dict(JOB_LINUX, name='tests', head_sha=self.sha, started_at=iso(-590), completed_at=iso(-300))
-        payload = payload or self.world_payload()
-        artifact = dict(ARTIFACT_LINUX, name='ci-evidence-ci-test-1', created_at=iso(-301),
-                        workflow_run=dict(ORIGIN, head_sha=self.sha))
-        data = {'': {'id': REPO_ID, 'full_name': REPO, 'default_branch': 'main'},
-                'git/ref/tags/v1.2.3': {'ref': 'refs/tags/v1.2.3', 'object': {'type': 'tag', 'sha': TAG_OBJECT}},
-                'git/tags/' + TAG_OBJECT: {'object': {'type': 'commit', 'sha': self.sha}},
-                'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},
-                'actions/workflows/9/runs?head_sha=%s&per_page=100&page=1' % self.sha:
-                    {'total_count': 1, 'workflow_runs': [run]},
-                'actions/runs/100': run,
-                JOBS: {'total_count': 1, 'jobs': [job]},
-                ARTIFACTS: {'total_count': 1, 'artifacts': [artifact]}}
-        pack(data, artifact, payload)
-        return data
+        return cli_world(self.sha, payload or self.world_payload())
 
     def cli(self, data, mode='verify', extra=(), env=None):
         self.outputs.write_text('')
-        self.fixture_api.write_text(json.dumps({
-            key: {'_binary': base64.b64encode(value).decode()} if isinstance(value, bytes) else value
-            for key, value in data.items()}))
+        write_api(self.fixture_api, data)
         return subprocess.run([sys.executable, str(self.root / 'release_evidence.py'), mode, *extra],
                               cwd=self.root, env=dict(self.env, **(env or {})), text=True,
                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1694,6 +1708,462 @@ class RealCLI(unittest.TestCase):
             with self.subTest(code=code):
                 log.write_text(text)
                 result = self.cli({}, 'capture', extra, self.capture_env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('capture refused: ' + code, result.stderr)
+
+
+# --- the runner identity policy (devkit #59): a reported image identity, not a pinned VM image ----
+
+MANIFEST_BYTES = (ROOT / 'templates/runner-identity.json').read_bytes()
+MANIFEST_SHA = hashlib.sha256(MANIFEST_BYTES).hexdigest()
+CHECKOUT = 'actions/checkout@' + '3' * 40
+UPLOAD = 'actions/upload-artifact@' + '4' * 40
+IDENTITY_RECORD = {'manifest': '.github/runner-identity.json', 'sha256': MANIFEST_SHA, 'revision': '1',
+                   'kind': 'reported'}
+
+
+def identity_config(config):
+    """CONFIG under the policy: the manifest pinned, each profile with its variant and image name."""
+    config = copy.deepcopy(config)
+    config['identity'] = {'manifest': '.github/runner-identity.json', 'sha256': MANIFEST_SHA}
+    config['profiles']['linux']['variant'] = 'linux-x64'
+    config['profiles']['linux']['platform']['ImageOS'] = 'ubuntu24'
+    config['profiles']['macos']['variant'] = 'macos-arm64'
+    return config
+
+
+class Identity(Gate):
+    """decide() under the identity policy; the context at the commit is a fixture here (the
+    manifest's own bytes, the actions the workflow names), read from git in IdentityAtCommit."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = identity_config(self.config)
+        self.actions = {'ci': [CHECKOUT, UPLOAD]}
+        variants = e.parse_identity_manifest(MANIFEST_BYTES)['variants']
+        for name, target in (('identity_context', lambda config, sha: {
+                                 'record': dict(IDENTITY_RECORD), 'variants': copy.deepcopy(variants),
+                                 'actions': copy.deepcopy(self.actions)}),
+                             ('release_workflow_actions', lambda source: {
+                                 'path': '.github/workflows/release.yml', 'actions': [CHECKOUT]})):
+            patcher = patch.object(e, name, side_effect=target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.evidence(0, lambda payload: payload.update(
+            identity=dict(IDENTITY_RECORD, variant='linux-x64', actions=[CHECKOUT, UPLOAD])))
+        self.evidence(1, lambda payload: (payload.update(
+            identity=dict(IDENTITY_RECORD, variant='macos-arm64', actions=[CHECKOUT, UPLOAD])),
+            payload['runtime']['runner'].update(os_release='e' * 64)))
+
+    def runner(self, index, **changes):
+        self.evidence(index, lambda payload: payload['runtime']['runner'].update(changes))
+
+    def add_macos_leg(self, image_version):
+        """A second macOS leg of the same profile and variant, reporting image_version."""
+        self.config['workflows']['ci']['jobs']['lint-macos'] = {
+            'name': 'lint (macos-latest)', 'job_id': 'lint', 'labels': ['macos-latest'],
+            'profile': 'macos', 'checks': ['unit']}
+        self.set_jobs(self.jobs + [dict(JOB_MACOS, id=204, name='lint (macos-latest)')])
+        artifact = dict(ARTIFACT_MACOS, id=304, name='ci-evidence-ci-lint-macos-1')
+        self.set_artifacts(self.artifacts + [artifact])
+        payload = copy.deepcopy(EVIDENCE_MACOS)
+        payload.update(job='lint-macos', identity=dict(IDENTITY_RECORD, variant='macos-arm64',
+                                                       actions=[CHECKOUT, UPLOAD]))
+        payload['runtime']['runner'].update(os_release='e' * 64, ImageVersion=image_version)
+        pack(self.data, self.artifacts[-1], payload)
+
+    def test_a_reported_identity_is_reused_and_recorded_per_variant_and_profile(self):
+        self.assertEqual(self.decide(), 'reuse')
+        identity = self.record['identity']
+        self.assertEqual({key: identity[key] for key in IDENTITY_RECORD}, IDENTITY_RECORD)
+        self.assertEqual(identity['statement'], 'a reported hosted-runner image identity, not a pinned VM image')
+        self.assertEqual(identity['release_workflow']['actions'], [CHECKOUT])
+        # Linux and macOS report different identities: they are never compared with each other.
+        self.assertEqual(sorted(identity['groups']), ['linux-x64/linux', 'macos-arm64/macos'])
+        self.assertEqual(identity['groups']['macos-arm64/macos']['jobs'], ['ci/test-macos'])
+        self.assertEqual(identity['groups']['linux-x64/linux']['runtime'], LINUX)
+        self.add_macos_leg('20261019.2')
+        self.assertEqual(self.decide(), 'reuse')
+        self.assertEqual(self.record['identity']['groups']['macos-arm64/macos']['jobs'],
+                         ['ci/test-macos', 'ci/lint-macos'])
+
+    def test_a_missing_identity_refuses(self):
+        cases = [
+            (0, lambda payload: payload.pop('identity')),
+            (1, lambda payload: payload['identity'].pop('actions')),
+            (0, lambda payload: payload['runtime']['runner'].pop('os_release')),
+            (1, lambda payload: payload['runtime']['runner'].pop('os_release')),
+            (0, lambda payload: payload['runtime']['runner'].update(ImageVersion='')),
+            (1, lambda payload: payload['runtime']['runner'].pop('ImageOS')),
+            (0, lambda payload: payload['runtime'].update(tools={})),
+            (0, lambda payload: payload.pop('runtime')),
+        ]
+        for index, change in cases:
+            with self.subTest(index=index):
+                self.setUp()
+                self.evidence(index, change)
+                self.assertEqual(self.decide(), 'identity-missing')
+
+    def test_an_unexpected_identity_refuses_and_is_never_revalidated(self):
+        self.config['revalidation'] = {'allowed': True}
+        cases = [
+            (0, lambda payload: payload['runtime']['runner'].update(ImageOS='ubuntu26')),
+            (1, lambda payload: payload['runtime']['runner'].update(ImageOS='macos14')),
+            (0, lambda payload: payload['runtime']['runner'].update(ImageVersion='latest')),
+            (0, lambda payload: payload['runtime']['runner'].update(ImageVersion='20261020.*')),
+            (0, lambda payload: payload['runtime']['runner'].update(RUNNER_ARCH='ARM64')),
+            (1, lambda payload: payload['runtime']['runner'].update(os_release='not a digest')),
+            (0, lambda payload: payload['runtime']['runner'].update(ImageName='ubuntu-24.04')),
+            (0, lambda payload: payload['identity'].update(revision='2')),
+            (0, lambda payload: payload['identity'].update(sha256='0' * 64)),
+            (0, lambda payload: payload['identity'].update(kind='pinned')),
+            (1, lambda payload: payload['identity'].update(variant='macos-x64')),
+            (0, lambda payload: payload['identity'].update(actions=[CHECKOUT])),
+        ]
+        for index, change in cases:
+            with self.subTest(index=index):
+                self.setUp()
+                self.config['revalidation'] = {'allowed': True}
+                self.evidence(index, change)
+                self.assertEqual(self.decide(), 'identity-unexpected')
+                self.assertIsNone(self.record['revalidation'] if 'revalidation' in self.record else None)
+
+    def test_a_changed_identity_refuses_or_takes_the_fresh_route(self):
+        # The release runner reports another image version or OS release than the CI job did: the
+        # identity changed. It refuses (runtime-identity), or, where the configuration allows it,
+        # takes the existing fresh route on the release runner.
+        for change in ({'ImageVersion': '20261026.180.1'}, {'os_release': 'd' * 64}):
+            with self.subTest(change=change):
+                self.setUp()
+                self.here['runner'].update(change)
+                self.assertEqual(self.decide(), 'runtime-identity')
+                self.config['revalidation'] = {'allowed': True}
+                self.assertEqual(self.decide(), 'revalidate')
+                self.assertEqual(self.record['revalidation']['jobs'], ['test-linux'])
+
+    def test_legs_of_one_variant_and_profile_that_report_different_identities_refuse(self):
+        # Two macOS legs, which the release runner cannot resolve, ran on different images: the
+        # recorded versions are not normalized, and the image roll is not revalidated on Linux.
+        self.config['revalidation'] = {'allowed': True}
+        self.add_macos_leg('20261026.3')
+        self.assertEqual(self.decide(), 'identity-changed')
+        self.assertIn('20261019.2', self.record['refusal']['detail'])
+        self.assertIn('20261026.3', self.record['refusal']['detail'])
+
+    def test_an_identity_refusal_wins_over_a_drift(self):
+        self.config['revalidation'] = {'allowed': True}
+        self.here['runner']['ImageVersion'] = '20261026.180.1'
+        self.runner(0, ImageOS='ubuntu26')
+        self.assertEqual(self.decide(), 'identity-unexpected')
+
+    def test_incomplete_evidence_refuses(self):
+        self.set_jobs([job for job in self.jobs if job['name'] != 'test (macos-latest)'])
+        self.assertEqual(self.decide(), 'job-coverage')
+        self.setUp()
+        self.set_artifacts(self.artifacts[:1])
+        self.assertEqual(self.decide(), 'artifact-coverage')
+        self.setUp()
+        self.evidence(0, lambda payload: payload['coverage'].pop('unit'))
+        self.assertEqual(self.decide(), 'check-coverage')
+
+    def test_evidence_with_an_identity_is_refused_where_no_policy_is_configured(self):
+        self.config = copy.deepcopy(CONFIG)
+        self.assertEqual(self.decide(), 'evidence-identity')
+
+
+def outcome_of(call):
+    """'accepted', a refusal as 'code: detail', or the name of any other exception."""
+    try:
+        call()
+        return 'accepted'
+    except e.Refusal as error:
+        return error.code + ': ' + error.detail
+    except Exception as error:  # a broken safeguard fails its assertion, not the test run
+        return type(error).__name__
+
+
+class IdentityConfiguration(unittest.TestCase):
+    def outcome(self, config):
+        return outcome_of(lambda: e.check_config(config))
+
+    def test_the_policy_needs_a_variant_an_image_name_and_a_tool_for_every_profile(self):
+        config = identity_config(CONFIG)
+        self.assertEqual(self.outcome(config), 'accepted')
+        for change, where in (
+                (lambda c: c['profiles']['macos'].pop('variant'), 'config.profiles.macos.variant'),
+                (lambda c: c['profiles']['linux']['platform'].pop('ImageOS'), 'config.profiles.linux.platform.ImageOS'),
+                (lambda c: c['profiles']['linux'].update(tools={}, pins={}), 'config.profiles.linux.tools'),
+                (lambda c: c['identity'].update(sha256='ABC'), 'config.identity.sha256'),
+                (lambda c: c['identity'].update(manifest='../manifest.json'), 'config.identity.manifest'),
+                (lambda c: c['identity'].update(revision='1'), 'config.identity'),
+                (lambda c: c.update(identity=[]), 'config.identity')):
+            with self.subTest(where=where):
+                changed = copy.deepcopy(config)
+                change(changed)
+                self.assertTrue(self.outcome(changed).startswith('config-invalid: ' + where), self.outcome(changed))
+        plain = copy.deepcopy(CONFIG)
+        plain['profiles']['linux']['variant'] = 'linux-x64'
+        self.assertTrue(self.outcome(plain).startswith('config-invalid: config.profiles.linux.variant'))
+
+
+class IdentityManifest(unittest.TestCase):
+    def outcome(self, raw):
+        return outcome_of(lambda: e.parse_identity_manifest(raw))
+
+    def test_the_template_is_the_revision_the_gate_ships(self):
+        manifest = e.parse_identity_manifest(MANIFEST_BYTES)
+        self.assertEqual((manifest['manifestVersion'], manifest['identity']), (1, 'reported'))
+        self.assertEqual(e.IDENTITY_REVISIONS[manifest['revision']], MANIFEST_SHA)
+        self.assertEqual(sorted(manifest['variants']),
+                         ['linux-arm64', 'linux-x64', 'macos-arm64', 'macos-x64', 'windows-x64'])
+        # It says what it is: a reported identity, not a pinned VM image.
+        self.assertIn('not a pinned VM image', ' '.join(manifest['$comment']))
+
+    def test_refused_manifests(self):
+        base = json.loads(MANIFEST_BYTES)
+        cases = [
+            (lambda m: m.update(manifestVersion=2), 'manifest.manifestVersion'),
+            (lambda m: m.update(manifestVersion='1'), 'manifest.manifestVersion'),
+            (lambda m: m.update(identity='pinned'), 'manifest.identity'),
+            (lambda m: m.update(runner=['ImageOS', 'RUNNER_OS']), 'manifest.runner'),
+            (lambda m: m.update(actions='tag'), 'manifest.actions'),
+            (lambda m: m.update(revision='a b'), 'manifest.revision'),
+            (lambda m: m.update(images={}), 'manifest:'),
+            (lambda m: m.pop('variants'), 'manifest:'),
+            (lambda m: m.update(variants={}), 'manifest.variants'),
+            (lambda m: m['variants']['linux-x64'].update(RUNNER_OS='Plan9'), 'manifest.variants.linux-x64.RUNNER_OS'),
+            (lambda m: m['variants']['linux-x64'].update(RUNNER_ARCH='riscv'), 'manifest.variants.linux-x64.RUNNER_ARCH'),
+            (lambda m: m['variants']['linux-x64'].update(os_release='etc/os-release'), 'manifest.variants.linux-x64.os_release'),
+            (lambda m: m['variants']['linux-x64'].update(imageVersion='20261020.1'), 'manifest.variants.linux-x64:'),
+            (lambda m: m['variants'].update({'linux x64': m['variants']['linux-x64']}), 'manifest.variants.linux x64'),
+        ]
+        for change, where in cases:
+            with self.subTest(where=where):
+                manifest = copy.deepcopy(base)
+                change(manifest)
+                self.assertTrue(self.outcome(json.dumps(manifest).encode()).startswith('identity-config: ' + where),
+                                self.outcome(json.dumps(manifest).encode()))
+        repeated = MANIFEST_BYTES.replace(b'"revision": "1",', b'"revision": "1",\n  "revision": "2",')
+        self.assertEqual(self.outcome(repeated), 'identity-config: a member is repeated')
+        self.assertEqual(self.outcome(b'{"manifestVersion": 1'), 'identity-config: the manifest is not JSON')
+        self.assertEqual(self.outcome(b'\xff'), 'identity-config: the manifest is not JSON')
+        self.assertTrue(self.outcome(b' ' * (64 * 1024) + b'{}').startswith('identity-config: the manifest is over'))
+
+
+def git_fixture(root, files):
+    """A repository at root with files committed; its commit id."""
+    git_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+    for name, content in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content if isinstance(content, bytes) else content.encode())
+    for argv in (['git', 'init', '-q', '-b', 'main'], ['git', 'add', '.'],
+                 ['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                  'commit', '-qm', 'fixture']):
+        subprocess.run(argv, cwd=root, check=True, env=git_env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True,
+                                   stdin=subprocess.DEVNULL).strip()
+
+
+class IdentityAtCommit(unittest.TestCase):
+    """identity_context and the actions reader over a real fixture repository."""
+
+    CI = ('name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n'
+          '      # uses: a comment is not an action\n'
+          '      - uses: %s # v7.0.1\n'
+          '      - name: Set up\n        uses: ./.github/actions/setup\n'
+          '      - uses: "docker://alpine@sha256:%s"\n'
+          '  call:\n    uses: ./.github/workflows/reusable.yml\n' % (CHECKOUT, '9' * 64))
+    SETUP = ('name: setup\nruns:\n  using: composite\n  steps:\n'
+             "    - uses: 'actions/setup-go@%s'\n" % ('5' * 40))
+    REUSABLE = 'on: workflow_call\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: %s\n' % UPLOAD
+
+    def repository(self, **changes):
+        files = {'.github/runner-identity.json': MANIFEST_BYTES, '.github/workflows/ci.yml': self.CI,
+                 '.github/actions/setup/action.yml': self.SETUP,
+                 '.github/workflows/reusable.yml': self.REUSABLE}
+        files.update(changes)
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-identity-')
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        sha = git_fixture(root, files)
+        cwd = os.getcwd()
+        os.chdir(root)
+        self.addCleanup(os.chdir, cwd)
+        return sha
+
+    def outcome(self, call):
+        return outcome_of(call)
+
+    def test_the_context_at_the_commit(self):
+        sha = self.repository()
+        context = e.identity_context(identity_config(CONFIG), sha)
+        self.assertEqual(context['record'], IDENTITY_RECORD)
+        self.assertEqual(context['actions']['ci'], sorted([
+            CHECKOUT, UPLOAD, 'actions/setup-go@' + '5' * 40, 'docker://alpine@sha256:' + '9' * 64,
+            './.github/actions/setup', './.github/workflows/reusable.yml']))
+        self.assertEqual(context['variants']['linux-x64']['os_release'], '/etc/os-release')
+
+    def test_an_unpinned_or_unreadable_action_refuses(self):
+        for text in ('      - uses: actions/checkout@v4\n', '      - uses: actions/checkout@main\n',
+                     '      - uses: actions/checkout@%s\n' % ('3' * 39),
+                     '      - uses: ${{ matrix.action }}\n', '      - uses: "${{ matrix.action }}"\n',
+                     '      - uses: docker://alpine:3\n', '      - {uses: %s}\n' % CHECKOUT,
+                     '      - uses: ./missing\n', '      - uses: ../outside\n'):
+            with self.subTest(text=text):
+                sha = self.repository(**{'.github/workflows/ci.yml': self.CI + '  more:\n    steps:\n' + text})
+                self.assertTrue(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha))
+                                .startswith('identity-unexpected: '))
+        sha = self.repository(**{'.github/actions/setup/action.yml': self.SETUP.replace("@" + '5' * 40, '@v5')})
+        self.assertTrue(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha))
+                        .startswith('identity-unexpected: .github/actions/setup/action.yml names actions/setup-go@v5'))
+
+    def test_a_manifest_that_is_not_the_pinned_shipped_revision_refuses(self):
+        edited = MANIFEST_BYTES.replace(b'"macos-x64": {', b'"macos-intel": {')
+        sha = self.repository(**{'.github/runner-identity.json': edited})
+        self.assertTrue(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha))
+                        .startswith('identity-config: .github/runner-identity.json is not the manifest'))
+        config = identity_config(CONFIG)
+        config['identity']['sha256'] = hashlib.sha256(edited).hexdigest()
+        self.assertTrue(self.outcome(lambda: e.identity_context(config, sha))
+                        .startswith('identity-config: revision 1 with these bytes is not'))
+
+    def test_a_profile_whose_platform_is_not_its_variant_refuses(self):
+        sha = self.repository()
+        config = identity_config(CONFIG)
+        config['profiles']['macos']['variant'] = 'linux-arm64'
+        self.assertEqual(self.outcome(lambda: e.identity_context(config, sha)),
+                         'identity-config: macos: its platform is not the variant linux-arm64')
+        config['profiles']['macos']['variant'] = 'solaris'
+        self.assertEqual(self.outcome(lambda: e.identity_context(config, sha)),
+                         'identity-config: macos names no variant of the manifest')
+
+    def test_this_runner_under_the_policy(self):
+        variant = {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'os_release': str(Path(__file__))}
+        profile = {'platform': {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'ImageOS': 'ubuntu24'},
+                   'compare': 'release-runner', 'tools': {'python': [sys.executable, '--version']}}
+        env = {'ImageOS': 'ubuntu24', 'ImageVersion': '20261020.1', 'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64'}
+        with patch.dict(os.environ, env):
+            found = e.runtime(profile, variant)
+        self.assertEqual(found['runner']['os_release'], hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        with patch.dict(os.environ, dict(env, ImageVersion='latest')):
+            self.assertEqual(self.outcome(lambda: e.runtime(profile, variant)),
+                             "identity-unexpected: ImageVersion 'latest' is not a reported image version")
+        with patch.dict(os.environ, dict(env, ImageOS='ubuntu26')):
+            self.assertTrue(self.outcome(lambda: e.runtime(profile, variant)).startswith('runner-platform: '))
+        with patch.dict(os.environ, env):
+            missing = dict(variant, os_release=str(Path(__file__).with_name('no-such-os-release')))
+            self.assertTrue(self.outcome(lambda: e.runtime(profile, missing)).startswith('identity-missing: '))
+            found = e.runtime(profile, dict(variant, os_release=None))
+        self.assertNotIn('os_release', found['runner'])
+
+
+class IdentityCLI(unittest.TestCase):
+    """capture and verify under the policy, as the workflows run them, over a fixture repository
+    whose evidence is what capture wrote."""
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-cli-')
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        root = self.scratch / 'repo'
+        config = {
+            'schema': 2, 'repository': REPO, 'branch': 'main', 'max_age_hours': 48, 'inputs': [],
+            'identity': {'manifest': '.github/runner-identity.json', 'sha256': MANIFEST_SHA},
+            'profiles': {'kit': {'platform': {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'ImageOS': 'ubuntu24'},
+                                 'variant': 'linux-x64', 'compare': 'release-runner',
+                                 'tools': {'python': [sys.executable, '--version']}}},
+            'workflows': {'ci': {'path': '.github/workflows/ci.yml', 'name': 'CI', 'events': ['push'],
+                                 'jobs': {'test': {'name': 'tests', 'job_id': 'test',
+                                                   'labels': ['ubuntu-latest'], 'profile': 'kit',
+                                                   'checks': ['unit']}}}}}
+        self.release = 'name: Release\non: push\njobs:\n  verify:\n    steps:\n      - uses: %s\n' % CHECKOUT
+        files = {'.github/ci-evidence.json': json.dumps(config, indent=2) + '\n',
+                 '.github/runner-identity.json': MANIFEST_BYTES,
+                 '.github/workflows/ci.yml': 'name: CI\non: push\njobs:\n  test:\n    steps:\n'
+                                             '      - uses: %s\n      - uses: %s\n' % (CHECKOUT, UPLOAD),
+                 '.github/workflows/release.yml': self.release,
+                 'dev.json': '{"version": 1, "checks": [{"name": "unit"}]}\n',
+                 'release_evidence.py': HELPER.read_bytes()}
+        self.root = root
+        root.mkdir()
+        self.sha = git_fixture(root, files)
+        self.os_release = hashlib.sha256(Path('/etc/os-release').read_bytes()).hexdigest()
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GITHUB_SHA=self.sha,
+                        GITHUB_REPOSITORY=REPO, GITHUB_REPOSITORY_ID=str(REPO_ID), ImageOS='ubuntu24',
+                        ImageVersion='20261020.1', RUNNER_OS='Linux', RUNNER_ARCH='X64',
+                        GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='push', GITHUB_JOB='test',
+                        GITHUB_RUN_ID='100', GITHUB_RUN_ATTEMPT='1',
+                        GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/ci.yml@refs/heads/main',
+                        GITHUB_WORKFLOW_SHA=self.sha)
+        self.env.pop('GITHUB_OUTPUT', None)
+
+    def capture(self, log_text='PASS     unit 1s\n', **env):
+        log = self.scratch / 'checks.log'
+        log.write_text(log_text)
+        output = self.scratch / 'evidence.json'
+        result = subprocess.run([sys.executable, str(self.root / 'release_evidence.py'), 'capture', '--workflow',
+                                 'ci', '--job', 'test', '--check-log', str(log), '--output', str(output)],
+                                cwd=self.root, env=dict(self.env, **env), text=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return result, output
+
+    def test_capture_records_the_reported_identity(self):
+        result, output = self.capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        captured = json.loads(output.read_text())
+        self.assertEqual(captured['identity'], dict(IDENTITY_RECORD, variant='linux-x64',
+                                                    actions=sorted([CHECKOUT, UPLOAD])))
+        self.assertEqual(captured['runtime']['runner'], {
+            'ImageOS': 'ubuntu24', 'ImageVersion': '20261020.1', 'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64',
+            'os_release': self.os_release})
+        self.assertIn('.github/runner-identity.json', captured['inputs'])
+        # What capture wrote is what the release takes, on a runner that reports the same identity.
+        result, record = self.verify(captured)
+        self.assertEqual((result.returncode, record['decision']), (0, 'reuse'), result.stderr)
+        self.assertEqual(record['identity']['release_workflow'],
+                         {'path': '.github/workflows/release.yml', 'actions': [CHECKOUT]})
+        self.assertEqual(record['identity']['groups']['linux-x64/kit']['runtime'], captured['runtime'])
+        # The hosted image rolled before the release: the identity changed, and the release refuses.
+        result, record = self.verify(captured, ImageVersion='20261026.180.1')
+        self.assertEqual((result.returncode, record['decision'], (record['refusal'] or {}).get('code')),
+                         (1, 'refuse', 'runtime-identity'))
+        # The release workflow names an action by tag: refused.
+        (self.root / '.github/workflows/release.yml').write_text(self.release + '      - uses: actions/cache@v4\n')
+        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit',
+                        '-qam', 'tag-pinned action'], cwd=self.root, env=self.env, check=True,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+        result, record = self.verify(dict(captured, source=sha), GITHUB_SHA=sha)
+        refusal = record['refusal'] or {}
+        self.assertEqual((record['decision'], refusal.get('code')), ('refuse', 'identity-unexpected'))
+        self.assertIn('actions/cache@v4', refusal.get('detail'))
+
+    def verify(self, payload, **env):
+        bin_dir = self.scratch / 'bin'
+        bin_dir.mkdir(exist_ok=True)
+        fake_gh(bin_dir)
+        api = self.scratch / 'api.json'
+        sha = env.get('GITHUB_SHA', self.sha)
+        write_api(api, cli_world(sha, payload))
+        output = self.scratch / 'release-evidence.json'
+        result = subprocess.run([sys.executable, str(self.root / 'release_evidence.py'), 'verify', '--output',
+                                 str(output)], cwd=self.root, text=True, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+                                env=dict(self.env, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                                         FIXTURE_API=str(api), RELEASE_TAG='v1.2.3',
+                                         GITHUB_REF='refs/tags/v1.2.3',
+                                         GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/release.yml@refs/tags/v1.2.3',
+                                         GITHUB_WORKFLOW_SHA=sha, **env))
+        return result, json.loads(output.read_text())
+
+    def test_capture_refuses_an_unexpected_identity(self):
+        for env, code in (({'ImageVersion': 'latest'}, 'identity-unexpected'),
+                          ({'ImageOS': 'ubuntu26'}, 'runner-platform'),
+                          ({'ImageVersion': ''}, 'runner-identity')):
+            with self.subTest(env=env):
+                result, _ = self.capture(**env)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn('capture refused: ' + code, result.stderr)
 

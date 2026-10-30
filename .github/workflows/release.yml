@@ -273,7 +273,7 @@ jobs:
           kit="${unpack}/judgment-pack-devkit-${VERSION}"
           [ "$("${kit}/bin/jpdev" --version)" = "jpdev ${VERSION}" ] || { echo "the packaged jpdev does not report ${VERSION}" >&2; exit 1; }
           "${kit}/bin/jpdev" env > /dev/null
-          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/dev/changed_checks.py scripts/dev/release_evidence.py templates/ci-evidence.json scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
+          for path in bin/jpdev lib/wrap.sh lib/handover_check.sh templates/check.sh templates/dev.schema.json scripts/dev/handover_check.sh scripts/dev/changed_checks.py scripts/dev/release_evidence.py templates/ci-evidence.json templates/runner-identity.json scripts/sync-agent-docs.sh examples/judgment-pack-agent.dev.json LICENSE NOTICE README.md; do
             test -e "${kit}/${path}" || { echo "the tarball does not hold ${path}" >&2; exit 1; }
           done
 

@@ -1,6 +1,49 @@
 # Assessment: version-pinned CI and release environments
 
-Status: proposed infrastructure decision; documentation only. Tracks [#59](https://github.com/Judgment-Pack/judgment-pack-devkit/issues/59).
+Status: decided 2026-10-30 by the maintainer: the **free-tier variant** below. The larger-runner
+direction that follows it stays recorded as the route if the organization's plan changes. Tracks
+[#59](https://github.com/Judgment-Pack/judgment-pack-devkit/issues/59).
+
+## Decision: the free-tier variant
+
+The organization stays on its current plan, so #59 does not use larger runners with custom images.
+The shared policy instead holds release evidence to what a standard GitHub-hosted runner can show
+about itself, and refuses on a mismatch with the existing fresh-validation route:
+
+- the runner image name and version as the runner reports them (`ImageOS`, `ImageVersion`);
+- the OS and architecture;
+- the OS-release digest;
+- the resolved toolchains and the actions the workflows name, each pinned to a full commit.
+
+This is a **reported image identity, not a pinned VM image**. A standard runner's label is an
+address that GitHub moves to newer images; nothing in this policy selects, holds or attests an
+image, and the values above are the runner's own report, not a provider attestation. The policy
+therefore compares reports: every job of one variant and profile, and the release runner where a
+profile compares with it, must report one identity. A difference refuses reuse and takes the
+existing fresh route (the operator's re-run, or the release's opt-in revalidation on its own
+runner); a rolled hosted image is the common case, not an exception. Identity is compared per
+variant and profile, never across unlike OSes.
+
+The implementation is the release evidence gate's [runner identity](ci-evidence.md#runner-identity)
+policy: the versioned manifest [`templates/runner-identity.json`](../templates/runner-identity.json)
+(version 1, revision `1`; variants `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`,
+`windows-x64`), the optional `identity` member of `.github/ci-evidence.json`, a `variant` per
+profile, and the refusals `identity-config`, `identity-missing`, `identity-unexpected`,
+`identity-changed` beside the existing `runtime-identity`. Its update lifecycle (a roll between CI
+and release, a roll during CI, a label moving to another OS release, a new manifest revision) is
+described there. Adoption in each repository is that repository's own reviewed change; the
+judgment-pack-agent adoption is
+[judgment-pack-agent #239](https://github.com/Judgment-Pack/judgment-pack-agent/issues/239), after
+the kit release that carries the policy, and it does not replace that repository's specialized
+verifier without its own compatibility work.
+
+What the free-tier variant does not give, and the larger-runner route below would: a chosen,
+immutable image version held for a candidate's whole CI and release window, an image identity
+bound by provider records rather than the runner's report, and a controlled promotion, rollback and
+retirement of images. The sections below are the assessment as written before the decision, kept
+as that route.
+
+## The larger-runner direction (the route if the plan changes)
 
 This assessment selects a conditional direction for Linux and Windows: GitHub-hosted
 larger runners configured with a specific custom-image version, with a separate
@@ -17,7 +60,7 @@ each repository's release maintainer owns adoption and release decisions.
 The scope is the 2026-10-29 work lane. The source inventory below records immutable
 commits collected during the assessment. No release is authorized by this document.
 
-## Evidence inventory
+### Evidence inventory
 
 Each repository link names the inspected commit. Workflow names below are relative
 to `.github/workflows/`; the evidence configuration and verifier at that same commit
@@ -60,7 +103,7 @@ merely because they use the same label. judgment-pack-desk mutation jobs likewis
 remain outside its current release gate. Changing evidence coverage needs an
 explicit adoption change; this document does not expand or reduce it.
 
-## Infrastructure choice and feasibility
+### Infrastructure choice and feasibility
 
 GitHub documents custom images for Linux x64/arm64 and Windows x64, with Team or
 Enterprise Cloud entitlement and custom-image/runner administration permissions.
@@ -111,9 +154,12 @@ reruns, storage and any plan upgrade separately; obtain a billing-owner cap befo
 provisioning. Prices must be rechecked when selecting infrastructure.
 [GitHub runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing)
 
-## Proposed shared manifest, version 1
+### Proposed shared manifest, version 1
 
-This is a design for a future schema, not a currently accepted configuration file.
+This is a design for a future schema, not a currently accepted configuration file. It is the
+larger-runner manifest; the manifest the kit ships for the free-tier variant,
+[`templates/runner-identity.json`](../templates/runner-identity.json), is a different, smaller one
+whose only identity kind is `reported`.
 A reviewed judgment-pack-devkit release would carry one versioned manifest and
 schema. Each adopting repository pins their exact bytes and records that digest
 among verifier inputs; no consumer tracks a branch or a mutable latest version.
@@ -148,7 +194,7 @@ it with independently obtained provider/job records. Merely copying a generation
 manifest onto the runner proves nothing about the current VM. A pinned action must
 not fetch an unpinned installer or package transitively.
 
-## Trust and admission
+### Trust and admission
 
 Image generation and promotion are trusted administrative operations. Use a
 separate private control repository and restricted generation group, selected by
@@ -181,7 +227,7 @@ by silently entering one. If a candidate's image expires or is revoked before
 publication, abort the window, select a reviewed replacement revision and collect
 new required evidence; an expired successful run cannot authorize publication.
 
-## Promotion, patching, rollback and retirement
+### Promotion, patching, rollback and retirement
 
 Proposed lifecycle: build candidate, scan and inventory, validate, independently
 review, promote by manifest revision, adopt, retire. Generate patch candidates
@@ -206,7 +252,7 @@ and storage budgets. Retire unused images after all windows and artifact-retenti
 obligations close; record deletion and revoke their admission. Retain manifests,
 inventories and review records for audit without keeping executable images forever.
 
-## Validation and adoption sequence
+### Validation and adoption sequence
 
 The implementation will need these handwritten scenarios in each relevant verifier
 and its shared reader. This documentation PR adds no executable test fixtures.

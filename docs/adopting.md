@@ -269,3 +269,40 @@ path a workflow creates belongs outside the clone or in `.gitignore`. The report
 untracked path as `untracked path PATH is not mapped; a workflow-created path belongs outside the
 clone or in .gitignore: whole list`. The [policy](policy.md#testing) says where a scoped run is allowed and where the
 full list is required.
+
+## Release evidence: the runner identity policy
+
+A repository that has adopted [the release evidence gate](ci-evidence.md) can hold its evidence to
+the [runner identity](ci-evidence.md#runner-identity) policy, the shared policy for standard
+GitHub-hosted runners. It is a reported image identity, not a pinned VM image: the gate compares
+what each runner reports about its image and refuses on a difference; it pins no image. Adopt it in
+the repository's own reviewed change:
+
+1. Vendor `scripts/dev/release_evidence.py` from the kit release that carries the policy (the gate
+   holds the manifest revisions it accepts), and copy `templates/runner-identity.json` unchanged to
+   `.github/runner-identity.json`.
+2. In `.github/ci-evidence.json`, add the pin (its SHA-256 is `sha256sum .github/runner-identity.json`,
+   which must be a revision the gate ships):
+
+   ```json
+   "identity": {"manifest": ".github/runner-identity.json", "sha256": "<the SHA-256>"}
+   ```
+
+3. Give every profile its `variant` (`linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64`,
+   `windows-x64`; its `RUNNER_OS` and `RUNNER_ARCH` must be the variant's), its `platform.ImageOS`
+   (the image name its runners report: `ubuntu24`, `macos15`), and at least one tool. A profile of
+   the release job's platform keeps `compare: release-runner`; a leg of another OS or architecture
+   keeps `compare: pins`, and its legs must agree among themselves.
+4. Pin every `uses:` of the CI workflows, of the local actions and reusable workflows they call, and
+   of the release workflow to a full commit id (a container image to a `sha256` digest). Write each
+   `uses:` as a block-style key on its own line.
+5. Decide the image-roll route: with `"revalidation": {"allowed": true}` and the
+   [revalidation job](ci-evidence.md#revalidation), a release whose runner reports another image
+   than the evidence runs the check list on the release runner; without it, it refuses and the
+   operator re-runs all jobs of the main CI run ([the fresh route](ci-evidence.md#the-fresh-route)).
+
+Nothing else in the workflows changes: `capture` and `verify` read the policy from the
+configuration. The first main run after the change records the identity; until then a release at
+an older commit holds its evidence to that commit's own configuration. A repository with its own
+evidence verifier (judgment-pack-agent's `scripts/dev/ci_evidence.py`) keeps it until its own
+reviewed compatibility work moves it to the shared policy.

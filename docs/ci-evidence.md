@@ -45,7 +45,9 @@ Evidence is reused only when all of this holds; anything else refuses.
   of the manifest `dev.json`, the configuration, the gate itself, each workflow file and every
   configured pin file) and the runner and tool identity it ran with; the release derives the
   former from its own checkout and the latter from its pins or from its own runner
-  ([execution inputs](#execution-inputs)).
+  ([execution inputs](#execution-inputs)). Where the repository configures the
+  [runner identity](#runner-identity) policy, each job also records the image identity its runner
+  reports, held to that policy per variant and profile.
 - **Fresh enough.** The selected attempt started at most `max_age_hours` (48 at most) before the
   release reads it, and not in the future.
 - **Still true at the end.** The run's attempt and the selection are read again after collection,
@@ -116,7 +118,9 @@ naming it); `"$comment"` is allowed and ignored in any object whose members are 
 | `tag.prerelease` | optional, default `false` (`tag` absent): `false` admits `vMAJOR.MINOR.PATCH` only; `true` also admits a SemVer prerelease suffix ([below](#prerelease-tags-and-dispatch-runs)) |
 | `dispatch.validates` | optional, default `none` (`dispatch` absent): a `workflow_dispatch` run of the release workflow does not use the gate and is refused; `branch-tip`: it validates the trusted branch's tip, validation-only ([below](#prerelease-tags-and-dispatch-runs)) |
 | `revalidation.allowed` | optional, default `false` (`revalidation` absent): a release runner whose image or tools differ from the evidence's refuses (`runtime-identity`); `true`: a publication refused for that alone decides `revalidate`, and the release workflow runs the check list `dev.json` declares itself, strictly ([below](#revalidation)) |
-| `profiles.<name>.platform` | `RUNNER_OS`, `RUNNER_ARCH`, optionally `ImageOS`: what the job's runner must report |
+| `identity` | optional: the [runner identity](#runner-identity) policy, `manifest` (the vendored manifest's repository path, recorded as an input) and `sha256` (the SHA-256 of its exact bytes). Absent, nothing below about a variant applies |
+| `profiles.<name>.platform` | `RUNNER_OS`, `RUNNER_ARCH`, optionally `ImageOS`: what the job's runner must report; under `identity`, `ImageOS` is required |
+| `profiles.<name>.variant` | under `identity` only, and required there: the manifest variant (`linux-x64`, `macos-arm64`...) whose OS and architecture are the profile's platform |
 | `profiles.<name>.tools` | tool name to the command that prints its identity (`["go", "version"]`); each output is recorded and must not be empty |
 | `profiles.<name>.compare` | `release-runner`: the release job resolves the same profile on its own runner, and the evidence must match it exactly (image, version, OS release, every tool); for a leg on the release job's platform. `pins`: the recorded tools must equal `pins` exactly; for a leg the release job cannot resolve itself (another OS or architecture) |
 | `profiles.<name>.pins` | tool name to its exact expected output: required for every tool under `pins` (which needs at least one tool), optional under `release-runner`, where it pins a toolchain version on top |
@@ -203,7 +207,9 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
   hosted image since the CI run means fresh evidence is needed, or, where the configuration allows
   it, a fresh run of the check list on the release runner ([revalidation](#revalidation)). Under
   `pins`, the recorded tool output must equal the pin, the platform must match, and `ImageOS` when
-  pinned; the image version is recorded but not compared.
+  pinned; the image version is recorded but not compared with the release runner (under the
+  [runner identity](#runner-identity) policy, the legs of one variant and profile must agree on
+  it).
 - **Dependency and integration pins.** A pin file in `inputs` (a lock file, a companion version
   file) is bound by the commit. An input fetched at run time without a pin ("latest") is not
   reproducible and cannot be reused: pin it, or keep that check fresh at release.
@@ -212,6 +218,103 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
   the release workflow, and name it in `fresh_at_release`.
 - **Runners.** Every required job ran on a GitHub-hosted runner (`runner_group_id` 0, group
   "GitHub Actions") with exactly the configured labels.
+
+## Runner identity
+
+A standard GitHub-hosted runner is chosen by a label (`ubuntu-latest`, `ubuntu-24.04`,
+`macos-15`), and GitHub moves each label to newer images on its own schedule. A label is an
+address, not an identity, and a standard runner cannot be pinned to an image version. Where a
+repository configures `identity`, the gate holds every job's evidence to the image identity its
+runner **reports**: what the runner says about itself, compared between runners. This is a
+reported image identity, **not a pinned VM image**: nothing here chooses, holds or attests the
+machine a job runs on, and a recorded version only says which image the runner reported.
+
+**The manifest.** [`templates/runner-identity.json`](../templates/runner-identity.json), version 1,
+revision `1`, is the shared policy. An adopting repository vendors it unchanged (as
+`.github/runner-identity.json`) and pins it in its configuration:
+
+```json
+"identity": {
+  "manifest": ".github/runner-identity.json",
+  "sha256": "333c3ffe1f5d93a863298133ad15717c384146797c0cc88f2463a361e1e358da"
+}
+```
+
+The gate reads the manifest from the commit, refuses bytes whose SHA-256 is not the pinned one,
+and takes only a revision it ships itself (`IDENTITY_REVISIONS`): a locally edited copy is not the
+shared policy (`identity-config`). The manifest is bounded JSON with no repeated member; its
+`identity` is `"reported"`, the only kind there is. It names what each job records and the gate
+compares, per variant:
+
+| Field | What the runner reports |
+| --- | --- |
+| `ImageOS`, `ImageVersion` | the runner image name and version, as the runner's environment reports them (`ubuntu24`, `20261026.180.1`); the version must have that form: `latest`, a wildcard or anything else is not a reported version |
+| `RUNNER_OS`, `RUNNER_ARCH` | the OS and architecture; they must be the variant's |
+| `os_release` | the SHA-256 of the variant's OS-release file: `/etc/os-release` on Linux, `/System/Library/CoreServices/SystemVersion.plist` on macOS; the Windows variant has none, and records none |
+| tools | each command of the profile's `tools`, resolved on the runner (at least one under the policy), and each pin as before |
+| actions | every `uses:` of the job's workflow file at the commit, local actions and local reusable workflows followed: a local path, a full commit id, or a container image by `sha256` digest; a tag, a branch, an expression, a container tag, or a `uses:` that is not a block-style key of its own line refuses |
+
+The variants are `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64` and `windows-x64`. Each
+profile names its variant and pins `ImageOS`; its `RUNNER_OS` and `RUNNER_ARCH` must be the
+variant's (`identity-config`).
+
+**What a job records.** `capture` records the runner fields above in `runtime.runner`, the tools in
+`runtime.tools`, and an `identity` member: the manifest path, its SHA-256, the revision, the kind,
+the variant and the sorted actions. It refuses a runner whose `ImageOS` is not the profile's
+(`runner-platform`), whose `ImageVersion` has another form (`identity-unexpected`), whose
+OS-release file cannot be read (`identity-missing`), and a workflow with an unpinned action
+(`identity-unexpected`).
+
+**What the release compares.** Identity is compared per variant and profile, never across unlike
+OSes or profiles. For each job, before its runtime is compared, the gate refuses:
+
+- `identity-missing`: no `identity` member, one without every field, or a runtime record without a
+  field the variant has, or without tools (evidence captured before the policy is such evidence);
+- `identity-unexpected`: an `identity` member other than the commit's (another manifest, revision,
+  variant or set of actions), an `ImageOS` other than the profile's, another OS or architecture than
+  the variant's, an `ImageVersion` not of the reported form, an `os_release` that is not a digest,
+  or a runner field the variant does not have.
+
+Neither is a drift: each refuses even where revalidation is allowed. Then:
+
+- a `release-runner` profile's jobs must report exactly what the release runner reports, image
+  version and OS-release digest included. Otherwise the identity changed: `runtime-identity`, or,
+  where the configuration allows it, the existing fresh route on the release runner
+  ([revalidation](#revalidation)), raised after every other check as before;
+- a `pins` profile's jobs (a leg the release runner cannot resolve, such as macOS) must have
+  reported one identity between them, image version and OS-release digest included:
+  `identity-changed` otherwise, which is never revalidated (the release runner cannot run that
+  leg).
+
+The release workflow's own `uses:` must be pinned the same way (`identity-unexpected`; read from
+`GITHUB_WORKFLOW_REF` at the commit). The decision record's `identity` holds the manifest record,
+the statement that it is a reported identity and not a pinned VM image, the release workflow's
+actions, and per variant and profile the jobs and the identity they reported.
+
+**When the hosted image rolls.** It rolls often, and this is the case the policy is built for:
+
+1. *Between the CI run and the release* (the common case): the release runner reports a newer
+   `ImageVersion` (and maybe other tools or OS-release digest) than the `release-runner` jobs'
+   evidence. The identity changed, so the evidence is not reused: the release refuses
+   (`runtime-identity`), or decides `revalidate` where the repository allows it and runs its check
+   list strictly on the release runner. `pins` legs are not compared with the release runner.
+2. *During the CI run*: two jobs of one variant and profile ran on different images. Under
+   `release-runner` at least one differs from the release runner: the same as 1. Under `pins`:
+   `identity-changed`. The fresh route is to re-run all jobs of the CI run at the commit; no older
+   run is searched for, and no version is normalized to another.
+3. *The label moves to another OS release* (`ubuntu-latest` from `ubuntu24` to `ubuntu26`):
+   capture refuses on the next main run (`runner-platform`), and a release whose runner reports
+   the new name refuses (`runner-platform`), with no revalidation. Moving the profile's `ImageOS`
+   pin, or the label, is a reviewed configuration change at a new commit with its own CI.
+4. *A new manifest revision*: a kit release ships it beside a gate that accepts it. Adopting it is
+   re-vendoring both and changing `identity.sha256` in one reviewed change; evidence is per commit,
+   so no evidence of the old revision is taken for the new one.
+
+GitHub patches and retires hosted images; the policy freezes none and cannot: it only requires that
+the evidence and its consumer report one identity, so a security update costs a fresh run, never a
+held image. The route that pins a complete VM image is a GitHub larger runner with a custom image
+version, which the [assessment](ci-release-environment-assessment.md) keeps as the direction if the
+organization's plan changes; this policy does not claim that guarantee.
 
 ## The decision record
 
@@ -226,6 +329,10 @@ It holds:
   and job key and, for each differing runner key and tool, the `recorded` value and the
   `release_runner` value) and `jobs` (the job keys whose profile compares with the release
   runner); `null` otherwise;
+- `identity`: under the [runner identity](#runner-identity) policy, the manifest record (path,
+  digest, revision, kind), the statement that it is a reported identity and not a pinned VM image,
+  the release workflow's actions, and per variant and profile the jobs and the identity they
+  reported; `null` otherwise;
 - `mode` (`publication`, `validation-only`, or `null` when refused before it was known), `event`
   (the run's `GITHUB_EVENT_NAME`), `tag_prerelease`, `dispatch` and `revalidation_allowed` (the
   configured rules);
@@ -255,6 +362,7 @@ repository metadata, ids, timestamps and tool versions only; command errors are 
 | unexpected skip | `job-skipped`, `job-not-skipped`, `check-result` |
 | newer failed, cancelled or running attempt | `run-result`, `run-unfinished`, `run-newer-failed`, `run-race`, `attempt-changed`, `latest-changed`, `final-latest-changed` |
 | changed inputs | `input-identity`, `runtime-identity`, `job-runner`, `evidence-identity` |
+| missing, unexpected or changed runner identity | `identity-config`, `identity-missing`, `identity-unexpected`, `identity-changed`, `runtime-identity` |
 | unavailable or stale evidence | `api-unavailable`, `pagination-*`, `artifact-expired`, `artifact-size`, `artifact-interval`, `artifact-digest`, `artifact-entries`, `run-age`, `timestamp`, `response-size`, `unavailable-or-malformed` |
 | tag movement | `tag-syntax`, `tag-annotated`, `tag-commit`, `tag-changed` |
 | the release run's event | `dispatch-not-gated`, `dispatch-ref`, `mode-unknown` |
@@ -262,7 +370,8 @@ repository metadata, ids, timestamps and tool versions only; command errors are 
 
 `capture` refuses with `capture-ref`, `capture-event`, `capture-job`, `capture-workflow`,
 `capture-run`, `check-infrastructure`, `check-duplicate`, `check-coverage`, `check-result` and the
-checkout and runner codes above.
+checkout and runner codes above; under the identity policy also `identity-config`,
+`identity-missing` and `identity-unexpected`.
 
 ## Revalidation
 
