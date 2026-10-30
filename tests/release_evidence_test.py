@@ -2010,7 +2010,14 @@ class IdentityAtCommit(unittest.TestCase):
                      '      - uses: actions/checkout@%s\n' % ('3' * 39),
                      '      - uses: ${{ matrix.action }}\n', '      - uses: "${{ matrix.action }}"\n',
                      '      - uses: docker://alpine:3\n', '      - {uses: %s}\n' % CHECKOUT,
-                     '      - uses: ./missing\n', '      - uses: ../outside\n'):
+                     '      - uses: ./missing\n', '      - uses: ../outside\n',
+                     # Other YAML spellings of the same key: read by no line rule, so refused, even
+                     # when the value is pinned.
+                     '      - "uses": actions/checkout@v4\n', "      - 'uses': actions/checkout@v4\n",
+                     '      - uses : actions/checkout@v4\n', '      - ? uses\n        : actions/checkout@v4\n',
+                     '      - ? "uses"\n        : actions/checkout@v4\n',
+                     '      - "u\\x73es": actions/checkout@v4\n', '      - "uses": %s\n' % CHECKOUT,
+                     '      - uses :  %s\n' % CHECKOUT):
             with self.subTest(text=text):
                 sha = self.repository(**{'.github/workflows/ci.yml': self.CI + '  more:\n    steps:\n' + text})
                 self.assertTrue(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha))
@@ -2018,6 +2025,13 @@ class IdentityAtCommit(unittest.TestCase):
         sha = self.repository(**{'.github/actions/setup/action.yml': self.SETUP.replace("@" + '5' * 40, '@v5')})
         self.assertTrue(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha))
                         .startswith('identity-unexpected: .github/actions/setup/action.yml names actions/setup-go@v5'))
+
+    def test_words_and_comments_are_not_keys(self):
+        text = (self.CI + '  more:\n    steps:\n      # "uses": actions/checkout@v4 in a comment\n'
+                '      - run: echo this step uses nothing\n      - name: reuses\n        env:\n'
+                '          reuses: x\n          my-uses: y\n          uses_count: 1\n')
+        sha = self.repository(**{'.github/workflows/ci.yml': text})
+        self.assertEqual(self.outcome(lambda: e.identity_context(identity_config(CONFIG), sha)), 'accepted')
 
     def test_a_manifest_that_is_not_the_pinned_shipped_revision_refuses(self):
         edited = MANIFEST_BYTES.replace(b'"macos-x64": {', b'"macos-intel": {')

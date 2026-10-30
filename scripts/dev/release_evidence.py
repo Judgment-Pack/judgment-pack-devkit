@@ -88,10 +88,16 @@ IDENTITY_LIMIT = 64 * 1024
 IMAGE_VERSION = re.compile(r'[0-9]+(\.[0-9]+)+')
 REVISION = re.compile(r'[A-Za-z0-9._-]{1,64}')
 # A `uses:` key at the start of a block-style YAML line, and its value, bare or quoted. Every other
-# "uses:" outside a comment line (a flow mapping, an expression) is a value the reader cannot place.
+# line that may spell the key `uses` outside a comment line is one the reader cannot place, and
+# refuses: a quoted key ("uses": or 'uses':), a space before the colon (uses :), an explicit key
+# (? uses), a flow mapping ({uses: ...}), and any double-quoted key written with an escape, which
+# could spell it.
 USES_KEY = re.compile(r'^[ \t]*(?:-[ \t]+)?\buses:(.*)$', re.M)
 USES_VALUE = re.compile(r'''[ \t]*(?:"([^"]*)"|'([^']*)'|([^\s#'"]+))[ \t]*(?:#.*)?''')
-USES_ANY = re.compile(r'^(?![ \t]*#).*\buses:', re.M)
+USES_SPELLINGS = (re.compile(r'''(?<![A-Za-z0-9_-])["']?uses["']?[ \t]*:'''),
+                  re.compile(r'''^[ \t]*(?:-[ \t]+)*\?[ \t]*["']?uses["']?[ \t]*(?:#.*)?$'''),
+                  re.compile(r'"[^"\n]*\\[^"\n]*"[ \t]*:'))
+COMMENT_LINE = re.compile(r'[ \t]*#')
 PINNED_ACTION = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}')
 PINNED_IMAGE = re.compile(r'docker://[^@\s]+@sha256:[0-9a-f]{64}')
 LOCAL_ACTIONS = 32
@@ -471,8 +477,10 @@ def workflow_actions(sha, path, seen):
     need(len(seen) <= LOCAL_ACTIONS, 'identity-unexpected', 'more than %d local actions' % LOCAL_ACTIONS)
     text = git('show', sha + ':' + path, code='identity-unexpected').decode('utf-8', 'replace')
     keys = USES_KEY.findall(text)
-    need(len(keys) == len(USES_ANY.findall(text)), 'identity-unexpected',
-         '%s has a uses: that is not a block-style key of its own line' % path)
+    spelled = [line for line in text.splitlines() if not COMMENT_LINE.match(line) and
+               any(pattern.search(line) for pattern in USES_SPELLINGS)]
+    need(len(keys) == len(spelled), 'identity-unexpected',
+         '%s has a uses key that is not a plain block-style key of its own line' % path)
     found = set()
     for value in keys:
         match = USES_VALUE.fullmatch(value)

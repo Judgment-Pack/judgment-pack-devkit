@@ -252,11 +252,23 @@ compares, per variant:
 | `RUNNER_OS`, `RUNNER_ARCH` | the OS and architecture; they must be the variant's |
 | `os_release` | the SHA-256 of the variant's OS-release file: `/etc/os-release` on Linux, `/System/Library/CoreServices/SystemVersion.plist` on macOS; the Windows variant has none, and records none |
 | tools | each command of the profile's `tools`, resolved on the runner (at least one under the policy), and each pin as before |
-| actions | every `uses:` of the job's workflow file at the commit, local actions and local reusable workflows followed: a local path, a full commit id, or a container image by `sha256` digest; a tag, a branch, an expression, a container tag, or a `uses:` that is not a block-style key of its own line refuses |
+| actions | every `uses:` of the job's workflow file at the commit, local actions and local reusable workflows followed: a local path, a full commit id, or a container image by `sha256` digest; a tag, a branch, an expression or a container tag refuses. So does any line that may spell the `uses` key other than as a plain block-style `uses:` key of its own line: a quoted key (`"uses":`, `'uses':`), a space before the colon (`uses :`), an explicit key (`? uses`), a flow mapping (`{uses: ...}`), and a double-quoted key written with an escape. A line of a `run:` script that contains such text refuses too |
 
 The variants are `linux-x64`, `linux-arm64`, `macos-arm64`, `macos-x64` and `windows-x64`. Each
 profile names its variant and pins `ImageOS`; its `RUNNER_OS` and `RUNNER_ARCH` must be the
 variant's (`identity-config`).
+
+**What the actions rule does not cover.** It reads the `uses:` of the workflow files and of local
+actions and local reusable workflows at the commit, and nothing else. These are admitted unread:
+
+- the `uses:` inside a remote composite action and inside a remote reusable workflow, even when
+  the outer reference is pinned to a full commit (their own references may be tags);
+- the images of a job's `container:` and `services:` (`node:20`, `postgres:latest`);
+- the `image:` of a local Docker action's `action.yml` (`docker://alpine:latest`, or a
+  `Dockerfile` whose `FROM` names a tag).
+
+A repository that needs them bound pins them itself, and reviews them as it reviews any input;
+the identity record does not stand for them.
 
 **What a job records.** `capture` records the runner fields above in `runtime.runner`, the tools in
 `runtime.tools`, and an `identity` member: the manifest path, its SHA-256, the revision, the kind,
