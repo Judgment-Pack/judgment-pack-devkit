@@ -2181,8 +2181,12 @@ PULL = {'number': 7, 'state': 'closed', 'merged_at': '2026-10-25T09:55:00Z', 'me
 PR_RUNS = 'actions/workflows/9/runs?head_sha=' + HEAD + '&per_page=100&page=1'
 PR_JOBS = 'actions/runs/50/attempts/1/jobs?per_page=100&page=1'
 PR_ARTIFACTS = 'actions/runs/50/artifacts?per_page=100&page=1'
+PR_ASSOCIATION = {'number': 7, 'head': {'ref': 'feature', 'sha': HEAD, 'repo': {'id': REPO_ID}},
+                  'base': {'ref': 'main', 'sha': BASE, 'repo': {'id': REPO_ID}}}
+HEAD_PULLS = 'pulls?head=example:feature&state=all&per_page=100&page=1'
+TIMELINE = 'issues/7/timeline?per_page=100&page=1'
 PR_RUN = dict(RUN, id=50, event='pull_request', head_branch='feature', head_sha=HEAD,
-              pull_requests=[{'number': 7}], created_at='2026-10-25T09:00:00Z',
+              pull_requests=[PR_ASSOCIATION], created_at='2026-10-25T09:00:00Z',
               run_started_at='2026-10-25T09:00:00Z', updated_at='2026-10-25T09:05:00Z')
 PR_JOB = dict(JOB_LINUX, id=151, run_id=50, head_sha=HEAD, head_branch='feature',
               started_at='2026-10-25T09:00:05Z', completed_at='2026-10-25T09:04:00Z')
@@ -2205,6 +2209,8 @@ class ReuseFixtures(Gate):
             'git/commits/' + SHA: {'sha': SHA, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}]},
             'git/commits/' + MERGE: {'sha': MERGE, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}, {'sha': HEAD}]},
             'commits/%s/pulls?per_page=100' % SHA: [PULL],
+            HEAD_PULLS: [PULL],
+            TIMELINE: [{'event': 'committed'}, {'event': 'reviewed'}, {'event': 'merged'}],
             PR_RUNS: {'total_count': 1, 'workflow_runs': [PR_RUN]},
             'actions/runs/50': PR_RUN,
             PR_JOBS: {'total_count': 1, 'jobs': [PR_JOB]},
@@ -2231,6 +2237,30 @@ class ReuseFixtures(Gate):
 
     def pr_runs(self, *runs):
         self.data[PR_RUNS] = {'total_count': len(runs), 'workflow_runs': list(runs)}
+
+    def foreign_run(self):
+        """Review probe P1: the merged pull request's own run 50 failed; run 60, newer and green, at
+        the same head and head branch, belongs to pull request 8 into another base, whose workflow
+        file wrote pull request 7's record. The branch job's record names run 60."""
+        own = dict(PR_RUN, conclusion='failure')
+        foreign = dict(PR_RUN, id=60, created_at='2026-10-25T09:20:00Z', run_started_at='2026-10-25T09:20:00Z',
+                       updated_at='2026-10-25T09:25:00Z',
+                       pull_requests=[dict(PR_ASSOCIATION, number=8, base={'ref': 'evil', 'sha': BASE,
+                                                                           'repo': {'id': REPO_ID}})])
+        self.pr_runs(own, foreign)
+        self.data['actions/runs/50'] = own
+        self.data['actions/runs/60'] = foreign
+        self.data[HEAD_PULLS] = [PULL, dict(PULL, number=8, state='open', merged_at=None, merge_commit_sha=None,
+                                           base=dict(PULL['base'], ref='evil'))]
+        self.data['actions/runs/60/attempts/1/jobs?per_page=100&page=1'] = {
+            'total_count': 1, 'jobs': [dict(PR_JOB, id=161, run_id=60, started_at='2026-10-25T09:20:05Z',
+                                            completed_at='2026-10-25T09:24:00Z')]}
+        artifact = dict(PR_ARTIFACT, id=361, created_at='2026-10-25T09:23:59Z', workflow_run=dict(PR_ORIGIN, id=60))
+        self.data['actions/runs/60/artifacts?per_page=100&page=1'] = {'total_count': 1, 'artifacts': [artifact]}
+        pack(self.data, artifact, dict(PR_EVIDENCE, run_id=60))
+        self.evidence(0, lambda payload: payload['reused'].update(
+            run_id=60, job_id=161, artifact={'id': 361, 'name': 'ci-evidence-ci-test-linux-1',
+                                             'digest': artifact['digest']}))
 
 
 class PullRequestReuse(ReuseFixtures):
@@ -2268,6 +2298,55 @@ class PullRequestReuse(ReuseFixtures):
         self.evidence(0, lambda payload: payload['reused'].update(tree='8' * 40))
         self.assertEqual(self.decide(), 'reuse-tree')
 
+    def test_a_run_of_another_pull_request_on_the_head_branch_is_refused(self):
+        # Review probe P1: refused, though the record the foreign run wrote is pull request 7's.
+        self.foreign_run()
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        self.assertIn('other pull requests [8]', self.record['refusal']['detail'])
+        # The listing alone shows no other pull request: the run's own association still refuses.
+        self.data[HEAD_PULLS] = [PULL]
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        self.assertIn('run 60 is associated with', self.record['refusal']['detail'])
+        # Control: the merged pull request's own failed run alone is refused as a failure.
+        self.setUp()
+        self.pr_runs(dict(PR_RUN, conclusion='failure'))
+        self.assertEqual(self.decide(), 'reuse-result')
+
+    def test_the_run_is_bound_to_the_merged_pull_request_and_its_base(self):
+        for association in ([], [dict(PR_ASSOCIATION, number=8)],
+                            [dict(PR_ASSOCIATION, base=dict(PR_ASSOCIATION['base'], ref='evil'))],
+                            [dict(PR_ASSOCIATION, base=dict(PR_ASSOCIATION['base'], repo={'id': 99}))],
+                            [PR_ASSOCIATION, dict(PR_ASSOCIATION, number=8)], [{'number': 7}]):
+            with self.subTest(association=association):
+                self.setUp()
+                self.pr_runs(dict(PR_RUN, pull_requests=association))
+                self.data['actions/runs/50'] = dict(PR_RUN, pull_requests=association)
+                self.assertEqual(self.decide(), 'reuse-pull-request')
+
+    def test_another_pull_request_of_the_head_branch_or_a_changed_base_refuses(self):
+        for change in (lambda: self.data[HEAD_PULLS].append(dict(PULL, number=3, state='closed', merged_at=None)),
+                       lambda: self.data[HEAD_PULLS].clear(),
+                       lambda: self.data[TIMELINE].append({'event': 'base_ref_changed'}),
+                       lambda: self.data.pop(HEAD_PULLS),
+                       lambda: self.data.pop(TIMELINE),
+                       lambda: self.data.update({TIMELINE: {'not': 'a list'}}),
+                       lambda: self.data.update({TIMELINE: [{'event': 'committed'}] * 100})):
+            with self.subTest():
+                self.setUp()
+                change()
+                self.assertEqual(self.decide(), 'reuse-pull-request')
+
+    def test_the_pull_request_job_runner_and_the_merge_commit_parent_order(self):
+        for job, code in ((dict(PR_JOB, labels=['self-hosted']), 'reuse-job'),
+                          (dict(PR_JOB, runner_group_id=3, runner_group_name='private'), 'reuse-job')):
+            with self.subTest(code=code, job=job['labels']):
+                self.setUp()
+                self.data[PR_JOBS] = {'total_count': 1, 'jobs': [job]}
+                self.assertEqual(self.decide(), code)
+        self.setUp()
+        self.data['git/commits/' + MERGE]['parents'] = [{'sha': HEAD}, {'sha': BASE}]
+        self.assertEqual(self.decide(), 'reuse-evidence')
+
     def test_the_trusted_pull_request_relationship(self):
         for change in (lambda: self.data['commits/%s/pulls?per_page=100' % SHA].clear(),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0].update(merge_commit_sha=OTHER),
@@ -2275,6 +2354,7 @@ class PullRequestReuse(ReuseFixtures):
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA].append(dict(PULL, number=8)),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['base'].update(ref='release'),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['head'].update(repo={'id': 99}),
+                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['base'].update(repo={'id': 99}),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['head'].update(repo=None)):
             with self.subTest():
                 self.setUp()
@@ -2463,6 +2543,14 @@ class ReusePlan(ReuseFixtures):
         self.assertEqual((self.record['covered'], self.record['reused']), (['unit'], self.reused))
         self.assertEqual(self.record['attempt'], 1)
 
+    def test_a_plan_never_takes_another_pull_requests_run(self):
+        # Review probe P1 at the plan: fresh, and the job runs its whole list.
+        self.foreign_run()
+        self.assertEqual(self.plan(), 'reuse-pull-request')
+        self.data[HEAD_PULLS] = [PULL]
+        self.assertEqual(self.plan(), 'reuse-pull-request')
+        self.assertEqual((self.record['decision'], self.record['covered']), ('fresh', []))
+
     def test_a_plan_never_reuses_on_tree_equality_alone(self):
         self.pr_evidence(lambda payload: payload['pull_request'].update(base='f' * 40))
         self.data['git/commits/' + MERGE]['parents'][0]['sha'] = 'f' * 40
@@ -2576,6 +2664,11 @@ class ReuseCLI(unittest.TestCase):
         cls.bin = cls.scratch / 'bin'
         cls.bin.mkdir()
         fake_gh(cls.bin)
+        cls.manifest_digest = hashlib.sha256((cls.root / 'dev.json').read_bytes()).hexdigest()
+
+    def env_line(self, goflags=GOFLAGS, manifest=None):
+        """The line check.sh prints under JPDEV_BIND_ENV=GOFLAGS, as the checks step ran."""
+        return 'environment: manifest=%s GOFLAGS=%s\n' % (manifest or self.manifest_digest, goflags)
 
     @classmethod
     def git(cls, *args):
@@ -2612,8 +2705,9 @@ class ReuseCLI(unittest.TestCase):
                      'GITHUB_WORKFLOW_SHA': self.sha}, **env)
 
     def log(self, name, text):
+        """A check log; one without an environment: line gets the checks step's usual one."""
         path = self.scratch / name
-        path.write_text(text)
+        path.write_text(text if 'environment:' in text or 'NO-ENVIRONMENT' in text else self.env_line() + text)
         return str(path)
 
     def capture_pr(self, text='PASS     unit 1s\n', at=None, **env):
@@ -2635,6 +2729,8 @@ class ReuseCLI(unittest.TestCase):
         data = {'git/commits/' + self.sha: {'sha': self.sha, 'tree': {'sha': self.tree}, 'parents': [{'sha': self.base}]},
                 'git/commits/' + self.merge: {'sha': self.merge, 'tree': {'sha': self.tree},
                                               'parents': [{'sha': self.base}, {'sha': self.head}]},
+                HEAD_PULLS: [dict(PULL, merge_commit_sha=self.sha, head=dict(PULL['head'], sha=self.head))],
+                TIMELINE: [],
                 'commits/%s/pulls?per_page=100' % self.sha: [dict(PULL, merge_commit_sha=self.sha,
                                                                   head=dict(PULL['head'], sha=self.head))],
                 'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},
@@ -2696,6 +2792,71 @@ class ReuseCLI(unittest.TestCase):
                                                                                     'workflow_runs': [newer]}}))
         self.assertEqual((result.returncode, (json.loads(record_path.read_text())['refusal'] or {}).get('code')),
                          (1, 'reuse-result'))
+
+    def test_the_environment_bound_is_the_checks_steps(self):
+        # The capture step runs with GOFLAGS=-count=1; the checks step ran with -short. What is
+        # recorded is the checks step's, from check.sh's environment: line.
+        short = hashlib.sha256(b'-count=1 -short').hexdigest()
+        result, output = self.capture_pr(self.env_line(goflags=short) + 'PASS     unit 1s\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(output.read_text())['environment'], {'GOFLAGS': short})
+        unset = self.env_line(goflags='unset') + 'PASS     unit 1s\n'
+        result, output = self.capture_pr(unset)
+        self.assertEqual(json.loads(output.read_text())['environment'], {'GOFLAGS': None})
+        for text in ('NO-ENVIRONMENT\nPASS     unit 1s\n',
+                     self.env_line(manifest='0' * 64) + 'PASS     unit 1s\n',
+                     'environment: manifest=%s\nPASS     unit 1s\n' % self.manifest_digest,
+                     'environment: manifest=%s GOFLAGS=%s NODE_OPTIONS=unset\nPASS     unit 1s\n' % (
+                         self.manifest_digest, GOFLAGS),
+                     self.env_line(goflags='-short') + 'PASS     unit 1s\n',
+                     self.env_line() + self.env_line(goflags=short) + 'PASS     unit 1s\n'):
+            with self.subTest(text=text.splitlines()[0]):
+                result, _ = self.capture_pr(text)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('capture refused: check-environment', result.stderr)
+        # Two logs of one job (setup and checks) that ran with different environments.
+        output = self.scratch / 'two.json'
+        result, _ = self.run_helper(self.merge, 'capture', [
+            '--workflow', 'ci', '--job', 'test', '--check-log', self.log('a.log', 'PASS     unit 1s\n'),
+            '--check-log', self.log('b.log', self.env_line(goflags=short)), '--output', str(output)], self.pr_env())
+        self.assertIn('capture refused: check-environment', result.stderr)
+
+    def test_check_sh_prints_the_line_the_gate_reads(self):
+        manifest = '{"version": 1, "checks": [{"name": "unit", "run": "true"}]}\n'
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-check-')
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        sha = git_fixture(root, {'dev.json': manifest})
+        env = dict(os.environ, JPDEV_ROOT=str(root), JPDEV_BIND_ENV='GOFLAGS', GOFLAGS='-count=1')
+        env.pop('NODE_OPTIONS', None)
+        out = subprocess.run([str(ROOT / 'templates/check.sh')], env=env, text=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60).stdout
+        log = root.parent / (root.name + '.log')
+        self.addCleanup(lambda: log.unlink(missing_ok=True))
+        log.write_text(out)
+        workflow = {'pull_request_reuse': {'checks': ['unit'], 'environment': ['GOFLAGS']}}
+        def read():
+            try:
+                return e.log_environment(workflow, [('check', str(log))], sha)
+            except e.Refusal as error:
+                return error.code
+        cwd = os.getcwd()
+        os.chdir(root)
+        try:
+            self.assertEqual(read(), {'GOFLAGS': GOFLAGS})
+            env['GOFLAGS'] = '-short'
+            out = subprocess.run([str(ROOT / 'templates/check.sh')], env=env, text=True, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60).stdout
+            log.write_text(out)
+            self.assertEqual(read(), {'GOFLAGS': hashlib.sha256(b'-short').hexdigest()})
+            env.pop('JPDEV_BIND_ENV')
+            log.write_text(subprocess.run([str(ROOT / 'templates/check.sh')], env=env, text=True,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, timeout=60).stdout)
+            self.assertEqual(outcome_of(lambda: e.log_environment(workflow, [('check', str(log))], sha)),
+                             'check-environment: %s has 0 environment: lines' % log)
+        finally:
+            os.chdir(cwd)
 
     def test_the_fresh_route_plans_no_reuse(self):
         plan_path = self.scratch / 'fresh.json'

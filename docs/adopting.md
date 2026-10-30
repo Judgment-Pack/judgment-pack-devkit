@@ -314,8 +314,9 @@ merged pull request's newest run ([pull-request-to-branch reuse](ci-evidence.md#
 It is opt-in per workflow and per check; tree equality alone never qualifies a result, and every
 refusal is a fresh run of the job's whole list. Adopt it in the repository's own reviewed change:
 
-1. Vendor `scripts/dev/release_evidence.py` from the kit release that carries `reuse` (it is the
-   same file for `capture`, `verify` and `reuse`).
+1. Vendor `scripts/dev/release_evidence.py` and `scripts/dev/check.sh` from the kit release that
+   carries `reuse` (the gate is the same file for `capture`, `verify` and `reuse`; `check.sh`
+   prints the `environment:` line the gate binds).
 2. In `.github/ci-evidence.json`, add to the workflow:
 
    ```json
@@ -324,21 +325,28 @@ refusal is a fresh run of the job's whole list. Adopt it in the repository's own
 
    `checks` lists only checks whose result depends on the tree and the recorded inputs; never a
    commit-, history-, ref- or tag-sensitive check, an artifact-producing one, or one that reads
-   mutable external state. `environment` names every variable a reusable check reads as a flag
-   (`GOFLAGS`, `NODE_OPTIONS`, a test-selection variable); never a secret (only its SHA-256 is
-   recorded, but a secret is not a flag). The workflow's `events` must hold `push`.
-3. In each pull request job: check out the merge commit with its parents (`fetch-depth: 2` or
+   mutable external state, and never a check that branches on the event or reads a flag from a
+   variable `environment` does not list. `environment` names the variables reusable checks read as
+   flags (`GOFLAGS`, `NODE_OPTIONS`, a test-selection variable); only those are bound. Never a
+   secret (only its SHA-256 is recorded, but a secret is not a flag). The workflow's `events` must
+   hold `push`.
+3. In every job of the workflow, on the step that runs `check.sh`, set `JPDEV_BIND_ENV` to the
+   `environment` names, comma-separated (empty when there are none): `check.sh` then prints the
+   digests of those variables as the checks ran, and of its manifest, and `capture` records them
+   from the log (`check-environment` without the line).
+4. In each pull request job: check out the merge commit with its parents (`fetch-depth: 2` or
    more; the kit's `fetch-depth: 0` qualifies), then after the checks run
    `python3 scripts/dev/release_evidence.py capture --workflow KEY --job KEY --check-log LOG --output FILE`
    under `if: github.event_name == 'pull_request'`, and upload the file as
    `ci-evidence-<workflow key>-<job key>-${{ github.run_attempt }}`, the same name a branch job uses.
-4. In each branch job: run `python3 scripts/dev/release_evidence.py reuse --workflow KEY --job KEY
+5. In each branch job: run `python3 scripts/dev/release_evidence.py reuse --workflow KEY --job KEY
    --output PLAN` before the checks on every branch event, add its `covered` step output to the
    job's `--skip` list, and pass `--reuse-plan PLAN` to the job's `capture`
    ([the workflow shape](ci-evidence.md#pull-request-to-branch-reuse)). Give the job
    `actions: read` and `pull-requests: read` beside `contents: read`.
-5. Give the release job's gate step `pull-requests: read` too: the release admits each reused
-   check again.
+6. Give the release job's gate step `pull-requests: read` too: the release admits each reused
+   check again, reading the head branch's pull requests, the merged one's timeline and each run's
+   pull request association.
 
 Required status names, the matrix, the release workflow's fresh checks and its publication gates
 do not change. Measure before claiming a saving: record the executed checks and their timings on

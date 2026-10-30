@@ -681,10 +681,39 @@ def validate_scoped_coverage(spec, result):
 
 
 def environment_of(workflow):
-    """The SHA-256 of each configured environment variable's value on this runner, null when unset:
-    the flags a check reads from its environment, bound without being written down."""
+    """The SHA-256 of each configured environment variable's value in this step, null when unset.
+    The plan compares it before the checks run; what is recorded is the checks' own (below)."""
     names = workflow.get('pull_request_reuse', {}).get('environment', [])
     return {name: digest(os.environ[name].encode()) if name in os.environ else None for name in names}
+
+
+ENVIRONMENT_LINE = re.compile(r'^environment: (.*)$', re.M)
+
+
+def log_environment(workflow, logs, sha):
+    """The environment the checks ran with, from the environment: line check.sh prints in each log
+    where JPDEV_BIND_ENV names the configured variables: the manifest check.sh read must be the
+    committed dev.json, and each configured variable is there, once, with its value's SHA-256 (null
+    when unset). A log without the line, two logs that differ, or another set of names refuses
+    (check-environment): the flags of the step that ran the checks are bound, not the capture's."""
+    names = workflow['pull_request_reuse'].get('environment', [])
+    lines = []
+    for _, path in logs:
+        found = ENVIRONMENT_LINE.findall(Path(path).read_text(encoding='utf-8'))
+        need(len(found) == 1, 'check-environment', '%s has %d environment: lines' % (path, len(found)))
+        lines.append(found[0].strip())
+    need(lines and len(set(lines)) == 1, 'check-environment', 'the logs ran with different environments')
+    pairs = [token.split('=', 1) for token in lines[0].split(' ')]
+    need(all(len(pair) == 2 for pair in pairs) and pairs[0][0] == 'manifest', 'check-environment',
+         'the environment: line cannot be read')
+    need(pairs[0][1] == digest(git('show', sha + ':dev.json', code='check-environment')), 'check-environment',
+         'the checks read another manifest than the committed dev.json')
+    found = dict(pairs[1:])
+    need(len(found) == len(pairs) - 1 and set(found) == set(names), 'check-environment',
+         'the checks bound %s, the configuration names %s (set JPDEV_BIND_ENV)' % (sorted(found), sorted(names)))
+    need(all(value == 'unset' or DIGEST.fullmatch(value) for value in found.values()), 'check-environment',
+         'a value is not a digest')
+    return {name: None if found[name] == 'unset' else found[name] for name in names}
 
 
 def evidence(source, workflow_key, workflow, job_key, run_id, attempt, event, branch, runtime_identity,
@@ -775,13 +804,13 @@ def capture(config, source, workflow_key, job_key, logs, plan_path=None):
         validate_scoped_coverage(spec, results)
         extra = {'pull_request': {'number': int(PULL_MERGE_REF.fullmatch(ref).group(1)), 'base': parents[0],
                                   'head': parents[1], 'tree': tree},
-                 'environment': environment_of(workflow)}
+                 'environment': log_environment(workflow, logs, source['source'])}
     else:
         reused = read_plan(plan_path, source, workflow_key, job_key, attempt)
         need(reused is None or 'pull_request_reuse' in workflow, 'capture-plan')
         results = coverage(spec, logs, reused['checks'] if reused else ())
         if 'pull_request_reuse' in workflow:
-            extra = {'environment': environment_of(workflow), 'reused': reused}
+            extra = {'environment': log_environment(workflow, logs, source['source']), 'reused': reused}
     return evidence(source, workflow_key, workflow, job_key, run_id, attempt, event, config['branch'],
                     runtime_identity, results, identity, ref, extra)
 
@@ -1013,7 +1042,56 @@ def pull_request_of(api, config, source):
          'pull request %s is not merged into %s here' % (pull.get('number'), config['branch']))
     need((pull['head']['repo'] or {}).get('id') == source['repository_id'], 'reuse-pull-request',
          'pull request %s comes from another repository' % pull['number'])
+    bind_head_branch(api, config, source, pull)
     return pull, commit
+
+
+def listing(api, suffix):
+    """Every element of a plain-list API listing: full pages of 100 until a short one, ten at most."""
+    rows = []
+    for page in range(1, 11):
+        separator = '&' if '?' in suffix else '?'
+        part = api.get(suffix + separator + 'per_page=100&page=' + str(page))
+        need(isinstance(part, list) and len(part) <= 100, 'pagination-shape', suffix)
+        rows.extend(part)
+        if len(part) < 100:
+            return rows
+    raise Refusal('pagination-cap', suffix)
+
+
+def bind_head_branch(api, config, source, pull):
+    """Records the pull request's code cannot write, binding its head branch to it alone: the head
+    branch has had no other pull request, open or closed (a run of another one executes another
+    base's workflow at the same head), and the merged one's base was never changed. What cannot be
+    read refuses too."""
+    owner = source['repository'].split('/')[0]
+    try:
+        pulls = listing(api, 'pulls?head=%s:%s&state=all' % (owner, quote(pull['head']['ref'], safe='')))
+        others = sorted(other['number'] for other in pulls if other['number'] != pull['number'])
+        events = listing(api, 'issues/%d/timeline' % pull['number'])
+        changed = [event for event in events if event['event'] == 'base_ref_changed']
+    except Refusal as error:
+        raise Refusal('reuse-pull-request', 'the head branch\'s pull requests or the timeline could not be read: '
+                      '%s' % error.code) from error
+    except MALFORMED as error:
+        raise Refusal('reuse-pull-request', 'the head branch\'s pull requests or the timeline could not be read: '
+                      '%s' % type(error).__name__) from error
+    need(len(pulls) - len(others) == 1 and not others, 'reuse-pull-request',
+         'head branch %s has or had other pull requests %s' % (pull['head']['ref'], others))
+    need(not changed, 'reuse-pull-request', 'the base of pull request %d was changed' % pull['number'])
+
+
+def bind_run(run, config, source, pull):
+    """The API's own association of the run with pull requests, which the pull request's code
+    cannot write: exactly the merged one, into the trusted branch of this repository."""
+    try:
+        associated = [(item['number'], item['base']['ref'], item['base']['repo']['id'])
+                      for item in run['pull_requests']]
+    except MALFORMED as error:
+        raise Refusal('reuse-pull-request', 'run %s: its pull requests cannot be read' % run.get('id')) from error
+    need(associated == [(pull['number'], config['branch'], source['repository_id'])], 'reuse-pull-request',
+         'run %s is associated with %s, not pull request %d into %s' % (
+             run.get('id'), associated, pull['number'], config['branch']))
 
 
 def admit_pull_request(api, config, source, key, job_key, now):
@@ -1058,6 +1136,7 @@ def admitted_pull_request(api, config, source, key, job_key, now):
          run['workflow_id'] == resolved['id'] and run['path'] == workflow['path'] and
          positive(run['id']) and positive(run['run_attempt']), 'reuse-evidence', 'run %s' % run.get('id'))
     need(selection(run) == selection(chosen), 'reuse-race', 'run %d' % run['id'])
+    bind_run(run, config, source, pull)
     age = (now - timestamp(run['run_started_at'])).total_seconds()
     need(0 <= age <= config['max_age_hours'] * 3600, 'reuse-age',
          'pull request run %d started %.1f hours ago; the limit is %d' % (run['id'], age / 3600,

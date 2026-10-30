@@ -10,6 +10,9 @@
 # A step whose requires_env variable is empty is skipped, and said to be; when CI is set that is a
 # failure unless the step is marked optional: true. With --strict a skip is a failure, optional or not
 # (a release's fresh run of the list). Standard library python3 only. jpdev sets JPDEV_WRAP to add its caps around each step.
+# Where JPDEV_BIND_ENV is set (comma-separated variable names, possibly none), the summary block has
+# an environment: line, the SHA-256 of the manifest's bytes and of each named variable's value as
+# this runner ran the steps (unset when absent): what the release evidence gate binds for reuse.
 root=${JPDEV_ROOT:-$(cd "$(dirname "$0")" && git rev-parse --show-toplevel)} || exit 2
 exec python3 -I - "$root" "$0" "$@" <<'PY'
 import json, os, re, shutil, signal, subprocess, sys, time
@@ -151,6 +154,12 @@ for c in steps:
                 pass
             infrastructure = 'cannot persist the completed check log %s: %s' % (log, error.strerror or log_probe_error or error)
 print('== %s summary (%s) ==' % ('setup' if opt['setup'] else 'check', os.path.basename(opt['manifest'])))
+if 'JPDEV_BIND_ENV' in os.environ:
+    import hashlib
+    bound = [n for n in os.environ['JPDEV_BIND_ENV'].split(',') if n]
+    with open(opt['manifest'], 'rb') as handle: line = ['manifest=' + hashlib.sha256(handle.read()).hexdigest()]
+    line += ['%s=%s' % (n, hashlib.sha256(run_env[n].encode()).hexdigest() if n in run_env else 'unset') for n in bound]
+    print('environment: ' + ' '.join(line))
 if not opt['setup'] and 'handover' in m:
     h = m['handover']
     print('handover: boundary %d paths, shared %d paths; see AGENTS.md "Before you hand over"' %

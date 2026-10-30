@@ -485,12 +485,12 @@ and each of these must hold, or nothing is reused:
 
 | Input | Bound by |
 | --- | --- |
-| the trusted relationship | the API names one pull request of this repository (not a fork) merged into the trusted branch with M as its merge commit; its newest `pull_request` run of the same workflow, at its final head, on its head branch |
+| the trusted relationship | records the pull request's code cannot write, read through the API: one pull request of this repository (not a fork, base repository this one) merged into the trusted branch with M as its merge commit; its head branch has had no other pull request, open or closed (`pulls?head=`); its base was never changed (no `base_ref_changed` in its timeline); the newest `pull_request` run of the same workflow at its final head and head branch is associated by the API with exactly that pull request, into the trusted branch of this repository (the run's `pull_requests`). Anything of this that cannot be read refuses (`reuse-pull-request`) |
 | exact source and tree | the merge commit the pull request job checked out (S), read through the API: its parents are M's first parent and the pull request's head, and its tree is M's tree |
 | the base relationship | S was made on M's first parent: a change set tested on another base is not M's, even with the same tree (a rebase merge of several commits therefore never qualifies) |
 | workflow, configuration and dependency digests | the pull request job's input identities (the manifest, the configuration, the gate, the workflow files, every pin file) equal M's |
 | tools, image and OS | the pull request job's runtime record (image name and version, OS, architecture, OS-release digest, every tool) equals the branch job's, and under the [runner identity](#runner-identity) policy its identity record is the commit's |
-| flags and environment | the SHA-256 of each `environment` variable's value (`null` when unset) is the same in both jobs; a flag a check reads from its environment is listed there. Only `PASS` rows are reused, so `check.sh`'s own skip options change nothing that is reused |
+| flags and environment | the `environment:` line `check.sh` prints in the checks step's own log when `JPDEV_BIND_ENV` names the configured variables: the SHA-256 of the manifest it read, which must be the committed `dev.json` (so `--manifest` cannot point elsewhere), and of each variable's value (`null` when unset) as the checks ran, step-level and event-selected values included (a `-short` set only on pull requests differs, and refuses `reuse-environment`). Only variables the configuration lists are bound: a flag a check reads from any other variable, or a check that branches on the event itself, is not tree-only and must not be listed in `checks`. Only `PASS` rows are reused, so `check.sh`'s own skip options change nothing that is reused |
 | the selected matrix coverage | the same job key and display name, labels and hosted runner; a leg only covers its own checks, and the job's other checks run on the branch |
 
 **Fail closed.** The decision is `fresh`, and the branch job runs its whole list, on any of these:
@@ -512,10 +512,14 @@ older green one.
 a `pull_request` event of a workflow that opts in, into the trusted branch (`GITHUB_BASE_REF`), at
 `refs/pull/<number>/merge`, the checkout being that merge commit with both parents (`fetch-depth`
 2 or more). Its record holds only the checks its selection ran (`PASS` or a permitted `SKIP`), the
-pull request number, the merge commit's base, head and tree, and the environment digests. It
-refuses with `capture-ref`, `capture-workflow`, `capture-merge` (no merge commit with two parents),
-`check-result` (a `FAIL` or `NOT RUN` row) and `check-coverage` (a check the job does not run); it
-is never evidence for a release by itself.
+pull request number, the merge commit's base, head and tree, and the environment digests from the
+log's `environment:` line. It refuses with `capture-ref`, `capture-workflow`, `capture-merge` (no
+merge commit with two parents), `check-result` (a `FAIL` or `NOT RUN` row), `check-coverage` (a
+check the job does not run) and `check-environment` (a log without exactly one `environment:`
+line, logs that differ, another manifest, or another set of variables); it is never evidence for a
+release by itself. A capture on a `pull_request` event of a workflow that does not opt in refuses
+`capture-event`; before this change the same capture refused `capture-ref`, as one on any other
+ref still does. Either way it records nothing.
 
 A branch job plans before its checks:
 
@@ -529,8 +533,10 @@ id and artifact id, name and digest) to standard output and the file, and the st
 `decision` and `covered` (a comma-separated list, empty when fresh). It exits 0 on either decision:
 a fresh decision is the route, not a failure. The job then skips the covered checks and runs the
 rest, and records with `capture ... --reuse-plan reuse-plan.json`: each covered check is `REUSED`
-in its coverage, beside its `environment` and `reused` record. A covered check that also ran, or a
-plan of another commit, workflow, job or attempt, refuses (`check-coverage`, `capture-plan`).
+in its coverage, beside its `environment` (from its own checks log, as above) and `reused` record.
+A covered check that also ran, or a plan of another commit, workflow, job or attempt, refuses
+(`check-coverage`, `capture-plan`). The plan compares the pull request's checks environment with
+its own step's, a first filter; the release compares it with the branch job's checks environment.
 
 ```yaml
       - name: Plan reuse from the merged pull request
@@ -540,6 +546,9 @@ plan of another commit, workflow, job or attempt, refuses (`check-coverage`, `ca
       - name: The checks
         env:
           COVERED: ${{ steps.plan.outputs.covered }}
+          # The variables pull_request_reuse.environment names, comma-separated: check.sh prints
+          # their digests, and the manifest's, in its summary block.
+          JPDEV_BIND_ENV: GOFLAGS
         run: |
           set -o pipefail
           skip=()
@@ -576,17 +585,26 @@ reuse takes the existing [fresh route](#the-fresh-route): re-run all jobs of the
 commit, or dispatch the CI workflow on the branch, then re-run the release's failed jobs. No route
 searches for an older run of either the pull request or the branch.
 
-**Trust.** The pull request run executes the pull request's code, and its record is that code's
-report. The gate trusts no claim it can check through the API: which pull request was merged as M,
-which run is newest at the pull request's final head, the run's jobs and their results, the
-artifact's digest, and the merge commit's parents and tree. What it cannot check through the API
-is which commit the job checked out; that is the job's own report, written by the capture code at
-that merge commit, whose tree is M's. A fork's pull request is never reused. Nothing of a pull
-request run is executed, and no credential reaches it.
+**Trust.** A `pull_request` run executes the workflow file and the code at its own pull request's
+merge commit, and its artifact is that code's report. The gate binds the run through records the
+pull request's code cannot write: the API's pull request merged as M, the head branch's pull
+requests (only that one, ever), that pull request's timeline (no base change), and the run's own
+`pull_requests` association (that pull request, into the trusted branch of this repository); then
+the run's head, branch, workflow, attempt, jobs, results, runner and artifact digest, and the
+reported merge commit's parents and tree, all through the API. A run of another pull request on
+the same head branch, which would execute another base's workflow file, therefore refuses. What
+remains the job's own report is everything inside the artifact: which merge commit it checked out,
+its input identities, runtime, identity record, environment line and check results. Through the
+merged pull request's own run, that report is written by the merged pull request's own reviewed
+code on the tree M has, the same trust the branch's own run gets; nothing above makes it more. A
+fork's pull request is never reused. Nothing of a pull request run is executed, and no credential
+reaches it.
 
 **Savings.** The kit's own workflows do not adopt this, and no timing was measured: this section
 claims no saving. A repository that adopts it records the executed checks and their timings before
 and after, on its own runs.
+
+## The fresh route
 
 A refusal stops that release run. The operator reads the refusal and chooses; no workflow
 dispatches or re-runs anything automatically, and no automatic CI is turned off.
