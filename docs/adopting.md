@@ -345,8 +345,10 @@ refusal is a fresh run of the job's whole list. Adopt it in the repository's own
    ([the workflow shape](ci-evidence.md#pull-request-to-branch-reuse)). Give the job
    `actions: read` and `pull-requests: read` beside `contents: read`.
 6. Give the release job's gate step `pull-requests: read` too: the release admits each reused
-   check again, reading the head branch's pull requests, the merged one's timeline and each run's
-   pull request association.
+   check again, reading the head branch's pull requests, the merged one's timeline and each run.
+   A pull request that was retargeted, by hand or automatically (a stacked pull request whose base
+   merged), never has its checks reused, and neither does a head branch that had a second pull
+   request.
 
 Required status names, the matrix, the release workflow's fresh checks and its publication gates
 do not change. Measure before claiming a saving: record the executed checks and their timings on

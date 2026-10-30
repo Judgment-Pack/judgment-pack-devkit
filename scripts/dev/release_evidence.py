@@ -1056,49 +1056,68 @@ def pull_request_of(api, config, source):
 
 
 def listing(api, suffix):
-    """Every element of a plain-list API listing: full pages of 100 until a short one, ten at most."""
+    """Every element of a plain-list API listing: pages of up to 100 until an empty one (a short
+    page is not taken for the end), ten pages at most."""
     rows = []
     for page in range(1, 11):
         separator = '&' if '?' in suffix else '?'
         part = api.get(suffix + separator + 'per_page=100&page=' + str(page))
         need(isinstance(part, list) and len(part) <= 100, 'pagination-shape', suffix)
-        rows.extend(part)
-        if len(part) < 100:
+        if not part:
             return rows
+        rows.extend(part)
     raise Refusal('pagination-cap', suffix)
 
 
+# A timeline event that changes, or tried to change, a pull request's base: base_ref_changed,
+# automatic_base_change_succeeded, automatic_base_change_failed, and any other event so named.
+BASE_EVENT = re.compile(r'base_change|base_ref')
+
+
 def bind_head_branch(api, config, source, pull):
-    """Records the pull request's code cannot write, binding its head branch to it alone: the head
-    branch has had no other pull request, open or closed (a run of another one executes another
-    base's workflow at the same head), and the merged one's base was never changed. What cannot be
-    read refuses too."""
+    """Records that survive the merge and that the pull request's code cannot write, binding its
+    head branch to it alone: the head branch has had exactly one pull request ever, the merged one,
+    from this repository (a run of another one executes another base's workflow at the same head),
+    and the merged one's timeline has no base change of any kind. What cannot be read refuses."""
     owner = source['repository'].split('/')[0]
     try:
         pulls = listing(api, 'pulls?head=%s:%s&state=all' % (owner, quote(pull['head']['ref'], safe='')))
-        others = sorted(other['number'] for other in pulls if other['number'] != pull['number'])
+        listed = [(other['number'], (other['head']['repo'] or {}).get('id')) for other in pulls]
         events = listing(api, 'issues/%d/timeline' % pull['number'])
-        changed = [event for event in events if event['event'] == 'base_ref_changed']
+        names = [event.get('event') for event in events]
+        need(all(isinstance(name, str) or name is None for name in names), 'unavailable-or-malformed')
+        changed = sorted({name for name in names if name and BASE_EVENT.search(name)})
     except Refusal as error:
         raise Refusal('reuse-pull-request', 'the head branch\'s pull requests or the timeline could not be read: '
                       '%s' % error.code) from error
     except MALFORMED as error:
         raise Refusal('reuse-pull-request', 'the head branch\'s pull requests or the timeline could not be read: '
                       '%s' % type(error).__name__) from error
-    need(len(pulls) - len(others) == 1 and not others, 'reuse-pull-request',
+    others = sorted(number for number, _ in listed if number != pull['number'])
+    need(not others, 'reuse-pull-request',
          'head branch %s has or had other pull requests %s' % (pull['head']['ref'], others))
-    need(not changed, 'reuse-pull-request', 'the base of pull request %d was changed' % pull['number'])
+    need(listed == [(pull['number'], source['repository_id'])], 'reuse-pull-request',
+         'head branch %s does not list pull request %d once, from this repository' % (
+             pull['head']['ref'], pull['number']))
+    need(not changed, 'reuse-pull-request', 'the base of pull request %d was changed: %s' % (pull['number'], changed))
 
 
 def bind_run(run, config, source, pull):
-    """The API's own association of the run with pull requests, which the pull request's code
-    cannot write: exactly the merged one, into the trusted branch of this repository."""
+    """The run belongs to the merged pull request: at its final head, from this repository, a
+    pull_request run created after the pull request was opened (with the head branch bound above,
+    no other pull request it can belong to). The API's own association, cleared once a pull request
+    merges, must name exactly that pull request into the trusted branch when it is not empty."""
     try:
         associated = [(item['number'], item['base']['ref'], item['base']['repo']['id'])
                       for item in run['pull_requests']]
-    except MALFORMED as error:
-        raise Refusal('reuse-pull-request', 'run %s: its pull requests cannot be read' % run.get('id')) from error
-    need(associated == [(pull['number'], config['branch'], source['repository_id'])], 'reuse-pull-request',
+        opened, created = timestamp(pull['created_at']), timestamp(run['created_at'])
+    except (Refusal,) + MALFORMED as error:
+        raise Refusal('reuse-pull-request', 'run %s: its pull requests or times cannot be read' % run.get('id')) from error
+    need(run['head_sha'] == pull['head']['sha'] and run['head_repository']['id'] == source['repository_id'] and
+         run['event'] == 'pull_request', 'reuse-pull-request', 'run %s is not a run of the head' % run.get('id'))
+    need(created >= opened, 'reuse-pull-request', 'run %s was created before pull request %d was opened' % (
+        run.get('id'), pull['number']))
+    need(associated in ([], [(pull['number'], config['branch'], source['repository_id'])]), 'reuse-pull-request',
          'run %s is associated with %s, not pull request %d into %s' % (
              run.get('id'), associated, pull['number'], config['branch']))
 

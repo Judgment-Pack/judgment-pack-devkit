@@ -2189,8 +2189,8 @@ HEAD = 'b' * 40      # the pull request's head
 MERGE = 'd' * 40     # the merge commit its run checked out
 TREE = '7' * 40      # the commit's tree, and the merge commit's
 GOFLAGS = hashlib.sha256(b'-count=1').hexdigest()
-PULL = {'number': 7, 'state': 'closed', 'merged_at': '2026-10-25T09:55:00Z', 'merge_commit_sha': SHA,
-        'head': {'sha': HEAD, 'ref': 'feature', 'repo': {'id': REPO_ID}},
+PULL = {'number': 7, 'state': 'closed', 'created_at': '2026-10-25T08:30:00Z', 'merged_at': '2026-10-25T09:55:00Z',
+        'merge_commit_sha': SHA, 'head': {'sha': HEAD, 'ref': 'feature', 'repo': {'id': REPO_ID}},
         'base': {'ref': 'main', 'repo': {'id': REPO_ID}}}
 PR_RUNS = 'actions/workflows/9/runs?head_sha=' + HEAD + '&per_page=100&page=1'
 PR_JOBS = 'actions/runs/50/attempts/1/jobs?per_page=100&page=1'
@@ -2199,8 +2199,12 @@ PR_ASSOCIATION = {'number': 7, 'head': {'ref': 'feature', 'sha': HEAD, 'repo': {
                   'base': {'ref': 'main', 'sha': BASE, 'repo': {'id': REPO_ID}}}
 HEAD_PULLS = 'pulls?head=example:feature&state=all&per_page=100&page=1'
 TIMELINE = 'issues/7/timeline?per_page=100&page=1'
+# The listings end at an empty page.
+HEAD_PULLS_END = 'pulls?head=example:feature&state=all&per_page=100&page=2'
+TIMELINE_END = 'issues/7/timeline?per_page=100&page=2'
 PR_RUN = dict(RUN, id=50, event='pull_request', head_branch='feature', head_sha=HEAD,
-              pull_requests=[PR_ASSOCIATION], created_at='2026-10-25T09:00:00Z',
+              # As GitHub reports a merged pull request's runs: the association is cleared.
+              pull_requests=[], created_at='2026-10-25T09:00:00Z',
               run_started_at='2026-10-25T09:00:00Z', updated_at='2026-10-25T09:05:00Z')
 PR_JOB = dict(JOB_LINUX, id=151, run_id=50, head_sha=HEAD, head_branch='feature',
               started_at='2026-10-25T09:00:05Z', completed_at='2026-10-25T09:04:00Z')
@@ -2223,8 +2227,10 @@ class ReuseFixtures(Gate):
             'git/commits/' + SHA: {'sha': SHA, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}]},
             'git/commits/' + MERGE: {'sha': MERGE, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}, {'sha': HEAD}]},
             'commits/%s/pulls?per_page=100' % SHA: [PULL],
-            HEAD_PULLS: [PULL],
-            TIMELINE: [{'event': 'committed'}, {'event': 'reviewed'}, {'event': 'merged'}],
+            HEAD_PULLS: [PULL], HEAD_PULLS_END: [],
+            TIMELINE: [{'event': 'committed'}, {'event': 'reviewed'}, {'event': 'labeled'}, {'event': 'merged'},
+                       {'event': 'head_ref_deleted'}],
+            TIMELINE_END: [],
             PR_RUNS: {'total_count': 1, 'workflow_runs': [PR_RUN]},
             'actions/runs/50': PR_RUN,
             PR_JOBS: {'total_count': 1, 'jobs': [PR_JOB]},
@@ -2326,8 +2332,29 @@ class PullRequestReuse(ReuseFixtures):
         self.pr_runs(dict(PR_RUN, conclusion='failure'))
         self.assertEqual(self.decide(), 'reuse-result')
 
+    def test_the_merged_pull_requests_own_run_is_admitted_with_its_association_cleared(self):
+        # Review probe P4: after the merge GitHub reports the run's pull_requests as []. The head
+        # branch's one pull request, its timeline and the run's head, repository, event and
+        # creation time bind it.
+        self.assertEqual(self.data['actions/runs/50']['pull_requests'], [])
+        self.assertEqual(self.decide(), 'reuse')
+        # Before the merge the association names it; that is admitted too.
+        self.pr_runs(dict(PR_RUN, pull_requests=[PR_ASSOCIATION]))
+        self.data['actions/runs/50'] = dict(PR_RUN, pull_requests=[PR_ASSOCIATION])
+        self.assertEqual(self.decide(), 'reuse')
+
+    def test_a_run_created_before_the_pull_request_was_opened_refuses(self):
+        early = dict(PR_RUN, created_at='2026-10-25T08:00:00Z')
+        self.pr_runs(early)
+        self.data['actions/runs/50'] = early
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        self.assertIn('before pull request 7 was opened', self.record['refusal']['detail'])
+        self.setUp()
+        self.data['commits/%s/pulls?per_page=100' % SHA][0].pop('created_at')
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+
     def test_the_run_is_bound_to_the_merged_pull_request_and_its_base(self):
-        for association in ([], [dict(PR_ASSOCIATION, number=8)],
+        for association in ([dict(PR_ASSOCIATION, number=8)],
                             [dict(PR_ASSOCIATION, base=dict(PR_ASSOCIATION['base'], ref='evil'))],
                             [dict(PR_ASSOCIATION, base=dict(PR_ASSOCIATION['base'], repo={'id': 99}))],
                             [PR_ASSOCIATION, dict(PR_ASSOCIATION, number=8)], [{'number': 7}]):
@@ -2340,15 +2367,55 @@ class PullRequestReuse(ReuseFixtures):
     def test_another_pull_request_of_the_head_branch_or_a_changed_base_refuses(self):
         for change in (lambda: self.data[HEAD_PULLS].append(dict(PULL, number=3, state='closed', merged_at=None)),
                        lambda: self.data[HEAD_PULLS].clear(),
+                       lambda: self.data[HEAD_PULLS].append(PULL),
+                       lambda: self.data[HEAD_PULLS][0]['head'].update(repo={'id': 99}),
+                       lambda: self.data[HEAD_PULLS][0]['head'].update(repo=None),
                        lambda: self.data[TIMELINE].append({'event': 'base_ref_changed'}),
+                       lambda: self.data[TIMELINE].append({'event': 7}),
                        lambda: self.data.pop(HEAD_PULLS),
                        lambda: self.data.pop(TIMELINE),
                        lambda: self.data.update({TIMELINE: {'not': 'a list'}}),
-                       lambda: self.data.update({TIMELINE: [{'event': 'committed'}] * 100})):
+                       lambda: self.data.pop(TIMELINE_END),
+                       lambda: self.data.pop(HEAD_PULLS_END)):
             with self.subTest():
                 self.setUp()
                 change()
                 self.assertEqual(self.decide(), 'reuse-pull-request')
+
+    def test_every_base_change_event_refuses(self):
+        # Review probe P3: GitHub records an automatic retarget (a stacked pull request whose base
+        # merged) as automatic_base_change_succeeded, with no base_ref_changed.
+        for name in ('automatic_base_change_succeeded', 'automatic_base_change_failed', 'base_ref_changed',
+                     'base_ref_force_pushed', 'some_future_base_change_event'):
+            with self.subTest(name=name):
+                self.setUp()
+                self.data[TIMELINE].append({'event': name, 'created_at': '2026-10-25T09:10:00Z'})
+                self.assertEqual(self.decide(), 'reuse-pull-request')
+                self.assertIn(name, self.record['refusal']['detail'])
+        # Unknown events of other names, or an item with no event name, are not refusals.
+        self.setUp()
+        self.data[TIMELINE] += [{'event': 'renamed'}, {'event': 'convert_to_draft'}, {'id': 1}]
+        self.assertEqual(self.decide(), 'reuse')
+
+    def test_listings_are_read_to_an_empty_page(self):
+        # A short first page is not the end: a base change on the next page refuses.
+        self.data[TIMELINE] = [{'event': 'committed'}] * 30
+        self.data[TIMELINE_END] = [{'event': 'automatic_base_change_succeeded'}]
+        self.data['issues/7/timeline?per_page=100&page=3'] = []
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        self.assertIn('automatic_base_change_succeeded', self.record['refusal']['detail'])
+        # Another pull request of the head branch on a later page refuses too.
+        self.setUp()
+        self.data[HEAD_PULLS_END] = [dict(PULL, number=8, state='open', merged_at=None)]
+        self.data['pulls?head=example:feature&state=all&per_page=100&page=3'] = []
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        # Past ten pages: refused.
+        self.setUp()
+        for page in range(1, 11):
+            self.data['issues/7/timeline?per_page=100&page=%d' % page] = [{'event': 'committed'}]
+        self.data['issues/7/timeline?per_page=100&page=11'] = []
+        self.assertEqual(self.decide(), 'reuse-pull-request')
+        self.assertIn('pagination-cap', self.record['refusal']['detail'])
 
     def test_the_pull_request_job_runner_and_the_merge_commit_parent_order(self):
         for job, code in ((dict(PR_JOB, labels=['self-hosted']), 'reuse-job'),
@@ -2744,7 +2811,7 @@ class ReuseCLI(unittest.TestCase):
                 'git/commits/' + self.merge: {'sha': self.merge, 'tree': {'sha': self.tree},
                                               'parents': [{'sha': self.base}, {'sha': self.head}]},
                 HEAD_PULLS: [dict(PULL, merge_commit_sha=self.sha, head=dict(PULL['head'], sha=self.head))],
-                TIMELINE: [],
+                HEAD_PULLS_END: [], TIMELINE: [], TIMELINE_END: [],
                 'commits/%s/pulls?per_page=100' % self.sha: [dict(PULL, merge_commit_sha=self.sha,
                                                                   head=dict(PULL['head'], sha=self.head))],
                 'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},

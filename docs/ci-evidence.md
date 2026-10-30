@@ -497,7 +497,7 @@ and each of these must hold, or nothing is reused:
 
 | Input | Bound by |
 | --- | --- |
-| the trusted relationship | records the pull request's code cannot write, read through the API: one pull request of this repository (not a fork, base repository this one) merged into the trusted branch with M as its merge commit; its head branch has had no other pull request, open or closed (`pulls?head=`); its base was never changed (no `base_ref_changed` in its timeline); the newest `pull_request` run of the same workflow at its final head and head branch is associated by the API with exactly that pull request, into the trusted branch of this repository (the run's `pull_requests`). Anything of this that cannot be read refuses (`reuse-pull-request`) |
+| the trusted relationship | records that survive the merge and that the pull request's code cannot write, read through the API: one pull request of this repository (not a fork, base repository this one) merged into the trusted branch with M as its merge commit; its head branch's listing (`pulls?head=owner:branch&state=all`, every page to an empty one, ten at most) shows exactly that one pull request ever, from this repository; its timeline (every page) has no base-change event of any kind (`base_ref_changed`, `automatic_base_change_succeeded`, `automatic_base_change_failed`, and any event whose name contains `base_change` or `base_ref`); the newest `pull_request` run of the same workflow is at its final head, from this repository, on its head branch, and was created after the pull request was opened. The run's own `pull_requests`, which GitHub clears once a pull request merges, must name exactly that pull request into the trusted branch when it is not empty. Anything of this that cannot be read refuses (`reuse-pull-request`) |
 | exact source and tree | the merge commit the pull request job checked out (S), read through the API: its parents are M's first parent and the pull request's head, and its tree is M's tree |
 | the base relationship | S was made on M's first parent: a change set tested on another base is not M's, even with the same tree (a rebase merge of several commits therefore never qualifies) |
 | workflow, configuration and dependency digests | the pull request job's input identities (the manifest, the configuration, the gate, the workflow files, every pin file) equal M's |
@@ -599,12 +599,18 @@ searches for an older run of either the pull request or the branch.
 
 **Trust.** A `pull_request` run executes the workflow file and the code at its own pull request's
 merge commit, and its artifact is that code's report. The gate binds the run through records the
-pull request's code cannot write: the API's pull request merged as M, the head branch's pull
-requests (only that one, ever), that pull request's timeline (no base change), and the run's own
-`pull_requests` association (that pull request, into the trusted branch of this repository); then
-the run's head, branch, workflow, attempt, jobs, results, runner and artifact digest, and the
-reported merge commit's parents and tree, all through the API. A run of another pull request on
-the same head branch, which would execute another base's workflow file, therefore refuses. What
+pull request's code cannot write and that survive the merge: the API's pull request merged as M;
+the head branch's pull requests, which must be that one only, ever, so no other pull request (and
+so no other base's workflow file) can have produced a run at that head; that pull request's
+timeline, which must hold no base change of any kind, manual or automatic, so its base was the
+trusted branch for its whole life; and the run's head, repository, event and creation time (after
+the pull request was opened). Together they leave the merged pull request, on the trusted base, as
+the only one the run can belong to. GitHub clears a run's `pull_requests` once its pull request
+merges, so an empty association is not a refusal; a non-empty one must name exactly that pull
+request into the trusted branch. Then the run's branch, workflow, attempt, jobs, results, runner
+and artifact digest, and the reported merge commit's parents and tree, are read through the API. A
+run of another pull request on the same head branch, or one made while the base was another
+branch, therefore refuses. What
 remains the job's own report is everything inside the artifact: which merge commit it checked out,
 its input identities, runtime, identity record, environment line and check results. Through the
 merged pull request's own run, that report is written by the merged pull request's own reviewed
