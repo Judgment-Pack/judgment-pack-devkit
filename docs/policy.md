@@ -58,8 +58,10 @@ are the ones a brief does not repeat.
 
 Evidence reuse applies only where an actual repository gate implements and validates equivalence.
 At release, that gate is the [release evidence gate](ci-evidence.md), which each repository adopts
-in its own issue; this policy introduces no other reuse. Keep the summary of what actually ran and
-what remains required by current CI/release gates.
+in its own issue; between a merged pull request and the branch, it is the same gate's opt-in
+[pull-request-to-branch reuse](ci-evidence.md#pull-request-to-branch-reuse), never tree equality
+alone. This policy introduces no other reuse. Keep the summary of what actually ran and what
+remains required by current CI/release gates.
 
 **Scoped runs.** `jpdev check --changed [BASE]` runs only the check-list steps that the
 repository's `jpdev.json` maps the changed paths to, and the whole list when a changed path is
