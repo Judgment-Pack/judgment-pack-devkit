@@ -353,5 +353,15 @@ refusal is a fresh run of the job's whole list. Adopt it in the repository's own
 Required status names, the matrix, the release workflow's fresh checks and its publication gates
 do not change. Measure before claiming a saving: record the executed checks and their timings on
 the repository's own runs before and after. A repository with its own evidence verifier
-(judgment-pack-agent's `scripts/dev/ci_evidence.py`) adopts this through its own reviewed
-compatibility work, not by replacing that verifier with the kit's.
+adopts this through its own reviewed compatibility work. It may retain that verifier or replace
+it with the kit's gate only when its adoption pull request maps every guarantee the old verifier
+gave to a gate check, a configuration entry or an unchanged release job. The mapping must show
+that no guarantee is lost; an unmapped guarantee blocks replacement until it is preserved.
+Passing the kit's tests alone does not establish equivalence for an adopter.
+
+For an example, [judgment-pack-agent #267](https://github.com/Judgment-Pack/judgment-pack-agent/pull/267)
+replaced `scripts/dev/ci_evidence.py` with `release_evidence.py` and mapped its mutation shards,
+advisory, approval, provenance and paired Go tag coverage. Each adopter must supply its own
+reviewed mapping, including its refusal behavior and publication gates. This permission does not
+remove independent or security review, exact-head CI, or merge and release approvals, and does
+not authorize a consumer rollout by itself.
