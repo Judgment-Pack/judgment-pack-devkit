@@ -256,10 +256,34 @@ duplication.min_tokens: an integer from 10 to 10000 is required (got 5)`.
 
 | Toolchain | Cap |
 | --- | --- |
-| `node` | `lib/rsscap.sh`: the process group's resident memory and a timeout; never `ulimit -v`, which breaks vite and vitest |
+| `node` | `lib/rsscap.sh`: the launched session's sampled resident memory and a timeout; never `ulimit -v`, which breaks vite and vitest |
 | `go` | `flock` on the machine lock, `ulimit -v`, `GOFLAGS=-mod=readonly` (a step never rewrites `go.mod`), a per-clone `GOCACHE`, `timeout` |
 | `python` | `ulimit -v` and `timeout` |
 | `shell` | `timeout` only |
+
+The RSS guard counts all non-zombie processes in the new session, including GNU
+`timeout` and compiler/test children in other process groups. It keeps monitoring
+until the session is empty, even when the original command exits first. Memory,
+time and interruption stops kill the session's observed process groups. The
+command's exit status is preserved when no guard stops it. Limits are positive
+integers of at most nine digits; RSS is compared in KiB against the MiB limit.
+
+This is a cooperative, sampled guard, not a security boundary or a hard memory
+reservation. Between samples a process may exceed the limit. Descendants that
+call `setsid` leave the owned session and are neither measured nor cleaned up;
+use an external containment mechanism for workloads that detach this way. Shared
+pages can be counted more than once when summing resident memory.
+
+For a Go race check that cannot use the virtual-address limit, retain the existing
+wrapper's lock, per-clone cache, read-only module mode and inner timeout:
+
+```sh
+JPDEV_GO_ULIMIT_KB=unlimited lib/rsscap.sh 4096 300 -- lib/wrap.sh go -- go test -race ./...
+```
+
+This explicit invocation applies the outer RSS/time limits to the wrapper and its
+session. Normal Go steps retain their existing virtual-address cap. A limit that
+fires while the wrapper waits for the lock also stops that wait.
 
 When the manifest declares a virtual environment, its path must be a non-root relative child of
 the clone with no `..` segment, and setup and checks create it when it is missing.
