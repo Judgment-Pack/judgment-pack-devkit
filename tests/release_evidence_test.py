@@ -1,6 +1,6 @@
 """The release evidence gate over handwritten Actions API fixtures; none of this is live evidence.
 
-Every fixture below is written by hand. The refusal classes of docs/ci-evidence.md each have a test
+Decision fixtures below are written by hand; PinnedAPIShape separately reads captured API projections. The refusal classes of docs/ci-evidence.md each have a test
 class here; the module is lib/release_evidence.py unless RELEASE_EVIDENCE_HELPER names a copy (a
 scratch mutant, the vendored scripts/dev/release_evidence.py).
 """
@@ -2190,7 +2190,7 @@ MERGE = 'd' * 40     # the merge commit its run checked out
 TREE = '7' * 40      # the commit's tree, and the merge commit's
 GOFLAGS = hashlib.sha256(b'-count=1').hexdigest()
 PULL = {'number': 7, 'state': 'closed', 'created_at': '2026-10-25T08:30:00Z', 'merged_at': '2026-10-25T09:55:00Z',
-        'merge_commit_sha': SHA, 'head': {'sha': HEAD, 'ref': 'feature', 'repo': {'id': REPO_ID}},
+        'head': {'sha': HEAD, 'ref': 'feature', 'repo': {'id': REPO_ID}},
         'base': {'ref': 'main', 'repo': {'id': REPO_ID}}}
 PR_RUNS = 'actions/workflows/9/runs?head_sha=' + HEAD + '&per_page=100&page=1'
 PR_JOBS = 'actions/runs/50/attempts/1/jobs?per_page=100&page=1'
@@ -2216,6 +2216,33 @@ PR_EVIDENCE = dict(EVIDENCE_LINUX, source=MERGE, run_id=50, event='pull_request'
                    environment={'GOFLAGS': GOFLAGS})
 
 
+class PinnedAPIShape(unittest.TestCase):
+    """Read-only captured API projections, separate from handwritten decision vectors."""
+
+    def test_captured_merge_binding_without_obsolete_field(self):
+        fixture = json.loads((ROOT / 'tests/fixture/github-api-2026-03-10.json').read_text())
+        sample = fixture['samples']
+        self.assertEqual(fixture['api_version'], '2026-03-10')
+        sha = sample['commit']['sha']
+        pull = sample['commit-pulls'][0]
+        self.assertNotIn('merge_commit_sha', pull)
+        self.assertNotIn('merge_commit_sha', sample['reported-pull'])
+        source = {'source': sha, 'repository': fixture['repository'],
+                  'repository_id': sample['repository']['id']}
+        head_listing = 'pulls?head=Judgment-Pack:%s&state=all&per_page=100&page=' % pull['head']['ref']
+        timeline = 'issues/%d/timeline?per_page=100&page=' % pull['number']
+        data = {'git/commits/' + sha: sample['commit'],
+                'commits/%s/pulls?per_page=100' % sha: sample['commit-pulls'],
+                head_listing + '1': sample['head-pulls'], head_listing + '2': [],
+                timeline + '1': sample['timeline'], timeline + '2': []}
+        bound, commit = e.pull_request_of(FakeAPI(data), {'branch': 'main'}, source)
+        self.assertEqual((bound['number'], commit['sha']), (267, sha))
+        data[timeline + '1'] = [v for v in sample['timeline'] if v.get('event') != 'merged']
+        with self.assertRaises(e.Refusal) as caught:
+            e.pull_request_of(FakeAPI(data), {'branch': 'main'}, source)
+        self.assertEqual(caught.exception.code, 'reuse-pull-request')
+
+
 class ReuseFixtures(Gate):
     """A branch run whose Linux job took `unit` from the merged pull request's run."""
 
@@ -2228,7 +2255,7 @@ class ReuseFixtures(Gate):
             'git/commits/' + MERGE: {'sha': MERGE, 'tree': {'sha': TREE}, 'parents': [{'sha': BASE}, {'sha': HEAD}]},
             'commits/%s/pulls?per_page=100' % SHA: [PULL],
             HEAD_PULLS: [PULL], HEAD_PULLS_END: [],
-            TIMELINE: [{'event': 'committed'}, {'event': 'reviewed'}, {'event': 'labeled'}, {'event': 'merged'},
+            TIMELINE: [{'event': 'committed'}, {'event': 'reviewed'}, {'event': 'labeled'}, {'event': 'merged', 'commit_id': SHA},
                        {'event': 'head_ref_deleted'}],
             TIMELINE_END: [],
             PR_RUNS: {'total_count': 1, 'workflow_runs': [PR_RUN]},
@@ -2270,7 +2297,7 @@ class ReuseFixtures(Gate):
         self.pr_runs(own, foreign)
         self.data['actions/runs/50'] = own
         self.data['actions/runs/60'] = foreign
-        self.data[HEAD_PULLS] = [PULL, dict(PULL, number=8, state='open', merged_at=None, merge_commit_sha=None,
+        self.data[HEAD_PULLS] = [PULL, dict(PULL, number=8, state='open', merged_at=None,
                                            base=dict(PULL['base'], ref='evil'))]
         self.data['actions/runs/60/attempts/1/jobs?per_page=100&page=1'] = {
             'total_count': 1, 'jobs': [dict(PR_JOB, id=161, run_id=60, started_at='2026-10-25T09:20:05Z',
@@ -2399,7 +2426,7 @@ class PullRequestReuse(ReuseFixtures):
 
     def test_listings_are_read_to_an_empty_page(self):
         # A short first page is not the end: a base change on the next page refuses.
-        self.data[TIMELINE] = [{'event': 'committed'}] * 30
+        self.data[TIMELINE] = [{'event': 'merged', 'commit_id': SHA}] + [{'event': 'committed'}] * 30
         self.data[TIMELINE_END] = [{'event': 'automatic_base_change_succeeded'}]
         self.data['issues/7/timeline?per_page=100&page=3'] = []
         self.assertEqual(self.decide(), 'reuse-pull-request')
@@ -2430,7 +2457,7 @@ class PullRequestReuse(ReuseFixtures):
 
     def test_the_trusted_pull_request_relationship(self):
         for change in (lambda: self.data['commits/%s/pulls?per_page=100' % SHA].clear(),
-                       lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0].update(merge_commit_sha=OTHER),
+                       lambda: self.data[TIMELINE][3].update(commit_id=OTHER),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0].update(merged_at=None),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA].append(dict(PULL, number=8)),
                        lambda: self.data['commits/%s/pulls?per_page=100' % SHA][0]['base'].update(ref='release'),
@@ -2624,6 +2651,38 @@ class ReusePlan(ReuseFixtures):
         self.assertEqual((self.record['covered'], self.record['reused']), (['unit'], self.reused))
         self.assertEqual(self.record['attempt'], 1)
 
+    def test_pinned_api_shape_uses_the_merge_event_not_a_pull_field(self):
+        pull = self.data['commits/%s/pulls?per_page=100' % SHA][0]
+        self.assertNotIn('merge_commit_sha', pull)
+        self.assertEqual(self.plan(), 'reuse')
+        # Even an obsolete field cannot override the trusted timeline binding.
+        pull['merge_commit_sha'] = OTHER
+        self.assertEqual(self.plan(), 'reuse')
+
+    def test_missing_ambiguous_or_malformed_merge_events_refuse_by_name(self):
+        for events in ([], [{'event': 'merged'}], [{'event': 'merged', 'commit_id': None}],
+                       [{'event': 'merged', 'commit_id': 'invalid'}],
+                       [{'event': 'merged', 'commit_id': OTHER}],
+                       [{'event': 'merged', 'commit_id': SHA}] * 2,
+                       [{'event': 'merged', 'commit_id': SHA},
+                        {'event': 'merged', 'commit_id': OTHER}]):
+            with self.subTest(events=events):
+                self.setUp()
+                self.data[TIMELINE] = events
+                self.assertEqual(self.plan(), 'reuse-pull-request')
+                self.assertEqual(self.record['covered'], [])
+
+    def test_merge_event_on_a_later_page_and_unrelated_merged_pull(self):
+        self.data[TIMELINE] = [{'event': 'reviewed'}]
+        self.data[TIMELINE_END] = [{'event': 'merged', 'commit_id': SHA}]
+        self.data['issues/7/timeline?per_page=100&page=3'] = []
+        self.data['commits/%s/pulls?per_page=100' % SHA].append(dict(PULL, number=8))
+        self.data['issues/8/timeline?per_page=100&page=1'] = [{'event': 'merged', 'commit_id': OTHER}]
+        self.data['issues/8/timeline?per_page=100&page=2'] = []
+        self.assertEqual(self.plan(), 'reuse')
+        self.data['issues/8/timeline?per_page=100&page=1'][0]['commit_id'] = SHA
+        self.assertEqual(self.plan(), 'reuse-pull-request')
+
     def test_a_plan_never_takes_another_pull_requests_run(self):
         # Review probe P1 at the plan: fresh, and the job runs its whole list.
         self.foreign_run()
@@ -2810,9 +2869,9 @@ class ReuseCLI(unittest.TestCase):
         data = {'git/commits/' + self.sha: {'sha': self.sha, 'tree': {'sha': self.tree}, 'parents': [{'sha': self.base}]},
                 'git/commits/' + self.merge: {'sha': self.merge, 'tree': {'sha': self.tree},
                                               'parents': [{'sha': self.base}, {'sha': self.head}]},
-                HEAD_PULLS: [dict(PULL, merge_commit_sha=self.sha, head=dict(PULL['head'], sha=self.head))],
-                HEAD_PULLS_END: [], TIMELINE: [], TIMELINE_END: [],
-                'commits/%s/pulls?per_page=100' % self.sha: [dict(PULL, merge_commit_sha=self.sha,
+                HEAD_PULLS: [dict(PULL, head=dict(PULL['head'], sha=self.head))],
+                HEAD_PULLS_END: [], TIMELINE: [{'event': 'merged', 'commit_id': self.sha}], TIMELINE_END: [],
+                'commits/%s/pulls?per_page=100' % self.sha: [dict(PULL,
                                                                   head=dict(PULL['head'], sha=self.head))],
                 'actions/workflows/ci.yml': {'id': 9, 'name': 'CI', 'path': '.github/workflows/ci.yml', 'state': 'active'},
                 'actions/workflows/9/runs?head_sha=%s&per_page=100&page=1' % self.head:
