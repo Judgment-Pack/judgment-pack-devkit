@@ -751,6 +751,22 @@ for doc in templates/AGENTS.md templates/CLAUDE.md AGENTS.md CLAUDE.md; do
 done
 if grep -qF 'jpdev push' "$kit/docs/adopting.md"; then ok "docs/adopting.md mentions jpdev push"; else bad "docs/adopting.md mentions jpdev push"; fi
 
+# An adopter carries the whole shared policy, then its own rules; generation must
+# preserve both and detect a stale generated copy after the canonical source changes.
+mkdir -p "$work/agent-policy"
+cat "$kit/templates/AGENTS.md" > "$work/agent-policy/AGENTS.md"
+printf '\n## Repository rules\nKeep the local contract.\n' >> "$work/agent-policy/AGENTS.md"
+out=$("$kit/scripts/sync-agent-docs.sh" "$work/agent-policy" 2>&1) && s=0 || s=$?
+expect "adoption generates the complete shared and repository agent policy" 0 'wrote' "$out" "$s"
+if cmp -s "$work/agent-policy/AGENTS.md" "$work/agent-policy/CLAUDE.md"; then
+  ok "generated adopter instructions preserve every canonical rule"
+else
+  bad "generated adopter instructions preserve every canonical rule"
+fi
+printf '\nAn additional accepted requirement.\n' >> "$work/agent-policy/AGENTS.md"
+out=$("$kit/scripts/sync-agent-docs.sh" --check "$work/agent-policy" 2>&1) && s=0 || s=$?
+expect "adoption detects stale instructions after a canonical policy change" 1 'differs' "$out" "$s"
+
 # --- jpdev codex (a stub codex first on PATH: the real one is never called)
 mkdir -p "$work/codexbin" "$work/codexclone"
 cat > "$work/codexbin/codex" <<'STUB'
