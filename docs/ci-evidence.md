@@ -497,7 +497,7 @@ and each of these must hold, or nothing is reused:
 
 | Input | Bound by |
 | --- | --- |
-| the trusted relationship | records that survive the merge and that the pull request's code cannot write, read through the API: one pull request of this repository (not a fork, base repository this one) merged into the trusted branch with M as its merge commit; its head branch's listing (`pulls?head=owner:branch&state=all`, every page to an empty one, ten at most) shows exactly that one pull request ever, from this repository; its timeline (every page) has no base-change event of any kind (`base_ref_changed`, `automatic_base_change_succeeded`, `automatic_base_change_failed`, and any event whose name contains `base_change` or `base_ref`); the newest `pull_request` run of the same workflow is at its final head, from this repository, on its head branch, and was created after the pull request was opened. The run's own `pull_requests`, which GitHub clears once a pull request merges, must name exactly that pull request into the trusted branch when it is not empty. Anything of this that cannot be read refuses (`reuse-pull-request`) |
+| the trusted relationship | records that survive the merge and that the pull request's code cannot write, read through the API: one pull request of this repository (not a fork, base repository this one) merged into the trusted branch with exactly one timeline `merged` event whose `commit_id` equals M (the pinned API has no `merge_commit_sha` on PR objects); its head branch's listing (`pulls?head=owner:branch&state=all`, every page to an empty one, ten at most) shows exactly that one pull request ever, from this repository; its timeline (every page) has no base-change event of any kind (`base_ref_changed`, `automatic_base_change_succeeded`, `automatic_base_change_failed`, and any event whose name contains `base_change` or `base_ref`); the newest `pull_request` run of the same workflow is at its final head, from this repository, on its head branch, and was created after the pull request was opened. The run's own `pull_requests`, which GitHub clears once a pull request merges, must name exactly that pull request into the trusted branch when it is not empty. Anything of this that cannot be read refuses (`reuse-pull-request`) |
 | exact source and tree | the merge commit the pull request job checked out (S), read through the API: its parents are M's first parent and the pull request's head, and its tree is M's tree |
 | the base relationship | S was made on M's first parent: a change set tested on another base is not M's, even with the same tree (a rebase merge of several commits therefore never qualifies) |
 | workflow, configuration and dependency digests | the pull request job's input identities (the manifest, the configuration, the gate, the workflow files, every pin file) equal M's |
@@ -698,3 +698,37 @@ the fresh route's full CI run and a re-run.
 GitHub's API contracts: [workflow runs](https://docs.github.com/en/rest/actions/workflow-runs),
 [attempt jobs](https://docs.github.com/en/rest/actions/workflow-jobs),
 [artifacts](https://docs.github.com/en/rest/actions/artifacts).
+
+
+## Pinned API response audit
+
+The gate sends API version `2026-03-10`. Read-only response projections captured on
+2026-11-01 are in `tests/fixture/github-api-2026-03-10.json`, from
+`judgment-pack-agent` PR #267 and run 41149914554, and the annotated
+`judgment-pack-devkit` v0.13.0 tag. The fixture records its source identities and the
+consumed field paths. Unrelated fields and personal identities are omitted. These
+are API contract samples, not execution evidence or generated acceptance vectors.
+Handwritten decision/refusal vectors remain in `tests/release_evidence_test.py`.
+
+| API record | Fields read by the gate |
+| --- | --- |
+| Repository | `id`, `full_name`, `default_branch` |
+| Annotated tag reference/object | reference `ref`; `object.type`, `object.sha` at each peel |
+| Workflow | `id`, `path`, `name`, `state` |
+| Run listing/single run | `id`, `run_attempt`, `event`, `head_branch`, `head_sha`, `workflow_id`, `path`, `status`, `conclusion`, `created_at`, `run_started_at`, `updated_at`, `repository.id/full_name`, `head_repository.id/full_name`, `pull_requests` |
+| Nonempty run PR association | `number`, `base.ref`, `base.repo.id` |
+| Job | `id`, `name`, `run_id`, `run_attempt`, `head_sha`, `head_branch`, `workflow_name`, `status`, `conclusion`, `labels`, `runner_group_id`, `runner_group_name`, `started_at`, `completed_at` |
+| Artifact | `id`, `name`, `expired`, `size_in_bytes`, `created_at`, `digest`, `workflow_run.id/head_sha/head_branch/repository_id/head_repository_id`; ZIP bytes |
+| Git commit | `sha`, `tree.sha`, `parents[].sha` |
+| Commit-associated PR | `number`, `state`, `created_at`, `merged_at`, `head.sha/ref/repo.id`, `base.ref/repo.id` |
+| Head-branch PR listing | `number`, `head.repo.id` |
+| PR timeline | `event`; a `merged` event's `commit_id` |
+| Paged wrappers | `total_count` and `workflow_runs`, `jobs` or `artifacts`; every row's `id` for uniqueness |
+
+All listed paths were checked against the captured records. The merged run has an
+empty PR association; a separate captured run, 41223435315, checks the nonempty
+association fields.
+`merge_commit_sha` is absent on both the commit-associated PR and single-PR
+responses. Missing, unreadable, malformed or ambiguous merge events refuse with
+`reuse-pull-request`; no PR-supplied record substitutes for the timeline. The same
+complete timeline is used for the existing base-change checks.

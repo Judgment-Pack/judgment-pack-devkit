@@ -41,8 +41,8 @@ absent() {
   if grep -qE -- "$2" <<< "$3"; then bad "$1 (unexpected line matching: $2)" "$3"; else ok "$1"; fi
 }
 
-# The release evidence gate (lib/release_evidence.py): handwritten API fixtures, never live-service
-# evidence. Each refusal class of docs/ci-evidence.md, the decision record and the public command.
+# The release evidence gate (lib/release_evidence.py): handwritten decision fixtures plus
+# read-only pinned API shape projections, never evidence of a live check run. Each refusal class of docs/ci-evidence.md, the decision record and the public command.
 out=$(python3 "$kit/tests/release_evidence_test.py" 2>&1) && s=0 || s=$?
 expect "release evidence gate: exact-commit reuse and every refusal class over API fixtures" 0 'OK' "$out" "$s"
 
