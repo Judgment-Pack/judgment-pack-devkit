@@ -65,6 +65,10 @@ expect "jpdev check --changed selects the mapped checks of fixture clones" 0 'OK
 out=$(python3 "$kit/tests/check_incomplete_test.py" 2>&1) && s=0 || s=$?
 expect "check.sh incomplete-checklist status and completed-step controls" 0 'OK' "$out" "$s"
 
+# Real RSS guard and Go-wrapper entrypoints, including separate timeout process groups.
+out=$(python3 "$kit/tests/rsscap_test.py" 2>&1) && s=0 || s=$?
+expect "rsscap owns nested process groups until exit and preserves Go wrapper controls" 0 'OK' "$out" "$s"
+
 # --- the public runner, with no caps
 out=$("$kit/templates/check.sh" --manifest "$fixture" 2>/dev/null) && s=0 || s=$?
 # JPDEV_ROOT is unset: the template's own location is the kit, whose git root is this repository.
