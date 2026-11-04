@@ -309,10 +309,13 @@ Neither is a drift: each refuses even where revalidation is allowed. Then:
   leg);
 - a `release-os` profile's jobs must each report, in every runner field but `ImageVersion` (image
   name, OS, architecture, OS-release digest), what the release runner resolves for the variant, and
-  the pinned tools; between them they must agree on all of it but `ImageVersion`.
-  `ImageVersion` is recorded and compared with nothing. A difference refuses (`runtime-identity`,
-  or `identity-changed` between the jobs), and is never revalidated
-  ([the release-os mode](#the-release-os-mode)).
+  the pinned tools. `ImageVersion` is recorded and compared with nothing. Another image name, OS or
+  architecture has already refused above (`identity-unexpected`); another OS-release digest, a
+  tool that is not its pin or another tool set refuses `runtime-identity`. Neither is revalidated
+  ([the release-os mode](#the-release-os-mode)). The jobs must also agree among themselves on all
+  of it but `ImageVersion` (`identity-changed`), but that group rule is a backstop: through
+  `verify`, the per-job checks refuse a job that differs first, so `identity-changed` is not the
+  code a release normally reports for this mode.
 
 The release workflow's own `uses:` must be pinned the same way (`identity-unexpected`; read from
 `GITHUB_WORKFLOW_REF` at the commit). The decision record's `identity` holds the manifest record,
@@ -366,23 +369,27 @@ What it holds:
 - **OS release and platform.** The release job resolves the profile itself on its own runner, as
   under `release-runner`, but only its image name (`ImageOS`), `RUNNER_OS`, `RUNNER_ARCH` and the
   digest of the variant's OS-release file, not its tools, which the pins hold. Each job must report
-  exactly those values (`runtime-identity`), and the jobs of one variant and profile must agree on
-  them and on their tools (`identity-changed`). The release runner resolves every `release-os`
-  profile before any evidence is read: a release runner that reports no image name, version, OS or
-  architecture, one of another platform or image name, one whose image version is not of the
-  reported form, or one without the variant's OS-release file refuses there (`runner-identity`,
-  `runner-platform`, `identity-unexpected`, `identity-missing`). A variant with no OS-release file
-  (`windows-x64`) cannot be held to an OS release, and a `release-os` profile of it is refused
-  (`identity-config`).
+  exactly those values: another image name, OS or architecture is refused by the identity checks
+  every job passes first (`identity-unexpected`), and another OS-release digest by the comparison
+  with the release runner (`runtime-identity`). The jobs of one variant and profile must also
+  agree on them and on their tools (`identity-changed`); that group rule is a backstop, since
+  through `verify` the per-job checks refuse a job that differs first. The release runner resolves
+  every `release-os` profile before any evidence is read: a release runner that reports no image
+  name, version, OS or architecture, one of another platform or image name, one whose image
+  version is not of the reported form, or one without the variant's OS-release file refuses there
+  (`runner-identity`, `runner-platform`, `identity-unexpected`, `identity-missing`). A variant with
+  no OS-release file (`windows-x64`) cannot be held to an OS release, and a `release-os` profile of
+  it is refused (`identity-config`).
 - **ImageVersion.** Recorded in each job's evidence, held to the reported form as under the policy,
   and kept in the decision record (each job's runtime, and its group's `image_versions` and
   `release_runner`), but compared with nothing: not with the release runner, and not among the
   profile's jobs.
 
-**A difference is a refusal, not a drift.** A job whose OS-release digest or platform is not what
-the release runner resolves refuses `runtime-identity` at that job. It is never revalidated, even
-where `revalidation.allowed` is `true`, and it wins over a `release-runner` profile's drift, which
-is raised only at the end. Revalidation runs the check list `dev.json` declares on the release
+**A difference is a refusal, not a drift.** A job whose OS-release digest is not what the release
+runner resolves refuses `runtime-identity` at that job; a job of another image name, OS or
+architecture has already refused, `identity-unexpected`. Neither is revalidated, even where
+`revalidation.allowed` is `true`, and either wins over a `release-runner` profile's drift, which is
+raised only at the end. Revalidation runs the check list `dev.json` declares on the release
 runner, and it stands in for the `release-runner` jobs because their work is that list. The work
 this mode is meant for (the shards of a table, matrix legs whose `checks` are empty) is not that
 list, and no release runner runs it again. A `revalidate` decision on such a difference would
@@ -427,8 +434,8 @@ It holds:
   digest, revision, kind), the statement that it is a reported identity and not a pinned VM image,
   the release workflow's actions, and per variant and profile the `compare` mode, the `jobs` and
   the identity they reported (`runtime`, `null` where they differ); for a `release-os` profile also
-  `image_versions` (each job's) and `release_runner` (the image and platform the release runner
-  resolved for the profile, its image version included); `null` otherwise;
+  `image_versions` (each job's) and `release_runner` (what the release runner resolved for the
+  profile: image name and version, OS, architecture and OS-release digest); `null` otherwise;
 - `mode` (`publication`, `validation-only`, or `null` when refused before it was known), `event`
   (the run's `GITHUB_EVENT_NAME`), `tag_prerelease`, `dispatch` and `revalidation_allowed` (the
   configured rules);
