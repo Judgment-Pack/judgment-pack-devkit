@@ -292,7 +292,16 @@ the repository's own reviewed change:
    `windows-x64`; its `RUNNER_OS` and `RUNNER_ARCH` must be the variant's), its `platform.ImageOS`
    (the image name its runners report: `ubuntu24`, `macos15`), and at least one tool. A profile of
    the release job's platform keeps `compare: release-runner`; a leg of another OS or architecture
-   keeps `compare: pins`, and its legs must agree among themselves.
+   keeps `compare: pins`, and its legs must agree among themselves. A profile of the release job's
+   platform whose jobs cannot all land on one image, such as a sharded table during a staged image
+   roll, may instead take `compare: release-os`, as an explicit choice per profile: every tool
+   pinned, the image name, platform and OS-release digest held to what the release runner resolves
+   for the variant, and the image version recorded but never compared. It gives up the rest of the
+   image: the jobs may run on different image patch versions, with different preinstalled software
+   outside the pinned tools, so it is weaker than `release-runner`. A difference in the OS release
+   or platform refuses and is never revalidated
+   ([the release-os mode](ci-evidence.md#the-release-os-mode)). Use it only for jobs whose result,
+   given exact tools, does not depend on the image patch version.
 4. Pin every `uses:` of the CI workflows, of the local actions and reusable workflows they call, and
    of the release workflow to a full commit id (a container image to a `sha256` digest). Write each
    `uses:` as a block-style key on its own line.

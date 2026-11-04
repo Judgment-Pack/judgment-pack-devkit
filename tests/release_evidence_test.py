@@ -2182,6 +2182,339 @@ class IdentityCLI(unittest.TestCase):
                 self.assertIn('capture refused: ' + code, result.stderr)
 
 
+# --- compare "release-os" (devkit #79): the OS release and exact tools, not the image version -----
+
+OS_RELEASE = b'PRETTY_NAME="Fixture Linux 24.04.3 LTS"\nVERSION_ID="24.04"\n'
+OS_RELEASE_SHA = hashlib.sha256(OS_RELEASE).hexdigest()
+# Three image versions one hosted label served at once during a staged roll (judgment-pack-agent#332).
+ROLL = ('20261025.179.1', '20261101.186.1', '20261018.50.1')
+TABLE = {'platform': {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'ImageOS': 'ubuntu24'}, 'variant': 'linux-x64',
+         'compare': 'release-os', 'tools': {'go': ['go', 'version']},
+         'pins': {'go': 'go version go1.26.5 linux/amd64'}}
+RELEASE_RUNNER = {'ImageOS': 'ubuntu24', 'ImageVersion': ROLL[0], 'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64'}
+
+
+class ReleaseOS(Gate):
+    """decide() under the identity policy with a sharded table (table-1..3, one per image version of
+    ROLL) under compare "release-os", beside the Linux release-runner job and the macOS pins leg.
+    The release runner resolves the table's profile for real, from its environment and an
+    OS-release file of the test's own; the Linux job's profile is resolved by the fixture (self.here),
+    and both report one release runner."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = identity_config(self.config)
+        self.config['profiles']['table'] = copy.deepcopy(TABLE)
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-release-os-')
+        self.addCleanup(scratch.cleanup)
+        self.os_release = Path(scratch.name) / 'os-release'
+        self.os_release.write_bytes(OS_RELEASE)
+        variants = e.parse_identity_manifest(MANIFEST_BYTES)['variants']
+        variants['linux-x64']['os_release'] = str(self.os_release)
+        for name, target in (('identity_context', lambda config, sha: {
+                                 'record': dict(IDENTITY_RECORD), 'variants': copy.deepcopy(variants),
+                                 'actions': {'ci': [CHECKOUT, UPLOAD]}}),
+                             ('release_workflow_actions', lambda source: {
+                                 'path': '.github/workflows/release.yml', 'actions': [CHECKOUT]})):
+            patcher = patch.object(e, name, side_effect=target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        environment = patch.dict(os.environ, RELEASE_RUNNER)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.here['runner'].update(ImageVersion=ROLL[0], os_release=OS_RELEASE_SHA)
+        self.evidence(0, lambda payload: (payload.update(
+            identity=dict(IDENTITY_RECORD, variant='linux-x64', actions=[CHECKOUT, UPLOAD])),
+            payload['runtime']['runner'].update(ImageVersion=ROLL[0], os_release=OS_RELEASE_SHA)))
+        self.evidence(1, lambda payload: (payload.update(
+            identity=dict(IDENTITY_RECORD, variant='macos-arm64', actions=[CHECKOUT, UPLOAD])),
+            payload['runtime']['runner'].update(os_release='e' * 64)))
+        for index, version in enumerate(ROLL, 1):
+            key = 'table-%d' % index
+            self.config['workflows']['ci']['jobs'][key] = {
+                'name': 'table (%d)' % index, 'job_id': 'table', 'labels': ['ubuntu-latest'], 'profile': 'table',
+                'checks': ['unit']}
+            self.set_jobs(self.jobs + [dict(JOB_LINUX, id=210 + index, name='table (%d)' % index)])
+            self.set_artifacts(self.artifacts + [dict(ARTIFACT_LINUX, id=310 + index, name='ci-evidence-ci-%s-1' % key)])
+            payload = copy.deepcopy(EVIDENCE_LINUX)
+            payload.update(job=key, coverage={'unit': 'PASS'},
+                           identity=dict(IDENTITY_RECORD, variant='linux-x64', actions=[CHECKOUT, UPLOAD]))
+            payload['runtime']['runner'].update(ImageVersion=version, os_release=OS_RELEASE_SHA)
+            pack(self.data, self.artifacts[-1], payload)
+
+    def shard(self, index, change):
+        """Change table-<index>'s evidence (artifacts 2, 3 and 4 are table-1, -2 and -3)."""
+        self.evidence(index + 1, change)
+
+    def release_runner(self, **changes):
+        """The release runner reports changes, to the table's resolution and the Linux job's."""
+        os.environ.update(changes)
+        self.here['runner'].update(changes)
+
+    def test_shards_on_several_image_versions_are_reused_with_every_version_recorded(self):
+        self.assertEqual(self.decide(), 'reuse')
+        self.assertEqual(self.record['identity']['groups']['linux-x64/table'], {
+            'compare': 'release-os', 'jobs': ['ci/table-1', 'ci/table-2', 'ci/table-3'], 'runtime': None,
+            'image_versions': {'ci/table-1': ROLL[0], 'ci/table-2': ROLL[1], 'ci/table-3': ROLL[2]},
+            'release_runner': dict(RELEASE_RUNNER, os_release=OS_RELEASE_SHA)})
+        jobs = self.record['workflows']['ci']['jobs']
+        self.assertEqual([jobs['table-%d' % index]['runtime']['runner']['ImageVersion'] for index in (1, 2, 3)],
+                         list(ROLL))
+        # The other modes' groups keep their record.
+        for group in ('linux-x64/linux', 'macos-arm64/macos'):
+            self.assertEqual(set(self.record['identity']['groups'][group]), {'compare', 'jobs', 'runtime'})
+        # The release runner resolved the table's image, platform and OS release, not its tools: only
+        # the release-runner profile was resolved with its tools.
+        self.assertEqual([call.args[0]['compare'] for call in e.runtime.call_args_list], ['release-runner'])
+        # A release runner on yet another image version, all shards on one: the same; and no shard is a
+        # drift, so an allowed revalidation changes nothing.
+        self.setUp()
+        for index in (1, 2, 3):
+            self.shard(index, lambda payload: payload['runtime']['runner'].update(ImageVersion=ROLL[2]))
+        os.environ['ImageVersion'] = '20261102.190.1'
+        self.config['revalidation'] = {'allowed': True}
+        self.assertEqual(self.decide(), 'reuse')
+        group = self.record['identity']['groups']['linux-x64/table']
+        self.assertEqual((group['runtime']['runner']['ImageVersion'], group['release_runner']['ImageVersion']),
+                         (ROLL[2], '20261102.190.1'))
+
+    def test_another_os_release_refuses_and_is_never_revalidated(self):
+        other = 'd' * 64
+        for allowed in (False, True):
+            with self.subTest(revalidation=allowed):
+                self.setUp()
+                self.config['revalidation'] = {'allowed': allowed}
+                self.shard(2, lambda payload: payload['runtime']['runner'].update(os_release=other))
+                self.assertEqual(self.decide(), 'runtime-identity')
+                self.assertEqual(self.record['refusal']['detail'],
+                                 "table-2: the OS release or platform is not this runner's (compare release-os, "
+                                 "never revalidated): os_release is %r, this runner %r" % (other, OS_RELEASE_SHA))
+        # The release runner's OS release moved: the first shard refuses at once, and the Linux job's
+        # drift, which an allowed revalidation would otherwise take, does not turn the refusal.
+        self.setUp()
+        self.config['revalidation'] = {'allowed': True}
+        moved = OS_RELEASE + b'VERSION="24.04.4 LTS (Noble Numbat)"\n'
+        self.os_release.write_bytes(moved)
+        self.here['runner']['os_release'] = hashlib.sha256(moved).hexdigest()
+        self.assertEqual(self.decide(), 'runtime-identity')
+        self.assertTrue(self.record['refusal']['detail'].startswith(
+            "table-1: the OS release or platform is not this runner's"), self.record['refusal']['detail'])
+
+    def test_a_tool_that_is_not_its_pin_or_another_tool_set_refuses(self):
+        self.config['revalidation'] = {'allowed': True}
+        self.shard(3, lambda payload: payload['runtime']['tools'].update(go='go version go1.26.6 linux/amd64'))
+        self.assertEqual(self.decide(), 'runtime-identity')
+        self.assertEqual(self.record['refusal']['detail'],
+                         "table-3: go is 'go version go1.26.6 linux/amd64', pinned 'go version go1.26.5 linux/amd64'")
+        self.setUp()
+        self.shard(1, lambda payload: payload['runtime']['tools'].update(node='v24.11.0'))
+        self.assertEqual(self.decide(), 'runtime-identity')
+        self.assertEqual(self.record['refusal']['detail'], 'table-1: tool set')
+
+    def test_a_platform_that_differs_refuses(self):
+        # The release runner is not the profile's platform or image: refused before any run is read.
+        for change, refusal in (
+                ({'RUNNER_ARCH': 'ARM64'}, 'runner-platform: RUNNER_ARCH is ARM64, not X64'),
+                ({'RUNNER_OS': 'macOS'}, 'runner-platform: RUNNER_OS is macOS, not Linux'),
+                ({'ImageOS': 'ubuntu26'}, 'runner-platform: ImageOS is ubuntu26, not ubuntu24'),
+                ({'ImageVersion': 'latest'}, "identity-unexpected: ImageVersion 'latest' is not a reported image version")):
+            with self.subTest(change=change):
+                self.setUp()
+                self.release_runner(**change)
+                code = self.decide()
+                self.assertEqual('%s: %s' % (code, self.record['refusal']['detail']), refusal)
+                self.assertNotIn(RUNS, self.api.calls)
+        self.setUp()
+        self.os_release.unlink()
+        self.assertEqual(self.decide(), 'identity-missing')
+        self.assertNotIn(RUNS, self.api.calls)
+        # A shard that reports another platform or image name refuses under the identity policy.
+        for change in ({'ImageOS': 'ubuntu26'}, {'RUNNER_ARCH': 'ARM64'}, {'ImageVersion': 'latest'}):
+            with self.subTest(shard=change):
+                self.setUp()
+                self.shard(2, lambda payload: payload['runtime']['runner'].update(change))
+                self.assertEqual(self.decide(), 'identity-unexpected')
+
+    def test_the_comparison_holds_every_runner_field_but_the_image_version(self):
+        profile, recorded = copy.deepcopy(TABLE), dict(copy.deepcopy(LINUX))
+        here = {'runner': dict(LINUX['runner'], ImageVersion=ROLL[1])}
+        self.assertEqual(outcome_of(lambda: e.check_runtime(profile, recorded, here, 'table-1')), 'accepted')
+        for key, value in (('ImageOS', 'ubuntu26'), ('RUNNER_OS', 'macOS'), ('RUNNER_ARCH', 'ARM64'),
+                           ('os_release', 'd' * 64), ('ImageName', 'ubuntu-24.04'), ('os_release', None)):
+            with self.subTest(key=key, value=value):
+                other = {'runner': dict(here['runner'], **{key: value})}
+                if value is None:
+                    other['runner'].pop(key)
+                refusal = outcome_of(lambda: e.check_runtime(profile, recorded, other, 'table-1'))
+                self.assertEqual(refusal, "runtime-identity: table-1: the OS release or platform is not this runner's "
+                                          "(compare release-os, never revalidated): %s is %r, this runner %r" % (
+                                              key, recorded['runner'].get(key), value))
+
+    def test_the_group_holds_every_field_but_the_image_version(self):
+        def member(index, **runner):
+            runtime_identity = copy.deepcopy(LINUX)
+            runtime_identity['runner'].update(runner)
+            return 'ci/table-%d' % index, runtime_identity
+        mixed = [member(1, ImageVersion=ROLL[0]), member(2, ImageVersion=ROLL[1])]
+        group, changed = e.identity_group('release-os', 'linux-x64', 'table', mixed, {'ImageVersion': ROLL[2]})
+        self.assertIsNone(changed)
+        self.assertEqual(group, {'compare': 'release-os', 'jobs': ['ci/table-1', 'ci/table-2'], 'runtime': None,
+                                 'image_versions': {'ci/table-1': ROLL[0], 'ci/table-2': ROLL[1]},
+                                 'release_runner': {'ImageVersion': ROLL[2]}})
+        for change, field in (({'os_release': 'd' * 64}, 'runner.os_release'), ({'ImageOS': 'ubuntu26'}, 'runner.ImageOS'),
+                              ({'RUNNER_ARCH': 'ARM64'}, 'runner.RUNNER_ARCH')):
+            with self.subTest(field=field):
+                members = [member(1, ImageVersion=ROLL[0]), member(2, ImageVersion=ROLL[1], **change)]
+                self.assertEqual(e.identity_group('release-os', 'linux-x64', 'table', members)[1],
+                                 'the table jobs of variant linux-x64 report different identities apart from '
+                                 "ImageVersion: ['%s']" % field)
+        members = [member(1), member(2)]
+        members[1][1]['tools']['go'] = 'go version go1.26.6 linux/amd64'
+        self.assertEqual(e.identity_group('release-os', 'linux-x64', 'table', members)[1],
+                         "the table jobs of variant linux-x64 report different identities apart from ImageVersion: "
+                         "['tools.go']")
+        # "pins" holds the image version too, in the words it had; "release-runner" is compared with
+        # the release runner instead, never here.
+        self.assertEqual(e.identity_group('pins', 'linux-x64', 'table', mixed),
+                         ({'compare': 'pins', 'jobs': ['ci/table-1', 'ci/table-2'], 'runtime': None},
+                          'the table jobs of variant linux-x64 report different identities: '
+                          'ci/table-1 20261025.179.1; ci/table-2 20261101.186.1'))
+        self.assertEqual(e.identity_group('release-runner', 'linux-x64', 'table', mixed),
+                         ({'compare': 'release-runner', 'jobs': ['ci/table-1', 'ci/table-2'], 'runtime': None}, None))
+
+    def test_pins_and_release_runner_still_refuse_the_same_roll(self):
+        # "pins": the shards must report one identity between them, image version included.
+        self.config['revalidation'] = {'allowed': True}
+        self.config['profiles']['table']['compare'] = 'pins'
+        self.assertEqual(self.decide(), 'identity-changed')
+        self.assertEqual(self.record['refusal']['detail'],
+                         'the table jobs of variant linux-x64 report different identities: ci/table-1 20261025.179.1; '
+                         'ci/table-2 20261101.186.1; ci/table-3 20261018.50.1')
+        self.assertEqual(self.record['identity']['groups']['linux-x64/table'],
+                         {'compare': 'pins', 'jobs': ['ci/table-1', 'ci/table-2', 'ci/table-3'], 'runtime': None})
+        # "release-runner": each shard must be what the release runner reports; the two on other images
+        # drift, which refuses, or is revalidated where that is allowed.
+        self.setUp()
+        self.config['profiles']['table']['compare'] = 'release-runner'
+        self.assertEqual(self.decide(), 'runtime-identity')
+        self.assertEqual(self.record['refusal']['detail'], "table-2: differs from this runner in ['ImageVersion']; "
+                                                           "table-3: differs from this runner in ['ImageVersion']")
+        self.config['revalidation'] = {'allowed': True}
+        self.assertEqual(self.decide(), 'revalidate')
+        self.assertEqual(self.record['revalidation']['jobs'], ['test-linux', 'table-1', 'table-2', 'table-3'])
+
+    def test_a_revalidation_takes_the_shards_evidence(self):
+        # The release runner drew a newer image than main CI: the release-runner job drifts and is run
+        # again; the shards hold the OS release and pins, so their evidence is taken, as a pins leg's.
+        self.config['revalidation'] = {'allowed': True}
+        self.release_runner(ImageVersion='20261102.190.1')
+        self.assertEqual(self.decide(), 'revalidate')
+        self.assertEqual(self.record['revalidation']['jobs'], ['test-linux'])
+        self.assertEqual(self.record['revalidation']['reason'], "test-linux: differs from this runner in ['ImageVersion']")
+        self.assertEqual(self.record['identity']['groups']['linux-x64/table']['release_runner']['ImageVersion'],
+                         '20261102.190.1')
+
+
+class ReleaseOSConfiguration(unittest.TestCase):
+    def config(self, **table):
+        config = identity_config(CONFIG)
+        config['profiles']['table'] = dict(copy.deepcopy(TABLE), **table)
+        return config
+
+    def test_release_os_needs_the_identity_policy_and_every_tool_pinned(self):
+        self.assertEqual(outcome_of(lambda: e.check_config(self.config())), 'accepted')
+        # No identity policy, no variant: no OS release to compare.
+        plain = copy.deepcopy(CONFIG)
+        plain['profiles']['table'] = {key: value for key, value in TABLE.items() if key != 'variant'}
+        self.assertEqual(outcome_of(lambda: e.check_config(plain)),
+                         'config-invalid: config.profiles.table.compare: compare "release-os" needs config.identity')
+        for name, config in (('another tool', self.config(tools={'go': ['go', 'version'], 'node': ['node', '--version']})),
+                             ('no pins', self.config(pins={}))):
+            with self.subTest(case=name):
+                self.assertEqual(outcome_of(lambda: e.check_config(config)),
+                                 'config-invalid: config.profiles.table.pins: compare "release-os" needs a pin for '
+                                 'every tool, and a tool')
+        config = self.config()
+        config['profiles']['table'].pop('pins')
+        self.assertTrue(outcome_of(lambda: e.check_config(config)).startswith('config-invalid: config.profiles.table.pins: '))
+        # The other modes keep their rules and words.
+        config = self.config()
+        config['profiles']['macos']['tools']['cc'] = ['cc', '--version']
+        self.assertEqual(outcome_of(lambda: e.check_config(config)),
+                         'config-invalid: config.profiles.macos.pins: compare "pins" needs a pin for every tool, and a tool')
+        config = self.config()
+        config['profiles']['linux'].pop('pins')
+        self.assertEqual(outcome_of(lambda: e.check_config(config)), 'accepted')
+        self.assertEqual(outcome_of(lambda: e.check_config(self.config(compare='release-image'))),
+                         "config-invalid: config.profiles.table.compare: one of ('release-runner', 'pins', 'release-os') "
+                         "is required")
+
+    def test_a_variant_without_an_os_release_file_refuses(self):
+        scratch = tempfile.TemporaryDirectory(prefix='release-evidence-release-os-')
+        self.addCleanup(scratch.cleanup)
+        sha = git_fixture(Path(scratch.name), {
+            '.github/runner-identity.json': MANIFEST_BYTES,
+            '.github/workflows/ci.yml': 'name: CI\non: push\njobs:\n  test:\n    steps:\n      - uses: %s\n' % CHECKOUT})
+        cwd = os.getcwd()
+        os.chdir(scratch.name)
+        self.addCleanup(os.chdir, cwd)
+        windows = {'platform': {'RUNNER_OS': 'Windows', 'RUNNER_ARCH': 'X64', 'ImageOS': 'win25'}, 'variant': 'windows-x64',
+                   'compare': 'pins', 'tools': {'go': ['go', 'version']}, 'pins': {'go': 'go version go1.26.5 windows/amd64'}}
+        config = self.config()
+        config['profiles']['windows'] = windows
+        self.assertEqual(outcome_of(lambda: e.check_config(config)), 'accepted')
+        self.assertEqual(outcome_of(lambda: e.identity_context(config, sha)), 'accepted')
+        windows['compare'] = 'release-os'
+        self.assertEqual(outcome_of(lambda: e.check_config(config)), 'accepted')
+        self.assertEqual(outcome_of(lambda: e.identity_context(config, sha)),
+                         'identity-config: windows: compare "release-os" needs an OS-release file, and the variant '
+                         'windows-x64 has none')
+
+
+class ReleaseOSCLI(unittest.TestCase):
+    """capture and verify under compare "release-os", as the workflows run them: IdentityCLI's
+    fixture repository, its profile changed in a second commit."""
+
+    capture, verify = IdentityCLI.capture, IdentityCLI.verify
+
+    def setUp(self):
+        IdentityCLI.setUp(self)
+        path = self.root / '.github/ci-evidence.json'
+        config = json.loads(path.read_text())
+        config['profiles']['kit'].update(compare='release-os', tools={'tool': [sys.executable, '-c', 'print("tool 1.0")']},
+                                         pins={'tool': 'tool 1.0'})
+        path.write_text(json.dumps(config, indent=2) + '\n')
+        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qam',
+                        'release-os'], cwd=self.root, env=self.env, check=True, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL)
+        self.sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.root, text=True,
+                                           stdin=subprocess.DEVNULL).strip()
+        self.env.update(GITHUB_SHA=self.sha, GITHUB_WORKFLOW_SHA=self.sha)
+
+    def test_evidence_of_one_image_version_is_taken_on_another(self):
+        result, output = self.capture(ImageVersion=ROLL[2])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        captured = json.loads(output.read_text())
+        self.assertEqual(captured['runtime'], {
+            'runner': {'ImageOS': 'ubuntu24', 'ImageVersion': ROLL[2], 'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64',
+                       'os_release': self.os_release},
+            'tools': {'tool': 'tool 1.0'}})
+        result, record = self.verify(captured, ImageVersion=ROLL[1])
+        self.assertEqual((result.returncode, record['decision']), (0, 'reuse'), result.stderr)
+        group = record['identity']['groups']['linux-x64/kit']
+        self.assertEqual((group['compare'], group['image_versions'], group['release_runner']['ImageVersion']),
+                         ('release-os', {'ci/test': ROLL[2]}, ROLL[1]))
+        # Evidence of another OS release refuses.
+        runner = dict(captured['runtime']['runner'], os_release='d' * 64)
+        result, record = self.verify(dict(captured, runtime=dict(captured['runtime'], runner=runner)), ImageVersion=ROLL[1])
+        self.assertEqual((result.returncode, record['decision'], (record['refusal'] or {}).get('code')),
+                         (1, 'refuse', 'runtime-identity'))
+        # A release runner of another image name refuses before any evidence is read.
+        result, record = self.verify(captured, ImageOS='ubuntu26')
+        self.assertEqual((result.returncode, (record['refusal'] or {}).get('code'), record['workflows']),
+                         (1, 'runner-platform', {}))
+
+
 # --- pull-request-to-branch reuse (devkit #60): tree equality alone never qualifies a result ------
 
 BASE = 'e' * 40      # the branch commit the pull request was tested on, and the commit's first parent
