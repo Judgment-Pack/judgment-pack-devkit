@@ -51,7 +51,10 @@
     "linux": {
       "$comment": [
         "compare release-runner: the release job, on the same platform, resolves the image and the tools itself;",
-        "a CI image or tool that differs from what it resolves refuses. The release job must run on this platform."
+        "a CI image or tool that differs from what it resolves refuses. The release job must run on this platform.",
+        "compare release-os (under identity only) is a weaker, explicit choice for jobs that cannot all land on one",
+        "image: every tool pinned, the image name, platform and OS release held to what the release job resolves,",
+        "the image version recorded and never compared (docs/ci-evidence.md#the-release-os-mode)."
       ],
       "platform": {
         "RUNNER_OS": "Linux",

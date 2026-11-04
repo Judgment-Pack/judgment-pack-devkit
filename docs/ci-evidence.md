@@ -129,8 +129,8 @@ naming it); `"$comment"` is allowed and ignored in any object whose members are 
 | `profiles.<name>.platform` | `RUNNER_OS`, `RUNNER_ARCH`, optionally `ImageOS`: what the job's runner must report; under `identity`, `ImageOS` is required |
 | `profiles.<name>.variant` | under `identity` only, and required there: the manifest variant (`linux-x64`, `macos-arm64`...) whose OS and architecture are the profile's platform |
 | `profiles.<name>.tools` | tool name to the command that prints its identity (`["go", "version"]`); each output is recorded and must not be empty |
-| `profiles.<name>.compare` | `release-runner`: the release job resolves the same profile on its own runner, and the evidence must match it exactly (image, version, OS release, every tool); for a leg on the release job's platform. `pins`: the recorded tools must equal `pins` exactly; for a leg the release job cannot resolve itself (another OS or architecture) |
-| `profiles.<name>.pins` | tool name to its exact expected output: required for every tool under `pins` (which needs at least one tool), optional under `release-runner`, where it pins a toolchain version on top |
+| `profiles.<name>.compare` | `release-runner`: the release job resolves the same profile on its own runner, and the evidence must match it exactly (image, version, OS release, every tool); for a leg on the release job's platform. `pins`: the recorded tools must equal `pins` exactly; for a leg the release job cannot resolve itself (another OS or architecture). `release-os`, under `identity` only: the recorded tools must equal `pins` exactly, and the image name, OS, architecture and OS-release digest must be what the release job resolves for the profile's variant on its own runner; the image version is recorded and never compared. For a leg on the release job's platform whose result does not depend on the image patch version; weaker than `release-runner`, and an explicit choice ([the release-os mode](#the-release-os-mode)) |
+| `profiles.<name>.pins` | tool name to its exact expected output: required for every tool under `pins` and `release-os` (each needs at least one tool), optional under `release-runner`, where it pins a toolchain version on top |
 | `workflows.<key>.path`, `.name` | the workflow file under `.github/workflows/` and its `name:` |
 | `workflows.<key>.events` | `push`, and `workflow_dispatch` if the fresh route dispatches it |
 | `workflows.<key>.skipped_jobs` | optional: display names of jobs that must be present and skipped on the trusted branch |
@@ -217,7 +217,9 @@ that read another checkout refuses (`input-identity`). The rest of what a run de
   `pins`, the recorded tool output must equal the pin, the platform must match, and `ImageOS` when
   pinned; the image version is recorded but not compared with the release runner (under the
   [runner identity](#runner-identity) policy, the legs of one variant and profile must agree on
-  it).
+  it). Under `release-os`, the recorded tools must equal the pins, and the image name, platform and
+  OS-release digest must be what the release runner resolves for the variant; the image version is
+  recorded and compared with nothing ([the release-os mode](#the-release-os-mode)).
 - **Dependency and integration pins.** A pin file in `inputs` (a lock file, a companion version
   file) is bound by the commit. An input fetched at run time without a pin ("latest") is not
   reproducible and cannot be reused: pin it, or keep that check fresh at release.
@@ -304,7 +306,13 @@ Neither is a drift: each refuses even where revalidation is allowed. Then:
 - a `pins` profile's jobs (a leg the release runner cannot resolve, such as macOS) must have
   reported one identity between them, image version and OS-release digest included:
   `identity-changed` otherwise, which is never revalidated (the release runner cannot run that
-  leg).
+  leg);
+- a `release-os` profile's jobs must each report, in every runner field but `ImageVersion` (image
+  name, OS, architecture, OS-release digest), what the release runner resolves for the variant, and
+  the pinned tools; between them they must agree on all of it but `ImageVersion`.
+  `ImageVersion` is recorded and compared with nothing. A difference refuses (`runtime-identity`,
+  or `identity-changed` between the jobs), and is never revalidated
+  ([the release-os mode](#the-release-os-mode)).
 
 The release workflow's own `uses:` must be pinned the same way (`identity-unexpected`; read from
 `GITHUB_WORKFLOW_REF` at the commit). The decision record's `identity` holds the manifest record,
@@ -318,10 +326,15 @@ actions, and per variant and profile the jobs and the identity they reported.
    evidence. The identity changed, so the evidence is not reused: the release refuses
    (`runtime-identity`), or decides `revalidate` where the repository allows it and runs its check
    list strictly on the release runner. `pins` legs are not compared with the release runner.
+   `release-os` jobs are not compared on the image version: they stand where the roll left their
+   OS release and pinned tools as they were, and refuse (`runtime-identity`, not revalidated)
+   where it changed the OS-release digest.
 2. *During the CI run*: two jobs of one variant and profile ran on different images. Under
    `release-runner` at least one differs from the release runner: the same as 1. Under `pins`:
-   `identity-changed`. The fresh route is to re-run all jobs of the CI run at the commit; no older
-   run is searched for, and no version is normalized to another.
+   `identity-changed`. Under `release-os`: the evidence stands where the jobs report the release
+   runner's OS release and platform and the pinned tools; the versions are recorded as they are.
+   The fresh route is to re-run all jobs of the CI run at the commit; no older run is searched for,
+   and no version is normalized to another.
 3. *The label moves to another OS release* (`ubuntu-latest` from `ubuntu24` to `ubuntu26`):
    capture refuses on the next main run (`runner-platform`), and a release whose runner reports
    the new name refuses (`runner-platform`), with no revalidation. Moving the profile's `ImageOS`
@@ -335,6 +348,67 @@ the evidence and its consumer report one identity, so a security update costs a 
 held image. The route that pins a complete VM image is a GitHub larger runner with a custom image
 version, which the [assessment](ci-release-environment-assessment.md) keeps as the direction if the
 organization's plan changes; this policy does not claim that guarantee.
+
+## The release-os mode
+
+GitHub rolls a hosted image out in stages, and while it does, one label is served by several image
+versions at once. A profile with many parallel jobs, such as a sharded mutation table, then almost
+never lands on one image. `release-runner` needs every job to report the release runner's image,
+and `pins` under the identity policy needs the jobs to report one image between them, so neither
+can pass, and a re-run at the same commit draws the images again. `"compare": "release-os"` is for
+evidence jobs whose result does not depend on the image patch version, given exact tools. It needs
+the [runner identity](#runner-identity) policy (`config-invalid` without `identity`).
+
+What it holds:
+
+- **Tools.** Every tool of the profile has a pin (`config-invalid` otherwise), and each job's
+  recorded tool output equals its pin exactly (`runtime-identity` otherwise), as under `pins`.
+- **OS release and platform.** The release job resolves the profile itself on its own runner, as
+  under `release-runner`, but only its image name (`ImageOS`), `RUNNER_OS`, `RUNNER_ARCH` and the
+  digest of the variant's OS-release file, not its tools, which the pins hold. Each job must report
+  exactly those values (`runtime-identity`), and the jobs of one variant and profile must agree on
+  them and on their tools (`identity-changed`). The release runner resolves every `release-os`
+  profile before any evidence is read: a release runner that reports no image name, version, OS or
+  architecture, one of another platform or image name, one whose image version is not of the
+  reported form, or one without the variant's OS-release file refuses there (`runner-identity`,
+  `runner-platform`, `identity-unexpected`, `identity-missing`). A variant with no OS-release file
+  (`windows-x64`) cannot be held to an OS release, and a `release-os` profile of it is refused
+  (`identity-config`).
+- **ImageVersion.** Recorded in each job's evidence, held to the reported form as under the policy,
+  and kept in the decision record (each job's runtime, and its group's `image_versions` and
+  `release_runner`), but compared with nothing: not with the release runner, and not among the
+  profile's jobs.
+
+**A difference is a refusal, not a drift.** A job whose OS-release digest or platform is not what
+the release runner resolves refuses `runtime-identity` at that job. It is never revalidated, even
+where `revalidation.allowed` is `true`, and it wins over a `release-runner` profile's drift, which
+is raised only at the end. Revalidation runs the check list `dev.json` declares on the release
+runner, and it stands in for the `release-runner` jobs because their work is that list. The work
+this mode is meant for (the shards of a table, matrix legs whose `checks` are empty) is not that
+list, and no release runner runs it again. A `revalidate` decision on such a difference would
+publish with that work covered by nothing, so the route is the [fresh route](#the-fresh-route), or
+a new release once the label serves one OS release again. This is how `release-runner` already
+treats what revalidation cannot cover: a pin that does not match, or a runtime record of another
+shape or platform, refuses and is not revalidated. When a `release-runner` profile's drift alone
+decides `revalidate`, a `release-os` job's evidence is taken as a `pins` leg's is: it has passed
+every check, its OS release and pins included, and it is not one of `revalidation.jobs`.
+
+**What it gives up.** It is weaker than `release-runner`, and an adopter's explicit choice, per
+profile:
+
+- the jobs may run on different image patch versions of one OS release, with different
+  preinstalled software outside the pinned tools (a system package, a library, a browser, a
+  runtime the profile does not name);
+- only the tools the profile names are bound, and only to their pins; everything else on the image
+  may differ between the jobs, and from the release runner;
+- the release runner does not run the profile's tools, so nothing shows that it could reproduce
+  the jobs.
+
+Choose it only for jobs whose result, given exact tools, does not depend on what else the image
+holds, and pin every tool the result does depend on. Keep `release-runner` for jobs whose work the
+release would revalidate, and `pins` for legs the release runner cannot resolve.
+[Pull-request-to-branch reuse](#pull-request-to-branch-reuse) is unchanged under every mode: a pull
+request job's runtime record, image version included, must equal the branch job's.
 
 ## The decision record
 
@@ -351,8 +425,10 @@ It holds:
   runner); `null` otherwise;
 - `identity`: under the [runner identity](#runner-identity) policy, the manifest record (path,
   digest, revision, kind), the statement that it is a reported identity and not a pinned VM image,
-  the release workflow's actions, and per variant and profile the jobs and the identity they
-  reported; `null` otherwise;
+  the release workflow's actions, and per variant and profile the `compare` mode, the `jobs` and
+  the identity they reported (`runtime`, `null` where they differ); for a `release-os` profile also
+  `image_versions` (each job's) and `release_runner` (the image and platform the release runner
+  resolved for the profile, its image version included); `null` otherwise;
 - `mode` (`publication`, `validation-only`, or `null` when refused before it was known), `event`
   (the run's `GITHUB_EVENT_NAME`), `tag_prerelease`, `dispatch` and `revalidation_allowed` (the
   configured rules);
@@ -451,21 +527,24 @@ artifacts, inputs, coverage, the attempt and selection read again, every workflo
 selection and the tag read at the end), and whose evidence differs only in a `release-runner`
 profile's recorded runner image or tool identity from what the release runner resolves; the
 runtime identity is each job's last check, and that difference is raised after the final reads,
-so any other refusal wins. It never admits a pin that does not match (under `pins`, or a
-`release-runner` profile's own pin, in the evidence or on the release runner), a runtime record of
-another shape or platform, another refusal code, or a validation-only dispatch run (each refuses
-as before), and it is off unless the configuration says `true`. The decision artifact records the
-drift: `revalidation.reason` names each job and the keys that differ, `revalidation.differences`
-holds each of those keys' recorded value and the release runner's, `revalidation.jobs` lists the
-jobs whose evidence is bound to the release runner, and `refusal` is `null`. The evidence of those
-jobs is not taken. The fresh run is the check list `dev.json` declares, its setup steps and every
-check, run strictly (`scripts/dev/check.sh --setup --strict`, then `--all --strict`: a step
-skipped for an empty `requires_env` fails, `optional: true` or not), on a release runner, and a
-publishing job proceeds only on that run's success. Work a CI job does outside the check list (a
-step of its own, a matrix leg whose `checks` are empty) is not covered by the fresh run: a
-repository whose evidence jobs do such work either runs it in the release workflow and names it in
-`fresh_at_release`, or does not opt in. A `pins` leg (another OS or architecture) is not run
-again; its evidence has passed every check, its pins included.
+so any other refusal wins. It never admits a pin that does not match (under `pins` or `release-os`,
+or a `release-runner` profile's own pin, in the evidence or on the release runner), a runtime
+record of another shape or platform, a `release-os` job whose OS release or platform is not the
+release runner's ([the release-os mode](#the-release-os-mode)), another refusal code, or a
+validation-only dispatch run (each refuses as before), and it is off unless the configuration says
+`true`. The decision artifact records the drift: `revalidation.reason` names each job and the keys
+that differ, `revalidation.differences` holds each of those keys' recorded value and the release
+runner's, `revalidation.jobs` lists the jobs whose evidence is bound to the release runner, and
+`refusal` is `null`. The evidence of those jobs is not taken. The fresh run is the check list
+`dev.json` declares, its setup steps and every check, run strictly
+(`scripts/dev/check.sh --setup --strict`, then `--all --strict`: a step skipped for an empty
+`requires_env` fails, `optional: true` or not), on a release runner, and a publishing job proceeds
+only on that run's success. Work a CI job does outside the check list (a step of its own, a matrix
+leg whose `checks` are empty) is not covered by the fresh run: a repository whose evidence jobs do
+such work either runs it in the release workflow and names it in `fresh_at_release`, or does not
+opt in. A `pins` leg (another OS or architecture) is not run again; its evidence has passed every
+check, its pins included. Neither is a `release-os` job: its evidence has passed every check, its
+OS release and pins included, and is taken with the work it did, the check list's or not.
 
 ## Pull-request-to-branch reuse
 
